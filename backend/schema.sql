@@ -599,8 +599,12 @@ RETURNS vector AS $$
 	    PERFORM sync_embedding_dimension_config();
 	    expected_dim := embedding_dimension();
 
-	    -- Generate hash for caching
-	    v_content_hash := encode(sha256(text_content::bytea), 'hex');
+	    -- Generate hash for caching.
+	    -- Use convert_to(...,'UTF8'), NOT ::bytea: casting text to bytea parses
+	    -- backslash escape sequences, so any content with a '\' that isn't a valid
+	    -- bytea escape throws 'invalid input syntax for type bytea' (e.g. code,
+	    -- regexes, LaTeX, Windows paths). convert_to takes the literal UTF-8 bytes.
+	    v_content_hash := encode(sha256(convert_to(text_content, 'UTF8')), 'hex');
 
     -- Check cache first
     SELECT ec.embedding INTO cached_embedding
