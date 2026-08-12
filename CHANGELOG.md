@@ -5,6 +5,30 @@ All notable changes to Sill are recorded here. Format loosely follows
 
 ## Unreleased
 
+### Added
+
+- **The recall hook's tunables are reachable without editing it**
+  (`SILL_RECALL_QUIET`, `SILL_RECALL_MAX_MEMORIES`,
+  `SILL_RECALL_MAX_CONVERSATIONS`, `SILL_RECALL_MIN_QUERY_LENGTH`,
+  `SILL_RECALL_MIN_SIMILARITY`). All five were hardcoded constants, so an
+  operator whose recall was technically working and practically noise had
+  no move except editing a tracked file that then fights every `git
+  pull`. Defaults are unchanged. That state is normal early rather than
+  exceptional — a young store answers every query out of whatever it
+  happens to contain, so the first weeks of any install produce
+  confident, irrelevant hits.
+
+  `SILL_RECALL_QUIET` is the one worth knowing about: the hook emits two
+  independent payloads, a `systemMessage` the operator reads and an
+  `additionalContext` the model reads. Quiet silences the former and
+  leaves the latter untouched, so an operator who finds the on-screen
+  list distracting does not have to weaken recall to stop seeing it. The
+  `[TIME]` header always survives — without one visible line, a quiet
+  install and a dead store look identical, which is the same
+  invisible-failure shape the restart policy exists to prevent. Pinned by
+  `backend/tests/test_recall_noise_controls.py`, including a test that
+  fails if `QUIET_TUI` ever reaches `format_results()`.
+
 ### Fixed
 
 - **The stack did not come back after an engine restart, and nothing said

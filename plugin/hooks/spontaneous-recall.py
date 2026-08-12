@@ -22,11 +22,42 @@ from pathlib import Path
 
 _SILL_LOG_DIR = Path(os.environ.get("SILL_LOG_DIR", "/tmp"))
 LOG_FILE = _SILL_LOG_DIR / "spontaneous-recall.log"
-MAX_MEMORIES = 5
-MAX_CONVERSATIONS = 2
-MIN_QUERY_LENGTH = 20  # Don't query for very short messages
-FAST_MIN_SIMILARITY = 0.25
+def _env_int(name: str, default: int) -> int:
+    """Read an int tunable from the environment, ignoring unusable values.
+
+    A bad value must not take recall down: this hook runs on every prompt, and
+    a traceback here costs the operator their whole turn. Fall back silently.
+    """
+    try:
+        return int(os.environ.get(name, "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# All five were hardcoded. They are the only levers an operator has when
+# recall is technically working and practically noise — which is the normal
+# early state, since a young store answers every query out of whatever it
+# happens to contain. Defaults are unchanged.
+MAX_MEMORIES = _env_int("SILL_RECALL_MAX_MEMORIES", 5)
+MAX_CONVERSATIONS = _env_int("SILL_RECALL_MAX_CONVERSATIONS", 2)
+MIN_QUERY_LENGTH = _env_int("SILL_RECALL_MIN_QUERY_LENGTH", 20)
+FAST_MIN_SIMILARITY = _env_float("SILL_RECALL_MIN_SIMILARITY", 0.25)
 HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not cosine similarity
+
+# Suppress the recalled-memory list from the TUI systemMessage without
+# touching what reaches the model. The two are separate payloads (see the
+# output block at the end of this file), so an operator who finds the display
+# distracting does not have to weaken recall itself to stop seeing it. The
+# [TIME] header is kept — it is one line and it is the only visible evidence
+# that the hook ran at all.
+QUIET_TUI = os.environ.get("SILL_RECALL_QUIET", "").strip().lower() in ("1", "true", "yes")
 MIN_TOPICAL_KEYWORDS = 3  # Lever 1: skip process-only messages
 OPERATIONAL_TERMS = {
     "cli",
@@ -756,10 +787,10 @@ if memories or conversations or time_header:
 
     # Build detailed summary for TUI
     tui_lines = [time_header] if time_header else []
-    if memories or conversations:
+    if (memories or conversations) and not QUIET_TUI:
         tui_lines.append("[sill] Recalled:")
 
-    if memories:
+    if memories and not QUIET_TUI:
         for mem in memories:
             # First sentence as summary (split on . ! ? or newline)
             content = mem.get('content', '')
@@ -795,7 +826,7 @@ if memories or conversations or time_header:
             age_str = f", {age}" if age else ""
             tui_lines.append(f"  {mtype} ({sim}{age_str}) {first_sent}")
 
-    if conversations:
+    if conversations and not QUIET_TUI:
         for conv in conversations:
             snippet = conv.get('content', '')[:80].replace('\n', ' ')
             date = conv.get('date', '?')
