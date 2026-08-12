@@ -2,6 +2,12 @@ services:
   db:
     build: .
     container_name: ${SILL_DB_CONTAINER:-sill_db}
+    # `unless-stopped`, not `always`: come back after a reboot, an engine
+    # restart, or a crash, but stay down if the operator ran `compose stop`.
+    # Without this the whole store is one OrbStack/Docker Desktop restart away
+    # from being silently absent — spontaneous-recall degrades to a bare [TIME]
+    # header, which is indistinguishable from "nothing relevant was found".
+    restart: ${SILL_RESTART_POLICY:-unless-stopped}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sill}
       POSTGRES_USER: ${POSTGRES_USER:-sill}
@@ -37,6 +43,7 @@ services:
     # native alternative and the tradeoff it carries.
     image: ${EMBEDDING_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.8}
     container_name: ${SILL_EMBEDDINGS_CONTAINER:-sill_embeddings}
+    restart: ${SILL_RESTART_POLICY:-unless-stopped}
     platform: ${EMBEDDING_PLATFORM:-linux/amd64}
     command:
       - --model-id
@@ -66,6 +73,7 @@ services:
   rabbitmq:
     image: rabbitmq:4-management
     container_name: ${SILL_RABBITMQ_CONTAINER:-sill_rabbitmq}
+    restart: ${SILL_RESTART_POLICY:-unless-stopped}
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-sill}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-sill_password}
@@ -89,6 +97,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     container_name: ${SILL_MAINTENANCE_WORKER_CONTAINER:-sill_maintenance_worker}
+    restart: ${SILL_RESTART_POLICY:-unless-stopped}
     command: ["sill-worker", "--mode", "maintenance"]
     depends_on:
       db:

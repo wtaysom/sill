@@ -3,6 +3,28 @@
 All notable changes to Sill are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+
+- **The stack did not come back after an engine restart, and nothing said
+  so.** None of the four services declared a `restart:` policy, so Docker
+  defaulted to `no`. The failure that produces is invisible rather than
+  loud: `spontaneous-recall.py` degrades gracefully when the store is
+  unreachable — it still emits its `[TIME]` header and returns no
+  memories — which is byte-for-byte what a healthy store looks like when
+  a query genuinely matches nothing. Observed on a live install
+  (2026-08-12): all four containers exited cleanly during an OrbStack
+  restart and stayed down over an hour across two active work projects,
+  with `docker inspect` reporting `RestartPolicy: no` and the host
+  showing 29 days of uptime. All four now default to
+  `${SILL_RESTART_POLICY:-unless-stopped}` — surviving reboots, engine
+  restarts and crashes, while still honoring a deliberate `docker compose
+  stop`, which matters in a project that asks operators to name a
+  shutdown condition in their charter. Pinned by
+  `backend/tests/test_restart_policy.py`, including a guard that fails if
+  a service is added without a policy.
+
 ## v0.2.1 — 2026-08-06
 
 ### Upgrading from v0.2.0
