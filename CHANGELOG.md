@@ -31,6 +31,28 @@ All notable changes to Sill are recorded here. Format loosely follows
 
 ### Fixed
 
+- **A dead store was indistinguishable from an empty result.** When a
+  recall query errored, the hook logged `Query failed` to its log file and
+  returned no memories — which the operator saw as a bare `[TIME]` header,
+  byte-identical to a healthy store matching nothing. Measured cost of
+  that ambiguity on one install: **eleven days, 69 prompts, five
+  projects, zero successful recalls, nobody noticed.** The degrade path
+  itself was correct — recall should not take the turn down — but
+  degrading *quietly* converts an outage into an invisible one. The hook
+  now raises `STORE_UNREACHABLE` on a failed query and says so in the
+  TUI, naming the log file. Deliberately **not** gated on
+  `SILL_RECALL_QUIET`: quiet is a preference about results, and a fault
+  is not a result — gating it there would blind precisely the operators
+  who had opted into silence. Pinned by
+  `backend/tests/test_store_unreachable_is_visible.py`, whose
+  load-bearing test asserts the warning never becomes quiet-gated.
+
+  Note the companion condition, which no code change covers:
+  `restart: unless-stopped` only acts inside a *running* container
+  engine. If the engine itself does not start at login, there is nothing
+  for the policy to restart into — which is what actually happened here.
+  Operators on OrbStack: `orb config set app.start_at_login true`.
+
 - **The stack did not come back after an engine restart, and nothing said
   so.** None of the four services declared a `restart:` policy, so Docker
   defaulted to `no`. The failure that produces is invisible rather than

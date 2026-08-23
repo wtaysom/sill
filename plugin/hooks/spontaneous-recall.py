@@ -58,6 +58,14 @@ HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not cosin
 # [TIME] header is kept — it is one line and it is the only visible evidence
 # that the hook ran at all.
 QUIET_TUI = os.environ.get("SILL_RECALL_QUIET", "").strip().lower() in ("1", "true", "yes")
+
+# Set when a store query errors rather than legitimately returning nothing.
+# Those two states produced identical visible output — a bare [TIME] header —
+# which is how a dead store went unnoticed for eleven days across 69 prompts:
+# the hook logged "Query failed" to /tmp and showed the operator silence.
+# Surfaced in the TUI and deliberately NOT suppressed by SILL_RECALL_QUIET,
+# because quiet is a preference about results, not about faults.
+STORE_UNREACHABLE = False
 MIN_TOPICAL_KEYWORDS = 3  # Lever 1: skip process-only messages
 OPERATIONAL_TERMS = {
     "cli",
@@ -205,6 +213,8 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
         )
 
         if result.returncode != 0:
+            global STORE_UNREACHABLE
+            STORE_UNREACHABLE = True
             log(f"Query failed: {result.stderr}")
             return []
 
@@ -787,6 +797,14 @@ if memories or conversations or time_header:
 
     # Build detailed summary for TUI
     tui_lines = [time_header] if time_header else []
+    if STORE_UNREACHABLE:
+        # Not gated on QUIET_TUI: an operator silencing the recall list has
+        # not asked to be kept ignorant of the store being down.
+        tui_lines.append(
+            "[sill] STORE UNREACHABLE — recall returned nothing because the "
+            "query failed, not because nothing matched. See "
+            f"{LOG_FILE} for the error."
+        )
     if (memories or conversations) and not QUIET_TUI:
         tui_lines.append("[sill] Recalled:")
 
