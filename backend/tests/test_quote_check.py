@@ -371,3 +371,45 @@ def test_quote_checks_later_list_paragraph_but_skips_code_indented_inside_item(t
     result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
     assert result.status == "checked"
     assert findings(result) == [(3, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("abbreviation", ["*e.g.*", "i.e."])
+def test_quote_does_not_borrow_timestamp_across_sentence_final_abbreviation(tmp_path, abbreviation):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    note = (
+        f'At 00:00:10 the slide shows the abbreviation {abbreviation} '
+        'The speaker then says “the sky is clear” [Talk](src).'
+    )
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+def test_quote_thematic_break_does_not_create_a_list_item_for_indented_code(tmp_path):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = '* * *\n\n    “The sky is cloudy” [Talk](src)\n'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+def test_quote_skips_fenced_list_paragraph_and_resumes_after_longer_closing_fence(tmp_path):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = (
+        '10. Context.\n\n'
+        '    ```text\n'
+        '    “The sky is cloudy” [Talk](src)\n'
+        '    ````\n\n'
+        '    “The sky is stormy” [Talk](src)\n'
+    )
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(7, "text_mismatch", "new")]
+
+
+def test_quote_keeps_timestamp_when_abbreviation_introduces_quote_directly(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    note = 'At 00:00:10 the speaker gives an example, e.g. “the sky is clear” [Talk](src).'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]

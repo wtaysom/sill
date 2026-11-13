@@ -43,6 +43,7 @@ REFERENCE_USE_RE = re.compile(r"(?:!|(?<![\\!\w]))\[([^\[\]\n]+)\](?:\[([^\[\]\n
 REFERENCE_LABEL_RE = re.compile(r"^ {0,3}\[([^\]\n]+)\]:")
 BLOCKQUOTE_RE = re.compile(r"^ {0,3}(?:> ?)+")
 LIST_RE = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
+THEMATIC_RE = re.compile(r"^ {0,3}([*_-])(?:[ \t]*\1){2,}[ \t]*$")
 HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 BACKTICKS_RE = re.compile(r"`+")
 STAMP = r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?"
@@ -55,9 +56,9 @@ CUE_RE = re.compile(rf"^\s*({CUE_CLOCK})\s*-->\s*({CUE_CLOCK})(?:\s|$)")
 CLEAN_CUE_RE = re.compile(r"^\[(\d+:\d{2}:\d{2}(?:[.,]\d{1,3})?)\][ \t]*(.*)$", re.MULTILINE)
 PAREN_CUE = r"\(\s*(?:(?i:about|around|at|ca\.?|~)\s*)?"
 PAREN_RE = re.compile(PAREN_CUE + r"$")
+ABBREVIATION_RE = re.compile(r"(?i)\b(?:e\.g|i\.e)$")
 SENTENCE_RE = re.compile(
-    r"(?<!(?i:\b(?:e\.g|i\.e)))"
-    rf"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
+    r"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
     rf"(?!(?:\[[^\]\n]*\]\s*)+{PAREN_CUE}{STAMP})"
 )
 DURATION_BEFORE_RE = re.compile(r"\b(?:duration|runtime|running time|length|runs|lasts)\W{0,3}(?:of\s+)?$", re.I)
@@ -144,42 +145,59 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
     lines: list[str] = []
     start = 0
     fence = ""
+    fence_indent = 0
+    fence_quoted = False
     quoted = False
     list_indent = 0
     list_quoted = False
-    for number, line in enumerate(text.splitlines(), 1):
-        quote_prefix = BLOCKQUOTE_RE.match(line)
-        if quote_prefix:
-            line = line[quote_prefix.end():]
-        item = LIST_RE.match(line)
-        marker = FENCE_RE.match(line[item.end():] if item else line)
-        if fence:
-            if marker and marker[1].startswith(fence) and not marker[2].strip():
-                fence = ""
-            continue
+    for number, raw in enumerate(text.splitlines(), 1):
+        quote_prefix = BLOCKQUOTE_RE.match(raw)
+        in_quote = quote_prefix is not None
+        line = raw[quote_prefix.end():] if quote_prefix else raw
         expanded = line.expandtabs(4)
         indent = len(expanded) - len(expanded.lstrip(" "))
+        blank = not line.strip()
+
+        if fence:
+            if (fence_quoted and not in_quote) or (not blank and indent < fence_indent):
+                fence = ""  # The containing block ended before the fence closed.
+            else:
+                closing_line = expanded if fence_quoted else raw.expandtabs(4)
+                closing = FENCE_RE.match(closing_line[fence_indent:])
+                if closing and closing[1].startswith(fence) and not closing[2].strip():
+                    fence = ""
+                continue
+
+        # A list's content column survives blank lines. Test its block syntax
+        # at that column so loose list paragraphs and their fences agree.
+        content_indent = list_indent if in_quote == list_quoted and indent >= list_indent else 0
+        thematic = THEMATIC_RE.match(expanded[content_indent:])
+        item = None if thematic else LIST_RE.match(line)
+        if item:
+            content_indent = len(item[0].expandtabs(4))
+        marker = FENCE_RE.match(expanded[content_indent:]) if not thematic else None
         heading = HEADING_RE.match(line)
-        if lines and (marker or not line.strip() or item or heading or quoted != bool(quote_prefix)):
+        if lines and (marker or thematic or blank or item or heading or quoted != in_quote):
             yield start, lines
             lines = []
+
         if item:
-            list_indent = len(item[0].expandtabs(4))
-            list_quoted = bool(quote_prefix)
-        elif line.strip() and (list_quoted != bool(quote_prefix) or (not lines and indent < list_indent)):
-            # A blank line ends a paragraph, but the next indented paragraph
-            # can still belong to the same list item. Dedent ends the item.
+            list_indent, list_quoted = content_indent, in_quote
+        elif not blank and not content_indent and (not lines or list_quoted != in_quote):
             list_indent = 0
+
+        if thematic:
+            continue
         if marker and (marker[1].startswith("~") or "`" not in marker[2]):
-            fence = marker[1]
+            fence, fence_indent, fence_quoted = marker[1], content_indent, in_quote
         elif heading:
             yield number, [line]
-        elif line.strip():
+        elif not blank:
             if not lines:
-                if indent >= list_indent + 4:
+                if indent >= content_indent + 4:
                     continue  # Indented code cannot interrupt an open paragraph.
                 start = number
-                quoted = bool(quote_prefix)
+                quoted = in_quote
             lines.append(line)
     if lines:
         yield start, lines
@@ -286,7 +304,17 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
             masked[start:stop] = re.sub(r"[^\n]", "x", block[start:stop])
         stamp_text = "".join(masked)
         stamps = list(_stamps(stamp_text))
-        boundaries = [0, *(match.end() for match in SENTENCE_RE.finditer(stamp_text)), len(block)]
+        boundaries = [0]
+        for boundary in SENTENCE_RE.finditer(stamp_text):
+            # These abbreviations can introduce lowercase prose or a quote.
+            # A capitalized prose start keeps the punctuation boundary.
+            before_period = stamp_text[max(0, boundary.start() - 4):boundary.start()]
+            next_char = stamp_text[boundary.end()]
+            continues = next_char.islower() or next_char in {"“", '"'}
+            if continues and ABBREVIATION_RE.search(before_period):
+                continue
+            boundaries.append(boundary.end())
+        boundaries.append(len(block))
         for match in quoted:
             start, end = match.span(1 if match[1] is not None else 2)
             quote = quoted_text[start:end]
