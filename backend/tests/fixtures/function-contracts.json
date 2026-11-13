@@ -1,5 +1,5 @@
 {
-  "description": "Observed public baseline+001\u2013007 and fresh/upgraded baseline+001\u2013009. Namespaces are measured, not inferred from house migrations. get_embedding body alone is stubbed in fixtures; its identity remains unchanged.",
+  "description": "Measured callable contracts on public baseline and actual Docker initdb/tagged upgrade routes. v03_release covers all directly defined and dynamically amended migration functions in public/AGE; complete bodies are compared without SQL stubbing. Earlier M1/M2 fixture snapshots retain their original scope.",
   "production_search_path": [
     "ag_catalog",
     "public"
@@ -285,6 +285,481 @@
       "settings": [
         "search_path=public, ag_catalog"
       ]
+    }
+  ],
+  "release_tags": {
+    "v0.1.0": "33a0cce9dc1d74757bdc7797a184a6b0efe87c5d",
+    "v0.2.0": "4b31c76d93830448cd4a1ce7e1224b045a0a4330"
+  },
+  "release_function_names": [
+    "_embedding_request",
+    "_lock_open_commitment_home",
+    "_mint_memory",
+    "assign_memory_to_clusters",
+    "batch_create_memories",
+    "batch_create_memories_with_embeddings",
+    "batch_recompute_neighborhoods",
+    "change_goal_priority",
+    "check_boundaries",
+    "check_supplied_embedding_profile",
+    "create_episodic_memory",
+    "create_goal",
+    "create_memory",
+    "create_memory_with_embedding",
+    "create_procedural_memory",
+    "create_semantic_memory",
+    "create_strategic_memory",
+    "discover_relationship",
+    "embedding_profile_fingerprint",
+    "embedding_source_hash",
+    "embedding_writer_barrier",
+    "fast_recall",
+    "fast_recall_hybrid",
+    "find_partial_activations",
+    "get_embedding",
+    "guard_commitment_home",
+    "hybrid_recall",
+    "hybrid_recall_perspective",
+    "link_commitment",
+    "memories_production_guard",
+    "mint_memories",
+    "mint_memory",
+    "mint_memory_with_embedding",
+    "recalculate_cluster_centroid",
+    "recompute_neighborhood",
+    "record_memory_reuse",
+    "release_commitments_at_home_close",
+    "revoke_goal_release",
+    "safe_get_embedding",
+    "search_similar_memories",
+    "search_working_memory",
+    "supersede_memory",
+    "sync_archive_status",
+    "sync_goal_state",
+    "touch_memory_access"
+  ],
+  "v03_release": [
+    {
+      "namespace": "ag_catalog",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "hybrid_recall_perspective",
+      "arguments": "p_query_text text, p_limit integer, p_speaker text, p_k integer",
+      "result": "TABLE(memory_id uuid, content text, memory_type memory_type, score double precision, source text)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "record_memory_reuse",
+      "arguments": "p_memory_id uuid, p_detector_version text, p_evidence_kind text, p_evidence_text text, p_session_id text, p_metadata jsonb",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "sync_archive_status",
+      "arguments": "",
+      "result": "trigger",
+      "settings": null
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "touch_memory_access",
+      "arguments": "p_memory_id uuid",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "_embedding_request",
+      "arguments": "text_content text, kind text, p jsonb",
+      "result": "vector",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "_lock_open_commitment_home",
+      "arguments": "p_goal_id uuid",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "_mint_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision, p_embedding vector, p_embedding_profile text, p_supplied_embedding boolean",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "assign_memory_to_clusters",
+      "arguments": "p_memory_id uuid, p_max_clusters integer",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "batch_create_memories",
+      "arguments": "p_items jsonb",
+      "result": "uuid[]",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "batch_create_memories_with_embeddings",
+      "arguments": "p_type memory_type, p_contents text[], p_embeddings jsonb, p_importance double precision, p_embedding_profile text",
+      "result": "uuid[]",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "batch_recompute_neighborhoods",
+      "arguments": "p_batch_size integer",
+      "result": "integer",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "change_goal_priority",
+      "arguments": "p_goal_id uuid, p_new_priority goal_priority, p_reason text",
+      "result": "void",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "check_boundaries",
+      "arguments": "p_content text",
+      "result": "TABLE(boundary_id uuid, boundary_name text, response_type text, similarity double precision, boundary_type text, importance double precision)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "check_supplied_embedding_profile",
+      "arguments": "supplied text",
+      "result": "void",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_episodic_memory",
+      "arguments": "p_content text, p_action_taken jsonb, p_context jsonb, p_result jsonb, p_emotional_valence double precision, p_event_time timestamp with time zone, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_goal",
+      "arguments": "p_title text, p_description text, p_source goal_source, p_priority goal_priority, p_parent_id uuid, p_due_at timestamp with time zone",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision, p_embedding_profile text",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_procedural_memory",
+      "arguments": "p_content text, p_steps jsonb, p_prerequisites jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_semantic_memory",
+      "arguments": "p_content text, p_confidence double precision, p_category text[], p_related_concepts text[], p_source_references jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_strategic_memory",
+      "arguments": "p_content text, p_pattern_description text, p_confidence_score double precision, p_supporting_evidence jsonb, p_context_applicability jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "discover_relationship",
+      "arguments": "p_from_id uuid, p_to_id uuid, p_relationship_type graph_edge_type, p_confidence double precision, p_discovered_by text, p_heartbeat_id uuid, p_discovery_context text",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "embedding_profile_fingerprint",
+      "arguments": "p jsonb",
+      "result": "text",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "embedding_source_hash",
+      "arguments": "source_text text, kind text",
+      "result": "text",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "embedding_writer_barrier",
+      "arguments": "",
+      "result": "trigger",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "fast_recall",
+      "arguments": "p_query_text text, p_limit integer",
+      "result": "TABLE(memory_id uuid, content text, memory_type memory_type, score double precision, source text)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "fast_recall_hybrid",
+      "arguments": "p_query_text text, p_limit integer",
+      "result": "TABLE(memory_id uuid, content text, memory_type memory_type, score double precision, source text)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "find_partial_activations",
+      "arguments": "p_query_text text, p_cluster_threshold double precision, p_memory_threshold double precision",
+      "result": "TABLE(cluster_id uuid, cluster_name text, keywords text[], emotional_signature jsonb, cluster_similarity double precision, best_memory_similarity double precision)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "get_embedding",
+      "arguments": "text_content text, kind text",
+      "result": "vector",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "guard_commitment_home",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "hybrid_recall",
+      "arguments": "p_query_text text, p_limit integer, p_k integer",
+      "result": "TABLE(memory_id uuid, content text, memory_type memory_type, score double precision, source text)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "hybrid_recall_perspective",
+      "arguments": "p_query_text text, p_limit integer, p_speaker text, p_k integer",
+      "result": "TABLE(memory_id uuid, content text, memory_type memory_type, score double precision, source text)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "link_commitment",
+      "arguments": "p_memory_id uuid, p_goal_id uuid",
+      "result": "void",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "memories_production_guard",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memories",
+      "arguments": "p_items jsonb",
+      "result": "TABLE(idx integer, memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision, p_embedding_profile text",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "recalculate_cluster_centroid",
+      "arguments": "p_cluster_id uuid",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "recompute_neighborhood",
+      "arguments": "p_memory_id uuid, p_neighbor_count integer, p_min_similarity double precision",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "release_commitments_at_home_close",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "revoke_goal_release",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "safe_get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "safe_get_embedding",
+      "arguments": "text_content text, kind text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "search_similar_memories",
+      "arguments": "p_query_text text, p_limit integer, p_memory_types memory_type[], p_min_importance double precision",
+      "result": "TABLE(memory_id uuid, content text, type memory_type, similarity double precision, importance double precision)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "search_similar_memories",
+      "arguments": "query_text text, result_limit integer, type_filter memory_type[]",
+      "result": "TABLE(id uuid, type memory_type, content text, importance double precision, created_at timestamp with time zone, similarity double precision)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "search_working_memory",
+      "arguments": "p_query_text text, p_limit integer",
+      "result": "TABLE(memory_id uuid, content text, similarity double precision, created_at timestamp with time zone)",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text, p_metadata jsonb",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "sync_goal_state",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "touch_memory_access",
+      "arguments": "p_memory_id uuid",
+      "result": "void",
+      "settings": null
     }
   ]
 }

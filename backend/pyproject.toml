@@ -70,3 +70,7 @@ include-package-data = false
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["scripts*"]
+
+[tool.pytest.ini_options]
+# Async clients/pools are created and closed within individual tests.
+asyncio_default_fixture_loop_scope = "function"

@@ -37,3 +37,20 @@ def test_initdb_stamp_matches_migration_set():
     stamped = set(re.findall(r"\('(\d{3})',\s*'initdb'\)", stamp))
     present = {n[:3] for n in numbered_files()}
     assert stamped == present, f"stamp {sorted(stamped)} != files {sorted(present)}"
+
+
+def test_release_contract_covers_every_migrated_function():
+    """Adding a migration callable must also extend the executable parity gate."""
+    import json
+    manifest = json.loads((MIGRATIONS.parent / 'tests/fixtures/function-contracts.json').read_text())
+    affected = set()
+    for path in MIGRATIONS.glob('[0-9][0-9][0-9]_*.sql'):
+        affected.update(re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\w+\.)?(\w+)\s*\(',
+                                   path.read_text(), re.I))
+        for names in re.findall(r'p\.proname IN\s*\(([^)]+)\)', path.read_text()):
+            affected.update(re.findall(r"'([a-z_]+)'", names))
+    assert set(manifest.get('release_function_names', [])) == affected
+    assert manifest.get('release_tags') == {
+        'v0.1.0': '33a0cce9dc1d74757bdc7797a184a6b0efe87c5d',
+        'v0.2.0': '4b31c76d93830448cd4a1ce7e1224b045a0a4330',
+    }

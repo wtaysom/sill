@@ -45,3 +45,53 @@ use their own deterministic local HTTP server and retain the real SQL HTTP paths
 The namespace manifest records the actual public and AGE entry points before and
 after migration; parity tests compare their bodies as well as callable signatures
 and execute both legacy and new overloads under `ag_catalog,public`.
+
+## Release schema contract (actual Docker initdb)
+
+The required CI job also runs `test_schema_contract.py`. It creates only the
+`sill_v03_m7` Compose project, refuses pre-existing project resources, checks
+loopback ports 15461–15463 are unused, and removes its own containers and volumes
+on completion. It does not connect to the ordinary `SILL_TEST_DSN` fixture.
+
+```sh
+docker build -t sill-test-db backend
+docker pull python:3.12-slim
+SILL_SCHEMA_REQUIRED=1 \
+SILL_SCHEMA_IMAGE=sill-test-db \
+SILL_SCHEMA_HTTP_IMAGE=python:3.12-slim \
+python -m pytest backend/tests/integration/test_schema_contract.py -v \
+  --basetemp=/tmp/sill-schema-evidence
+```
+
+The repository must contain the annotated `v0.1.0` and `v0.2.0` tags. The helper
+verifies their peeled commit IDs against `fixtures/function-contracts.json`.
+`SILL_SCHEMA_TAG_REPOSITORY` can select a separate local tag repository;
+`SILL_SCHEMA_DOCKER_CONTEXT` selects an explicit Docker context when needed.
+There is no download or model inference in the HTTP fixture. All SQL function
+bodies remain real, including both embedding overloads. This proves schema
+lineage against current extension binaries, not historical container runtime
+compatibility or real-model retrieval quality.
+
+The fixture retains exact initialization logs, raw schema dumps, callable bodies,
+source/image identities and SQL hashes in the evidence directory. Comparison
+removes only pg_dump's randomized `\restrict`/`\unrestrict` transport tokens.
+The frozen baseline logs its known generated `goals.dedupe_key` UPDATE error
+(v0.1 line 7624; current/v0.2 line 7628) and continues because that section has
+`ON_ERROR_STOP` disabled. A separate assertion rejects any other error; these are
+not clean initialization logs. Migration 012 fixes the independent legacy goal
+constructor enum cast, and the callable tests exercise first goal creation.
+
+Actual v0.1 init has no migration ledger; v0.2 has `ag_catalog.schema_migrations`
+001–007. The transaction-aware runner upgrades these without creating a second
+ledger. Fresh and both upgraded routes must contain exactly 001–015 in the same
+namespace, identical schema definitions and affected callable contracts, and
+preserve synthetic identity/charter references, historical data and RRF scores.
+Missing image configuration skips an explicitly local run. With
+`SILL_SCHEMA_REQUIRED=1`, absent configuration, unavailable images, missing tags,
+failed initdb or failed connections are errors, never a green skip.
+
+The independent `clean-wheel` CI job builds and installs the wheel in a new venv,
+then runs `tests/wheel_smoke.py` from outside the checkout with Python `-I`.
+It verifies installed imports and MCP tool discovery, including optional Chorus
+stage absence. This is registry discovery; live MCP transport/client rehearsal
+remains a separate release check.
