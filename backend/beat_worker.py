@@ -29,16 +29,25 @@ SILL_BEAT_*, its bounded-trial correspondence channel excised entirely,
 per-voice output verification added).
 """
 
+import fcntl
 import json
 import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
+import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Iterator
+from uuid import uuid4
+
+from scripts import beat_launchers
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +57,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(os.environ.get("SILL_PROJECT_ROOT", ".")).resolve()
 INTERVAL_SECONDS = int(os.environ.get("SILL_BEAT_INTERVAL_SECONDS", "7200"))  # 2h
 TIMEOUT_SECONDS = int(os.environ.get("SILL_BEAT_TIMEOUT_SECONDS", "1800"))  # 30min
-CLI = os.environ.get("SILL_BEAT_CLI", "claude")
+CLI = "claude"
 WATCHDOG_SOCKET = os.environ.get("SILL_BEAT_WATCHDOG_SOCKET") or None
 POST_HOOK = os.environ.get("SILL_BEAT_POST_HOOK") or None
 LOG_PATH = Path(
@@ -97,6 +106,16 @@ class Voice:
     transcripts: str
     output_glob: str | None
     kickoff: str
+    launcher: beat_launchers.Launcher = "claude"
+    cli: str | None = None
+    model: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.launcher not in ("claude", "codex"):
+            raise ValueError(f"voice {self.name!r}: invalid launcher {self.launcher!r}")
+        for key, value in (("cli", self.cli), ("model", self.model)):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"voice {self.name!r}: {key} must be a nonempty string")
 
 
 def load_voices(path: Path) -> list[Voice]:
@@ -125,6 +144,9 @@ def load_voices(path: Path) -> list[Voice]:
                 transcripts=entry["transcripts"],
                 output_glob=entry.get("output_glob"),
                 kickoff=entry.get("kickoff", "Begin."),
+                launcher=entry.get("launcher", "claude"),
+                cli=entry.get("cli"),
+                model=entry.get("model"),
             ))
         except KeyError as exc:
             raise ValueError(f"voice entry {i} in {path} is missing required key {exc}") from exc
@@ -234,10 +256,47 @@ def read_state(path: Path) -> int:
         return 0
 
 
-def write_state(path: Path, index: int) -> None:
-    path = Path(path)
+@contextmanager
+def worker_lock(state_path: Path) -> Iterator[int | None]:
+    """Hold exclusive worker ownership until the parent and agent CLI exit."""
+    path = state_path.resolve()
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield None
+            return
+        # Close only our descriptor on exit. An inherited CLI descriptor
+        # preserves ownership if the worker dies. The pathname stays stable.
+        yield lock.fileno()
+
+
+def atomic_json(path: Path, data: dict) -> None:
+    """Replace a JSON file only after its complete new contents are on disk."""
+    temporary = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}.", suffix=".tmp", delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            json.dump(data, temporary)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def write_state(path: Path, index: int, *, attempt_id: str | None = None) -> None:
+    path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"next_index": int(index)}))
+    state = {"next_index": int(index)}
+    if attempt_id is not None:
+        state["last_successful_attempt_id"] = attempt_id
+    atomic_json(path, state)
 
 
 def advance_if(path: Path, *, index: int, n_voices: int, success: bool) -> None:
@@ -303,7 +362,9 @@ def snapshot_outputs(root: Path, glob: str) -> set[Path]:
     """Snapshot the files currently matching a voice's output_glob, so a
     later call can detect whether a beat added anything.
     """
-    return set(Path(root).glob(glob))
+    root = Path(root)
+    paths = (Path(os.path.normpath(path)) for path in root.glob(glob))
+    return {path for path in paths if path.is_relative_to(root) and path.is_file()}
 
 
 def produced_output(root: Path, glob: str | None, before: set[Path]) -> bool:
@@ -315,49 +376,6 @@ def produced_output(root: Path, glob: str | None, before: set[Path]) -> bool:
         return True
     after = snapshot_outputs(root, glob)
     return bool(after - before)
-
-
-# ---------------------------------------------------------------------------
-# Best-effort child model detection (for the transcript header only; never
-# load-bearing for control flow)
-# ---------------------------------------------------------------------------
-
-_MODEL_RE = re.compile(r'"model"\s*:\s*"([^"]+)"')
-
-
-def _encode_project_path(root: Path) -> str:
-    """Match the harness's session-directory naming: every non-alphanumeric
-    character in the absolute project path becomes '-'.
-    """
-    return re.sub(r"[^A-Za-z0-9]", "-", str(Path(root).resolve()))
-
-
-def _detect_child_model(project_root: Path, since_epoch: float) -> str | None:
-    """Best-effort read of the child session's model id from its session
-    transcript — the only place the substrate is recorded. Matches the
-    newest session file written during this beat's window; skip entirely
-    (return None -> "unknown" at the call site) if the sessions directory
-    doesn't exist. Can misattribute if another interactive session is
-    writing under the same project concurrently, hence "best-effort".
-    """
-    sessions_dir = Path.home() / ".claude" / "projects" / _encode_project_path(project_root)
-    if not sessions_dir.exists():
-        return None
-    try:
-        candidates = [f for f in sessions_dir.glob("*.jsonl")
-                      if f.stat().st_mtime >= since_epoch - 5]
-        if not candidates:
-            return None
-        newest = max(candidates, key=lambda f: f.stat().st_mtime)
-        model = None
-        with newest.open(encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                m = _MODEL_RE.search(line)
-                if m and not m.group(1).startswith("<"):
-                    model = m.group(1)
-        return model
-    except OSError:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -402,244 +420,399 @@ def _run_post_hook(command: str) -> None:
         logger.warning(f"[post-hook] {command!r} failed to run: {exc}")
 
 
-def _write_transcript(
-    transcript_path: Path,
-    label: str,
-    result: subprocess.CompletedProcess,
-    duration: float,
-    spawned_at: str,
-    model: str | None,
-) -> None:
-    """Write the final stdout/stderr record for a detached beat subprocess.
-    SCOPE: this file is the subprocess's final message ONLY, not its full
-    context window — a term's absence here is not evidence the process
-    never saw it; the full tool-call record is the session transcript under
-    ~/.claude/projects/<encoded-project-root>/ (match by mtime).
-    """
-    transcript_path.write_text(
-        f"# {label}\n"
-        f"# Spawned: {spawned_at} — worker-written wall-clock receipt at child "
-        f"spawn; the child cannot fabricate this line\n"
-        f"# Timestamp: {datetime.now().isoformat()}\n"
-        f"# Duration: {duration:.1f}s\n"
-        f"# Exit code: {result.returncode}\n"
-        f"# Model: {model or 'unknown'} (best-effort mtime match on session transcript)\n"
+# ---------------------------------------------------------------------------
+# Recording and spawning a beat
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AttemptReceipt:
+    attempt_id: str
+    voice: str
+    session_id: str
+    requested_backend: str
+    requested_model: str | None
+    requested_host_session_id: str | None
+    schema_version: int = 1
+    host_session_id: str | None = None
+    effective_model: str | None = None
+    model_source: str | None = None
+    status: str = "running"
+    spawned_at: str | None = None
+    completed_at: str | None = None
+    duration_seconds: float | None = None
+    returncode: int | None = None
+    state_advanced: bool | None = None
+    transcript: str | None = None
+    new_outputs: list[str] = field(default_factory=list)
+
+
+def _clock() -> str:
+    return datetime.now().astimezone().isoformat()
+
+
+def _save_receipt(path: Path, receipt: AttemptReceipt) -> bool:
+    try:
+        atomic_json(path, asdict(receipt))
+    except OSError as exc:
+        logger.error("[%s] Could not write %s receipt %s: %s", receipt.voice, receipt.status, path, exc)
+        return False
+    return True
+
+
+def _write_transcript(path: Path, receipt: AttemptReceipt, result: beat_launchers.LaunchResult) -> None:
+    """Keep the final agent message and host diagnostics beside the receipt."""
+    path.write_text(
+        f"# {receipt.voice.title()} beat\n"
+        f"# Spawned: {receipt.spawned_at}\n"
+        f"# Timestamp: {receipt.completed_at}\n"
+        f"# Duration: {receipt.duration_seconds:.1f}s\n"
+        f"# Exit code: {receipt.returncode}\n"
+        f"# Backend: {receipt.requested_backend}\n"
+        f"# Attempt: {receipt.attempt_id}\n"
+        f"# Model requested: {receipt.requested_model or '(CLI default)'}\n"
+        f"# Model: {receipt.effective_model or 'unknown'} (source: {receipt.model_source or 'unknown'})\n"
         + "=" * 60
         + "\n\n"
-        + (result.stdout or "")
-        + (f"\n\n# STDERR:\n{result.stderr}" if result.stderr else "")
+        + result.text
+        + (f"\n\n# Diagnostics:\n{result.diagnostics}" if result.diagnostics else ""),
+        encoding="utf-8",
     )
 
 
-# ---------------------------------------------------------------------------
-# Spawning a beat
-# ---------------------------------------------------------------------------
+def _child_env(voice: Voice, voices: list[Voice], receipt: AttemptReceipt) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT",
+        "SILL_INTERACTIVE", "SILL_BEAT_JOURNAL_DIRS",
+    ):
+        env.pop(key, None)
+    env.update(
+        SILL_DETACHED_BEAT="1",
+        SILL_ATTEMPT_ID=receipt.attempt_id,
+        SILL_SESSION_ID=receipt.session_id,
+        SILL_SESSION_ID_SOURCE="worker_attempt",
+    )
+    if voice.launcher == "claude":
+        env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-cli"
+    if journal_dirs := journal_dirs_for_voices(voices):
+        env["SILL_BEAT_JOURNAL_DIRS"] = journal_dirs
+    return env
+
+
+@contextmanager
+def _defer_stop_signals() -> Iterator[None]:
+    """Run existing Python stop handlers after Popen has returned the child."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    handlers = {}
+    pending = None
+
+    def defer(signum, frame):
+        nonlocal pending
+        if pending is None:
+            pending = signum, frame
+
+    try:
+        # Deferring in Python leaves the child's inherited signal mask intact.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handler = signal.getsignal(signum)
+            if callable(handler):
+                handlers[signum] = handler
+                signal.signal(signum, defer)
+        yield
+    finally:
+        # Restore all handlers before a newly arriving signal can interrupt
+        # restoration. This mask is set only in the parent, after Popen.
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handlers)
+        try:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        if pending is not None:
+            signum, frame = pending
+            handlers[signum](signum, frame)
+
+
+def _run_beat_subprocess(
+    argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float, lock_fd: int,
+    on_spawn: Callable[[], None] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run and capture a detached CLI. Stop its process group on interruption."""
+    # A descendant that leaves the group can keep writing after the CLI
+    # exits. Regular files let us collect output without waiting for EOF
+    # from every inherited descriptor as we would with pipes.
+    with (
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout,
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr,
+    ):
+        process = None
+        try:
+            with _defer_stop_signals():
+                process = subprocess.Popen(
+                    argv, cwd=cwd, env=env, start_new_session=True, pass_fds=(lock_fd,),
+                    stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                )
+                if on_spawn is not None:
+                    on_spawn()
+            returncode = process.wait(timeout=timeout)
+            stdout.seek(0)
+            stderr.seek(0)
+            return subprocess.CompletedProcess(argv, returncode, stdout.read(), stderr.read())
+        except BaseException:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise
+
 
 def spawn_beat(voice: Voice, voices: list[Voice]) -> tuple[bool, float, str]:
-    """Spawn one headless agent-CLI session running `voice`. Returns
-    (success, duration_seconds, transcript_path). Never raises: every
-    failure mode is caught, logged, and reported through the return value
-    so the caller can decide whether rotation advances.
+    """Run one voice under the worker lock, without changing rotation.
 
-    `success` means verified success: exit 0 AND (no declared output_glob,
-    or the glob gained a new file). Exit 0 alone is not enough — see
-    produced_output() above.
-
-    `voices` is the full loaded rotation, not just `voice` — the child's
-    exported SILL_BEAT_JOURNAL_DIRS (see journal_dirs_for_voices() above)
-    is a fixed scope covering every voice's dirs, not only the one running
-    this beat, so the guards don't need to be told which voice is current.
+    Return (verified_success, duration_seconds, transcript_path). If the
+    lock is held by another worker, return (False, 0.0, "") without launching.
+    `voices` is the full rotation used to derive the child's guard scope.
     """
-    prompt_path = PROJECT_ROOT / voice.prompt
-    transcripts_dir = PROJECT_ROOT / voice.transcripts
-
-    # Fix: read the standing prompt defensively. Reading it outside a try
-    # block (as upstream did) means a missing OR malformed prompt file
-    # raises through the whole loop and kills the process — under a
-    # keep-alive supervisor that becomes a restart storm, not a single
-    # skipped beat. Path.read_text() raises OSError for a missing/unreadable
-    # file, but UnicodeDecodeError — a ValueError, NOT an OSError subclass —
-    # for a file that exists but holds bytes invalid for the codec, so the
-    # `except OSError` guard alone let that second case straight through.
-    # Widened to catch both rather than reading bytes and decoding with
-    # errors="replace": this file's whole design is "on defect, skip and
-    # retry" (see read_state()'s docstring above), not "proceed with
-    # degraded input" — a garbled prompt handed to a live agent CLI could
-    # produce a nonsense beat that still exits 0 and gets recorded as a
-    # success.
+    state_path = default_state_path()
     try:
-        standing_prompt = prompt_path.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.error(
-            f"[{voice.name}] Could not read standing prompt {prompt_path}: {exc}. "
-            "Skipping this beat without advancing rotation."
-        )
-        return False, 0.0, ""
-
-    before = snapshot_outputs(PROJECT_ROOT, voice.output_glob) if voice.output_glob else set()
-    prompt = f"{standing_prompt}\n\n---\n\n{voice.kickoff}\n"
-
-    # Fix: same class of risk as the prompt read above — this call sat
-    # outside any try/except (a gap upstream's spawn_gnomon_beat also has,
-    # so guarding it here is a deliberate improvement over the port source,
-    # not a port defect). An unwritable transcripts path, or one occupied by
-    # a same-named file, raises straight out of the loop the same way the
-    # previously-ungated prompt read used to.
-    try:
-        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        with worker_lock(state_path) as lock_fd:
+            if lock_fd is None:
+                logger.warning("A beat worker already owns rotation state %s", state_path)
+                return False, 0.0, ""
+            return _spawn_beat_locked(voice, voices, lock_fd=lock_fd)
     except OSError as exc:
-        logger.error(
-            f"[{voice.name}] Could not create transcripts dir {transcripts_dir}: {exc}. "
-            "Skipping this beat without advancing rotation."
-        )
+        logger.error("[%s] Beat attempt error: %s", voice.name, exc)
         return False, 0.0, ""
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    transcript_path = transcripts_dir / f"{timestamp}.txt"
 
-    if WATCHDOG_SOCKET:
-        _wedge_probe(WATCHDOG_SOCKET)
+def _run_attempt(
+    voice: Voice, voices: list[Voice], receipt: AttemptReceipt, receipt_path: Path, lock_fd: int,
+) -> None:
+    before = None
+    start = None
+    result = None
 
-    spawn_clock = datetime.now().astimezone().isoformat(timespec="seconds")
-    start_time = time.time()
-
-    # SILL_DETACHED_BEAT=1 is the authoritative headless flag sill's own
-    # hooks gate on, so a spawned child does not try to inject recall or
-    # advance any interactive-session clock.
-    child_env = {**os.environ, "SILL_DETACHED_BEAT": "1"}
-    journal_dirs = journal_dirs_for_voices(voices)
-    if journal_dirs:
-        # Opt-in scope for stored-slot-guard.py / tool-type-witness.py /
-        # state-language-check.py's beat-aware fallback (docs/beats.md
-        # permissions section) — derived above from the voice config, not
-        # configured by the operator, so a beat's own journal writes are
-        # guarded automatically and a non-beat install never sets this.
-        child_env["SILL_BEAT_JOURNAL_DIRS"] = journal_dirs
+    def mark_spawned() -> None:
+        receipt.spawned_at = _clock()
+        atomic_json(receipt_path, asdict(receipt))
 
     try:
-        result = subprocess.run(
-            [CLI, "--print", "-p", prompt],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECONDS,
-            cwd=str(PROJECT_ROOT),
-            env=child_env,
+        prompt_path = PROJECT_ROOT / voice.prompt
+        standing_prompt = prompt_path.read_text(encoding="utf-8")
+        prompt = f"{standing_prompt}\n\n---\n\n{voice.kickoff}\n"
+        before = snapshot_outputs(PROJECT_ROOT, voice.output_glob) if voice.output_glob else None
+        env = _child_env(voice, voices, receipt)
+        cli = voice.cli or ((env.get("SILL_BEAT_CLI") or CLI) if voice.launcher == "claude" else "codex")
+        argv = beat_launchers.command(voice.launcher, cli, voice.model, receipt.attempt_id, PROJECT_ROOT, prompt)
+        if WATCHDOG_SOCKET:
+            _wedge_probe(WATCHDOG_SOCKET)
+        start = time.monotonic()
+        result = _run_beat_subprocess(
+            argv, cwd=PROJECT_ROOT, env=env, timeout=TIMEOUT_SECONDS, lock_fd=lock_fd, on_spawn=mark_spawned,
         )
+        receipt.returncode = result.returncode
     except subprocess.TimeoutExpired:
-        duration = time.time() - start_time
-        logger.warning(
-            f"[{voice.name}] Beat attempt skipped — subprocess timed out after "
-            f"{TIMEOUT_SECONDS}s. Rotation remains on [{voice.name}]; the next "
-            "scheduled beat retries the same voice."
-        )
-        return False, duration, ""
-    except Exception as exc:
-        duration = time.time() - start_time
-        logger.error(f"[{voice.name}] Beat attempt error after {duration:.1f}s: {exc}.")
-        return False, duration, ""
+        receipt.status = "timeout"
+        logger.warning("[%s] Beat subprocess timed out after %ss", voice.name, TIMEOUT_SECONDS)
+    except (OSError, ValueError, NotImplementedError) as exc:
+        receipt.status = "launch_error"
+        logger.error("[%s] Beat attempt error: %s", voice.name, exc)
+    finally:
+        receipt.completed_at = _clock()
+        receipt.duration_seconds = time.monotonic() - start if start is not None else 0.0
+        if before is not None and receipt.spawned_at is not None:
+            try:
+                after = snapshot_outputs(PROJECT_ROOT, voice.output_glob)
+                receipt.new_outputs = sorted(path.relative_to(PROJECT_ROOT).as_posix() for path in after - before)
+            except OSError as exc:
+                logger.error("[%s] Could not check beat outputs: %s", voice.name, exc)
+                if result is not None:
+                    receipt.status = "failed"
 
-    duration = time.time() - start_time
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
-    model = _detect_child_model(PROJECT_ROOT, start_time)
+    if result is None:
+        return
+    parsed = beat_launchers.parse_result(voice.launcher, result, receipt.attempt_id, PROJECT_ROOT, env)
+    receipt.host_session_id = parsed.host_session_id
+    receipt.effective_model = parsed.effective_model
+    receipt.model_source = parsed.model_source
 
-    if result.returncode != 0:
-        skip_reason = classify_skip(output, duration)
+    if parsed.failed:
+        output = "\n".join((parsed.text, parsed.diagnostics))
+        skip_reason = classify_skip(output, receipt.duration_seconds) if result.returncode != 0 else None
         if skip_reason:
+            receipt.status = "skipped"
+            logger.warning("[%s] Beat attempt skipped — %s (exit %s)", voice.name, skip_reason, result.returncode)
+            return
+        receipt.status = "failed"
+        logger.error("[%s] Beat CLI failed (exit %s)", voice.name, result.returncode)
+    elif receipt.status == "running":
+        if voice.output_glob and not receipt.new_outputs:
+            receipt.status = "no_record"
             logger.warning(
-                f"[{voice.name}] Beat attempt skipped after {duration:.1f}s — "
-                f"{skip_reason}; exit {result.returncode}. Rotation remains on "
-                f"[{voice.name}]; no transcript written."
+                "[%s] Beat exited 0 in %.1fs but produced no file matching %r — "
+                "the agent CLI may be denying tools non-interactively. Rotation remains on [%s].",
+                voice.name, receipt.duration_seconds, voice.output_glob, voice.name,
             )
-            return False, duration, ""
-        _write_transcript(transcript_path, f"{voice.name.title()} beat", result, duration, spawn_clock, model)
-        logger.error(
-            f"[{voice.name}] Beat subprocess exited {result.returncode} after "
-            f"{duration:.1f}s — transcript {transcript_path.name}."
-        )
-        return False, duration, str(transcript_path)
+        else:
+            receipt.status = "succeeded"
 
-    _write_transcript(transcript_path, f"{voice.name.title()} beat", result, duration, spawn_clock, model)
+    transcript_path = receipt_path.with_suffix(".txt")
+    try:
+        _write_transcript(transcript_path, receipt, parsed)
+    except OSError as exc:
+        receipt.status = "failed"
+        logger.error("[%s] Could not write beat transcript %s: %s", voice.name, transcript_path, exc)
+    else:
+        receipt.transcript = str(transcript_path)
 
-    # Fix: verify every voice produced output before calling this a success.
-    # Exit 0 is necessary but not sufficient — a headless agent CLI with no
-    # tool-permission configuration gets its tools auto-denied rather than
-    # prompted, and exits 0 having done nothing.
-    if not produced_output(PROJECT_ROOT, voice.output_glob, before):
-        logger.warning(
-            f"[{voice.name}] Beat exited 0 in {duration:.1f}s but produced no file "
-            f"matching {voice.output_glob!r} — the agent CLI may be denying tools "
-            "non-interactively; see docs/beats.md permissions. Rotation remains "
-            f"on [{voice.name}]."
-        )
-        return False, duration, str(transcript_path)
 
-    logger.info(
-        f"[{voice.name}] Beat complete in {duration:.1f}s — transcript {transcript_path.name}"
+def _finish_attempt(
+    receipt: AttemptReceipt, path: Path, rotation: tuple[Path, int] | None, n_voices: int,
+) -> bool:
+    if receipt.status != "succeeded" or rotation is None:
+        receipt.state_advanced = False
+        return _save_receipt(path, receipt) and receipt.status == "succeeded"
+
+    if not _save_receipt(path, receipt):
+        return False
+    state_path, index = rotation
+    try:
+        write_state(state_path, (index + 1) % n_voices, attempt_id=receipt.attempt_id)
+    except OSError as exc:
+        receipt.status = "state_error"
+        receipt.state_advanced = False
+        logger.error("[%s] Could not advance rotation for attempt %s: %s", receipt.voice, receipt.attempt_id, exc)
+        _save_receipt(path, receipt)
+        return False
+
+    receipt.state_advanced = True
+    if not _save_receipt(path, receipt):
+        logger.warning("[%s] Rotation state was committed for attempt %s", receipt.voice, receipt.attempt_id)
+    return True
+
+
+def _spawn_beat_locked(
+    voice: Voice, voices: list[Voice], *, lock_fd: int, rotation: tuple[Path, int] | None = None,
+) -> tuple[bool, float, str]:
+    attempt_id = str(uuid4())
+    receipt = AttemptReceipt(
+        attempt_id=attempt_id, voice=voice.name, session_id=f"beat:{attempt_id}",
+        requested_backend=voice.launcher, requested_model=voice.model,
+        requested_host_session_id=attempt_id if voice.launcher == "claude" else None,
     )
-    return True, duration, str(transcript_path)
+    receipt_path = PROJECT_ROOT / voice.transcripts / f"{attempt_id}.json"
+    try:
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("[%s] Could not create receipt directory %s: %s", voice.name, receipt_path.parent, exc)
+        return False, 0.0, ""
+    persisted = finalized = False
+    try:
+        with _defer_stop_signals():
+            persisted = _save_receipt(receipt_path, receipt)
+        if not persisted:
+            return False, 0.0, ""
+        _run_attempt(voice, voices, receipt, receipt_path, lock_fd)
+        # A stop signal during the terminal writes must not interrupt the
+        # transition between the receipt and its rotation witness.
+        with _defer_stop_signals():
+            success = _finish_attempt(receipt, receipt_path, rotation, len(voices))
+            finalized = True
+    except KeyboardInterrupt:
+        if persisted and not finalized:
+            receipt.status = "interrupted"
+            receipt.completed_at = receipt.completed_at or _clock()
+            receipt.duration_seconds = receipt.duration_seconds or 0.0
+            receipt.state_advanced = False
+            _save_receipt(receipt_path, receipt)
+        raise
+
+    duration = receipt.duration_seconds or 0.0
+    if success:
+        logger.info("[%s] Beat complete in %.1fs — transcript %s", voice.name, duration, Path(receipt.transcript).name)
+    return success, duration, receipt.transcript or ""
 
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run_beat_loop() -> None:
-    """Fire one beat every INTERVAL_SECONDS, cycling through the configured
-    voices in order. Runs forever; the process is expected to live under a
-    supervisor that restarts it on crash.
+class _WorkerTerminated(KeyboardInterrupt):
+    """Route SIGTERM through the same cleanup as Ctrl-C."""
 
-    Ctrl-C stops it cleanly. That is not decoration: the supervised first run
-    in docs/onboarding/03-first-beats.md is a foreground run an operator is
-    told to end with Ctrl-C, and until this handler existed that documented
-    stop printed an eleven-frame traceback ending in `KeyboardInterrupt` and
-    exited on the signal — observed under a pty, both mid-beat and while
-    sleeping between beats. A stop the runbook prescribes must not look like
-    a crash, least of all on the phase where an operator is learning what
-    healthy output is.
-    """
+
+def _handle_sigterm(_signum, _frame) -> None:
+    raise _WorkerTerminated
+
+
+def run_beat_loop(*, once: bool = False) -> int:
+    """Own rotation state while running one attempt or a scheduled loop."""
     _configure_logging()
-    voices = load_voices(_config_path())
-    state_path = default_state_path()
+    state_path = default_state_path().resolve()
+    with worker_lock(state_path) as lock_fd:
+        if lock_fd is None:
+            logger.warning("A beat worker already owns rotation state %s", state_path)
+            return 75
 
-    logger.info("Starting beat worker")
-    logger.info(f"  Project root: {PROJECT_ROOT}")
-    logger.info(f"  Config: {_config_path()}")
-    logger.info(f"  Interval: {INTERVAL_SECONDS}s ({INTERVAL_SECONDS / 3600:.1f}h)")
-    logger.info(f"  Beat timeout: {TIMEOUT_SECONDS}s")
-    logger.info(f"  Rotation state: {state_path}")
-    for v in voices:
-        logger.info(f"  Voice [{v.name}]: prompt={v.prompt}, transcripts={v.transcripts}")
-    logger.info(f"  Guard scope (SILL_BEAT_JOURNAL_DIRS for each child): {journal_dirs_for_voices(voices)!r}")
+        config_path = _config_path()
+        voices = load_voices(config_path)
+        logger.info("Starting beat worker")
+        logger.info(f"  Project root: {PROJECT_ROOT}")
+        logger.info(f"  Config: {config_path}")
+        if not once:
+            logger.info(f"  Interval: {INTERVAL_SECONDS}s ({INTERVAL_SECONDS / 3600:.1f}h)")
+        logger.info(f"  Beat timeout: {TIMEOUT_SECONDS}s")
+        logger.info(f"  Rotation state: {state_path}")
+        for v in voices:
+            logger.info(f"  Voice [{v.name}]: prompt={v.prompt}, transcripts={v.transcripts}")
+        logger.info(f"  Guard scope (SILL_BEAT_JOURNAL_DIRS for each child): {journal_dirs_for_voices(voices)!r}")
 
-    # KeyboardInterrupt is a BaseException, so spawn_beat()'s `except
-    # Exception` deliberately does not swallow it — a Ctrl-C during a beat
-    # propagates out of subprocess.run() (which kills the child agent CLI on
-    # its way out) and lands here. Rotation is left wherever it was: an
-    # interrupted beat did not finish, so it must not be counted as taken.
+        try:
+            while True:
+                beat_start = time.monotonic()
+                index = read_state(state_path) % len(voices)
+                voice = voices[index]
+
+                success, _duration, _transcript = _spawn_beat_locked(
+                    voice, voices, lock_fd=lock_fd, rotation=(state_path, index),
+                )
+                if success and POST_HOOK:
+                    _run_post_hook(POST_HOOK)
+                if once:
+                    return 0 if success else 1
+
+                sleep_time = max(0, INTERVAL_SECONDS - (time.monotonic() - beat_start))
+                if sleep_time > 0:
+                    next_index = read_state(state_path) % len(voices)
+                    logger.info(f"Sleeping {sleep_time:.0f}s until next beat [{voices[next_index].name}]...")
+                    time.sleep(sleep_time)
+        except KeyboardInterrupt as exc:
+            reason = "SIGTERM" if isinstance(exc, _WorkerTerminated) else "Ctrl-C"
+            next_index = read_state(state_path) % len(voices)
+            logger.info(
+                f"Interrupted ({reason}) — beat worker stopped. Rotation stays on "
+                f"[{voices[next_index].name}]; starting the worker again resumes there."
+            )
+            return 1 if once else 0
+
+
+def main(*, once: bool = False) -> int:
+    """CLI boundary for signal handling and worker exit status."""
+    previous = signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
-        while True:
-            beat_start = time.time()
-            index = read_state(state_path) % len(voices)
-            voice = voices[index]
-
-            success, _duration, _transcript = spawn_beat(voice, voices)
-            advance_if(state_path, index=index, n_voices=len(voices), success=success)
-            if success and POST_HOOK:
-                _run_post_hook(POST_HOOK)
-
-            beat_total = time.time() - beat_start
-            sleep_time = max(0, INTERVAL_SECONDS - beat_total)
-            if sleep_time > 0:
-                next_index = read_state(state_path) % len(voices)
-                logger.info(f"Sleeping {sleep_time:.0f}s until next beat [{voices[next_index].name}]...")
-                time.sleep(sleep_time)
-    except KeyboardInterrupt:
-        next_index = read_state(state_path) % len(voices)
-        logger.info(
-            "Interrupted (Ctrl-C) — beat worker stopped. Rotation stays on "
-            f"[{voices[next_index].name}]; starting the worker again resumes there."
-        )
+        return run_beat_loop(once=once)
+    except KeyboardInterrupt as exc:
+        reason = "SIGTERM" if isinstance(exc, _WorkerTerminated) else "Ctrl-C"
+        logger.info("Interrupted (%s) — beat worker stopped.", reason)
+        return 1 if once else 0
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":
-    run_beat_loop()
+    raise SystemExit(main())
