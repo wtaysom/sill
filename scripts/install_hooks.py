@@ -1,7 +1,6 @@
 """Render selected-instance hook wiring while preserving unrelated commands."""
 import argparse
 import copy
-import difflib
 import json
 import os
 from pathlib import Path
@@ -29,6 +28,34 @@ def managed(command, plugin, names):
         return False
     roots = {plugin.resolve(), Path.home() / ".claude/plugins/local/sill-plugin"}
     return any(Path(word).name in names and any(Path(word) == root / "hooks" / Path(word).name for root in roots) for word in words)
+
+
+def review_changes(current, rendered, plugin, names):
+    """Describe only known template hooks; never serialize operator values.
+
+    Command arguments, environment assignments, matchers, and arbitrary hook
+    metadata can all contain credentials. Compare them internally, but show
+    only the template's trusted script/event names and the replacement action.
+    """
+    def records(data, name):
+        return [(event, {key: value for key, value in entry.items() if key != "hooks"}, hook)
+                for event, entries in data.get("hooks", {}).items()
+                for entry in entries for hook in entry.get("hooks", [])
+                if managed(hook.get("command", ""), plugin, {name})]
+
+    print("Sill-managed diff (command arguments and setting values omitted):")
+    changed = False
+    for name in sorted(names):
+        before, after = records(current, name), records(rendered, name)
+        if before == after:
+            continue
+        # Event names come solely from our rendered template, never settings.
+        events = ", ".join(sorted({event for event, _, _ in after}))
+        action = "Refresh" if before else "Add"
+        print(f"  {action} {events}: {name} using the current template and selected-instance handoff.")
+        changed = True
+    if not changed:
+        print("  Normalize managed hook order/grouping to the current template.")
 
 
 def refresh(template, dst, plugin, python, env_file, *, codex=False, dry=False, force=False):
@@ -80,7 +107,7 @@ def refresh(template, dst, plugin, python, env_file, *, codex=False, dry=False, 
                         edited = True
     if current_text:
         print(f"STALE: {dst} differs from the current template")
-        print("".join(difflib.unified_diff(current_text.splitlines(True), output.splitlines(True), fromfile=str(dst), tofile=str(dst) + " (rendered)")))
+        review_changes(current, rendered, plugin, names)
     if current_text and (codex or edited) and not force:
         print(f"Leaving {dst} untouched; use --force-hooks to apply the diff")
         return

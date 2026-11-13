@@ -421,3 +421,42 @@ def test_mcp_handshake_must_match_candidate_version_even_when_cli_matches(upgrad
     assert result.returncode != 0
     assert "MCP running version" in result.stderr
     assert "Upgrade complete" not in result.stdout
+
+
+@pytest.mark.parametrize("dry,force", [(True, False), (True, True), (False, True)])
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("codex", [False, True])
+def test_hook_review_output_excludes_settings_and_command_secrets(tmp_path, capsys, dry, force, compact, codex):
+    import shlex
+    mod = hooks_module()
+    template = ROOT / "plugin/codex.hooks.json.template"
+    plugin = ROOT / "plugin"
+    dst = tmp_path / "settings.json"
+    data = mod.render(template, plugin, "python3", "/selected/instance.env")
+    data["env"] = {"PRIVATE_API_TOKEN": "top-level-secret-fixture"}
+    data["unrelated_config_marker"] = {"value": "unrelated-setting-fixture"}
+    managed = data["hooks"]["Stop"][0]["hooks"][0]
+    managed["command"] = shlex.join(["env", "API_TOKEN=managed-env-secret-fixture", "python3",
+        str(plugin / "hooks/response-patterns.py"), "--token", "managed-argument-secret-fixture"])
+    managed["statusMessage"] = "managed-setting-secret-fixture"
+    data["hooks"]["Stop"][0]["matcher"] = "managed-matcher-secret-fixture"
+    data["hooks"]["Stop"][0]["hooks"].append({"type": "command", "command": "unrelated-hook-fixture --token unrelated-token-secret-fixture"})
+    original = json.dumps(data, indent=None if compact else 2)
+    dst.write_text(original)
+    mod.refresh(template, dst, plugin, "python3", "/selected/instance.env", codex=codex, dry=dry, force=force)
+    captured = capsys.readouterr()
+    logs = captured.out + captured.err
+    for hidden in ["PRIVATE_API_TOKEN", "top-level-secret-fixture", "unrelated_config_marker", "unrelated-setting-fixture",
+                   "managed-env-secret-fixture", "managed-argument-secret-fixture", "managed-setting-secret-fixture", "managed-matcher-secret-fixture",
+                   "unrelated-hook-fixture", "unrelated-token-secret-fixture"]:
+        assert hidden not in logs
+    assert "response-patterns.py" in logs and "Stop" in logs
+    assert "refresh" in logs.lower() or "replace" in logs.lower()
+    if dry:
+        assert dst.read_text() == original
+    else:
+        written = json.loads(dst.read_text())
+        assert written["env"] == data["env"]
+        assert written["unrelated_config_marker"] == data["unrelated_config_marker"]
+        assert any(h["command"] == "unrelated-hook-fixture --token unrelated-token-secret-fixture"
+                   for entry in written["hooks"]["Stop"] for h in entry["hooks"])
