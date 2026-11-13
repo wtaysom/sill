@@ -308,6 +308,11 @@ sill_start_runtime() {
 sill_finish_runtime() {
   local timeout="$1"
   sill_wait_healthy "$timeout" db embeddings rabbitmq || return 1
+  sill_start_maintenance "$timeout"
+}
+
+sill_start_maintenance() {
+  local timeout="$1"
   # Core dependencies were checked above. Let our shared wait report
   # startup state rather than waiting without progress inside Compose.
   if ! sill_compose up -d --no-deps maintenance_worker; then
@@ -351,4 +356,12 @@ sill_check_runtime_versions() {
     return 1
   fi
   printf 'Runtime version %s verified: installed MCP, MCP initialize, worker image %s and package.\n' "$expected" "$built"
+}
+
+# Only install.sh's explicit fresh-profile option calls this companion.
+sill_install_profile() {
+  local dir
+  dir="$(sill_backend_bin_dir)" || return 1
+  sill_compose config --format json |
+    "$dir/python" -I "$SILL_DIR/scripts/install_profile.py" "$1" "$SILL_ENV_FILE" "$SILL_RUNTIME_ENV_FILE"
 }

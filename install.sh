@@ -16,6 +16,8 @@
 #                              the recall hook's latency, and any project's
 #                              work can reach the one store; in exchange you
 #                              never re-wire hooks per project again.
+#   --embedding-profile raw|embeddinggemma-search-v1
+#                          Fresh store profile (default: raw; reruns preserve it).
 #   --no-seed              Skip the methodology seed.
 #   --client TARGET        Select claude-code, codex, or claude-desktop.
 #                          Repeat to select more than one. If omitted,
@@ -31,6 +33,7 @@
 set -euo pipefail
 
 # --- argparse -----------------------------------------------------------------
+EMBEDDING_PROFILE=raw
 NO_SEED=0
 DRY_RUN=0
 HOOKS_FOR=""
@@ -44,6 +47,14 @@ usage() {
 
 while (( $# )); do
   case "$1" in
+    --embedding-profile)
+      [[ $# -ge 2 ]] || { echo "install.sh: --embedding-profile requires a value" >&2; exit 2; }
+      case "$2" in
+        raw|embeddinggemma-search-v1) EMBEDDING_PROFILE="$2" ;;
+        *) echo "install.sh: invalid --embedding-profile (use raw or embeddinggemma-search-v1)" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
     --no-seed)
       NO_SEED=1
       shift
@@ -123,6 +134,7 @@ step_install_backend() {
 
 step_prepare_instance() {
   if (( DRY_RUN )); then
+    note "DRY: embedding profile $EMBEDDING_PROFILE (existing active profiles preserved)"
     note "DRY: would select the Compose instance and create a private $SILL_ENV_FILE if absent"
     return
   fi
@@ -132,6 +144,9 @@ step_prepare_instance() {
   sill_create_env_file
   if (( ${#CLIENTS[@]} )); then
     register_clients --dry-run
+  fi
+  if [[ "$EMBEDDING_PROFILE" != raw ]]; then
+    sill_install_profile reserve
   fi
 }
 
@@ -143,7 +158,15 @@ step_docker_up() {
 
 step_wait_healthy() {
   say "Step 4/10: wait for the schema and start the maintenance worker"
-  sill_run sill_finish_runtime "${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  local timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  if [[ "$EMBEDDING_PROFILE" == raw ]]; then
+    sill_run sill_finish_runtime "$timeout"
+  else
+    sill_run sill_wait_healthy "$timeout" db embeddings rabbitmq
+    sill_run sill_check_running_instance
+    sill_run sill_install_profile activate
+    sill_run sill_start_maintenance "$timeout"
+  fi
 }
 
 step_import_seed() {
