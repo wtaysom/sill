@@ -368,3 +368,24 @@ async def test_api_telemetry_success_restores_caller_timeout(migrated_dsn, monke
         await conn.execute("SELECT set_config('statement_timeout',$1,true)",setting)
         await client.recall_by_id(mid)
         assert await conn.fetchval('SHOW statement_timeout') == setting
+
+
+
+def test_zero_cosine_floor_keeps_negative_candidate(db, monkeypatch):
+    from scripts import recall_core as core
+    import json
+    with db.cursor() as cur:
+        cur.execute("UPDATE memories SET archived_at=now()")
+        cur.execute("SELECT memory_id FROM public.mint_memory('semantic',%s)",('negative cosine '+uuid4().hex,))
+        mid = str(cur.fetchone()[0])
+        cur.execute("UPDATE memories SET embedding=array_fill(-0.01::real,ARRAY[embedding_dimension()])::vector WHERE id=%s",(mid,))
+    def query(sql):
+        with db.cursor() as cur:
+            cur.execute(sql)
+            return '\n'.join(json.dumps(row[0]) for row in cur.fetchall())
+    monkeypatch.setattr(core,'_run_sql',query)
+    off = core.recall_rows('fast','synthetic unrelated query',fast_min_similarity=0)
+    row = next(row for row in off if row['id']==mid)
+    assert row['query_similarity'] == pytest.approx(-1)
+    assert row['source'] == 'vector'
+    assert not core.recall_rows('fast','synthetic unrelated query',fast_min_similarity=.01)

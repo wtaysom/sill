@@ -182,3 +182,13 @@ def test_public_score_survives_provenance_port():
     text = api.format_context_for_prompt(context)
     assert 'score: 0.0164' in text and 'made: undeclared' in text
     assert {'production', 'minted_in', 'speaker', 'force', 'restates_id'} <= field_names(api.MemoryPreview)
+
+
+
+def test_raw_batch_mcp_schema_accepts_optional_profile_fingerprint():
+    import sill_mcp_server
+    tool = next(tool for tool in sill_mcp_server._tools() if tool.name == 'remember_batch_raw')
+    schema = tool.inputSchema
+    assert schema['properties']['embedding_profile']['type'] == 'string'
+    assert 'embedding_profile' not in schema['required']
+    assert 'prompted' in tool.description

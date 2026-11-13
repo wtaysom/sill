@@ -375,7 +375,7 @@ def recall_rows(fn: str, query_text: str, limit: int = 15, *,
     cte = f"WITH q AS MATERIALIZED (SELECT public.get_embedding({query}, 'query') AS embedding)" if fn == 'fast' else ''
     lateral = ' CROSS JOIN q' if fn == 'fast' else ''
     call = f'public.fast_recall({query}, {limit * 3})' if fn == 'fast' else f'public.hybrid_recall({query}, {limit}, 60)'
-    floor = f'WHERE query_similarity >= {float(fast_min_similarity)}' if fn == 'fast' else ''
+    floor = f'WHERE query_similarity >= {float(fast_min_similarity)}' if fn == 'fast' and fast_min_similarity != 0 else ''
     sql = f"""{cte}
       SELECT row_to_json(preview) FROM (
         SELECT * FROM (

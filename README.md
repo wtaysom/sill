@@ -88,6 +88,26 @@ and restores its connection allowance. Retry after addressing the
 reported failure. A backup can be used for recovery into an empty
 database after confirming the target and keeping the original data.
 
+Upgrade and installer reruns preflight the existing embedding service, stored
+vector dimension and any active profile before restarting services. When the
+instance dotenv omits the model, revision or dimension, a successful validation
+pins those fields in `backend/.env` for later invocations and direct Compose use.
+Only omitted fields are appended; explicit values and unrelated bytes remain
+unchanged. A private `.env.embedding-identity.bak-*` preserves the prior file.
+Upgrade writes this pin after the database backup; `--dry-run` only validates.
+If identity cannot be proved or an explicit value conflicts, start the existing
+service with its prior configuration and resolve the reported mismatch. Changing
+embedding spaces requires the explicit [profile migration](docs/EMBEDDING-PROFILES.md),
+not an installer rerun. This records the current service identity; it does not
+attest unknown historical vectors or activate a profile. An omitted revision is
+pinned from the running TEI `/info` immutable `model_sha`, including when the
+old container used `main`. An explicit symbolic revision is left untouched, but
+a restart refuses it: a matching label cannot prove the same loaded snapshot.
+To retain that space, explicitly set the reported SHA in `EMBEDDING_REVISION`
+and remove conflicting shell overrides before retrying. A stopped or unavailable
+existing service must be started with its prior configuration so it can be
+validated; the installer will not replace it on a guessed identity.
+
 Pass the same `--client` targets you want to refresh. If you are coming
 from v0.1.0, check that Claude Code registers Sill in `~/.claude.json`.
 The older `~/.claude/.mcp.json` is a file Claude Code never reads. For a

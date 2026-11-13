@@ -236,6 +236,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             embeddings,
             type=MemoryType(type_raw),
             importance=float(args.get("importance", 0.5)),
+            embedding_profile=args.get("embedding_profile"),
         )
 
     if name == "connect":
@@ -620,12 +621,13 @@ def _tools() -> list[Any]:
         ),
         _tool(
             "remember_batch_raw",
-            "Store many memories using precomputed embeddings (bypasses get_embedding).",
+            "Store many memories using precomputed embeddings (bypasses get_embedding). Supply the active embedding_profile fingerprint for prompted profiles; optional in raw mode.",
             {
                 "type": "object",
                 "properties": {
                     "contents": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "embeddings": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "embedding_profile": {"type": "string", "description": "Active embedding profile fingerprint for these vectors; required for prompted profiles."},
                     "type": {"type": "string", "enum": [t.value for t in MemoryType], "default": MemoryType.EPISODIC.value},
                     "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5},
                 },

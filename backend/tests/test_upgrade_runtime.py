@@ -74,11 +74,13 @@ if fail == "current": ids = known
 handled = True
 output = ""
 status = 0
-if args[:2] == ["container", "inspect"]:
+if args[:2] == ["container", "ls"]:
+    output = "sill_db\nsill_embeddings\nsill_maintenance_worker"
+elif args[:2] == ["container", "inspect"]:
     service = {"sill_db": "db", "sill_embeddings": "embeddings", "sill_maintenance_worker": "maintenance_worker"}[args[-1]]
     output = json.dumps([{"State": {"Running": True}, "Config": {"Labels": {
       "com.docker.compose.project": "wrong" if fail == "project" else "backend", "com.docker.compose.service": service},
-      "Cmd": ["--model-id", "custom/model"], "Env": (["EMBEDDING_DIMENSION=768"] if fail in ("legacy-revision", "unknown-revision") else ["REVISION=custom-commit", "EMBEDDING_DIMENSION=768"])},
+      "Cmd": ["--model-id", "custom/model"], "Env": (["EMBEDDING_DIMENSION=768"] if fail in ("legacy-revision", "unknown-revision") else ["REVISION=" + ("main" if fail == "symbolic-revision" else "a" * 40), "EMBEDDING_DIMENSION=768"])},
       "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}]}])
 elif args[:2] == ["volume", "inspect"]:
     output = json.dumps([{"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.volume": "postgres_data"}}])
@@ -90,7 +92,7 @@ elif args[0] == "exec":
     if args[-1] == "true":
         status = 1 if fail == "missing" else 0
     elif "http://localhost:80/info" in args:
-        output = json.dumps({"model_id": "custom/model", "model_sha": None if fail == "unknown-revision" else "a" * 40})
+        output = json.dumps({"model_id": "custom/model", "model_sha": None if fail == "unknown-revision" else os.getenv("TEST_OBSERVED_REVISION", "a" * 40)})
     elif "pg_dump" in args:
         output = "-- PostgreSQL database dump\n" * 2000
         status = 1 if fail == "dump" else 0
@@ -116,6 +118,10 @@ elif args[0] == "exec":
                 output = "vector\nage\nhttp"
             elif "to_regprocedure" in sql:
                 output = "t"
+            elif "to_regclass" in sql and "embedding_regime" in sql:
+                output = "t"
+            elif "SELECT profile" in sql:
+                output = os.getenv("TEST_ACTIVE_PROFILE", "")
             elif "to_regclass" in sql and "IS NOT NULL" in sql:
                 number = 2 if "session_activity" in sql else (6 if "memory_reuse_events" in sql else 1)
                 output = "t" if len(ids) >= number else "f"
@@ -218,7 +224,7 @@ def test_upgrade_orders_backup_build_migrate_recreate_even_without_pending(upgra
     backup, = (upgrade[0] / "backups").glob("*.gz")
     assert backup.stat().st_mode & 0o777 == 0o600
     choice = json.loads((Path(upgrade[2]["TEST_FIXTURE"]) / "embedding-choice").read_text())
-    assert choice["EMBEDDING_REVISION"] == "custom-commit"
+    assert choice["EMBEDDING_REVISION"] == "a" * 40
 
 
 @pytest.mark.parametrize("failure", ["dump", "build", "migration", "stale-worker"])
@@ -470,3 +476,159 @@ def test_hook_review_output_excludes_settings_and_command_secrets(tmp_path, caps
         assert written["unrelated_config_marker"] == data["unrelated_config_marker"]
         assert any(h["command"] == "unrelated-hook-fixture --token unrelated-token-secret-fixture"
                    for entry in written["hooks"]["Stop"] for h in entry["hooks"])
+
+
+
+@pytest.mark.parametrize("prior_revision", ["legacy-revision", "symbolic-revision"])
+def test_omitted_identity_survives_upgrade_and_independent_install(upgrade, prior_revision):
+    checkout, home, env = upgrade
+    path = checkout / 'backend/.env'
+    original = b'# operator bytes\nPOSTGRES_PORT=5432\n'
+    path.write_bytes(original)
+    result = run(upgrade,'upgrade.sh','--no-verify',TEST_UPGRADE_FAILURE=prior_revision)
+    assert result.returncode == 0, details(result)
+    from instance_config import load_instance_env
+    saved = load_instance_env(path)
+    assert saved['EMBEDDING_MODEL_ID'] == 'custom/model'
+    assert saved['EMBEDDING_REVISION'] == 'a'*40
+    assert saved['EMBEDDING_DIMENSION'] == '768'
+    assert path.read_bytes().startswith(original)
+    backup, = path.parent.glob('.env.embedding-identity.bak-*')
+    assert backup.read_bytes() == original and backup.stat().st_mode & 0o777 == 0o600
+    first = path.read_bytes()
+    result = run(upgrade,'install.sh','--no-seed',TEST_UPGRADE_FAILURE=prior_revision)
+    assert result.returncode == 0, details(result)
+    choice = json.loads((Path(env['TEST_FIXTURE'])/'embedding-choice').read_text())
+    assert choice['EMBEDDING_REVISION'] == 'a'*40
+    assert choice['EMBEDDING_MODEL_ID'] == 'custom/model'
+    assert choice['EMBEDDING_DIMENSION'] == '768'
+    assert path.read_bytes() == first
+    assert any('SELECT profile' in c[-1] for c in calls(upgrade))
+
+
+@pytest.mark.parametrize('field,value', [('EMBEDDING_REVISION','different'),('EMBEDDING_MODEL_ID','different/model'),('EMBEDDING_DIMENSION','384')])
+def test_install_existing_identity_conflict_precedes_runtime(upgrade, field, value):
+    result = run(upgrade,'install.sh','--no-seed',**{field:value})
+    assert result.returncode != 0, details(result)
+    assert field in result.stderr
+    assert not any('up' in c or 'build' in c for c in calls(upgrade))
+
+
+def test_install_existing_profile_identity_mismatch_is_refused(upgrade):
+    profile = json.dumps({'model_id':'custom/model','revision':'other-commit','dimension':768})
+    result = run(upgrade,'install.sh','--no-seed',TEST_ACTIVE_PROFILE=profile)
+    assert result.returncode != 0, details(result)
+    assert 'profile' in result.stderr.lower()
+    assert not any('up' in c or 'build' in c for c in calls(upgrade))
+
+
+def test_upgrade_dry_run_leaves_omitted_identity_undocumented(upgrade):
+    path = upgrade[0]/'backend/.env'
+    original = path.read_bytes()
+    result = run(upgrade,'upgrade.sh','--dry-run',TEST_UPGRADE_FAILURE='legacy-revision')
+    assert result.returncode == 0, details(result)
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob('.env.embedding-identity.bak-*'))
+
+
+
+def runtime_validator():
+    spec = importlib.util.spec_from_file_location("upgrade_runtime", ROOT / "scripts/upgrade_runtime.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_identity_pin_appends_only_missing_fields_and_retains_literal_bytes(tmp_path):
+    mod = runtime_validator()
+    path = tmp_path / '.env'
+    original = b"# hand-written\r\nEMBEDDING_MODEL_ID='custom/model' # keep\r\nUNRELATED='literal $value'"
+    path.write_bytes(original)
+    path.chmod(0o640)
+    actual = {'EMBEDDING_MODEL_ID':'custom/model','EMBEDDING_REVISION':'a'*40,'EMBEDDING_DIMENSION':'768'}
+    mod.persist_identity(path,mod.snapshot(path),mod.load_instance_env(path),actual)
+    assert path.read_bytes().startswith(original+b'\n')
+    assert path.read_bytes().count(b'EMBEDDING_MODEL_ID=') == 1
+    assert mod.load_instance_env(path) == dict(actual,UNRELATED='literal $value')
+    backup, = tmp_path.glob('.env.embedding-identity.bak-*')
+    assert backup.read_bytes() == original and backup.stat().st_mode & 0o777 == 0o600
+    assert path.stat().st_mode & 0o777 == 0o640
+    before = path.read_bytes()
+    mod.persist_identity(path,mod.snapshot(path),mod.load_instance_env(path),actual)
+    assert path.read_bytes() == before and len(list(tmp_path.glob('*.bak-*'))) == 1
+
+
+@pytest.mark.parametrize('when', ['before', 'during'])
+def test_identity_pin_refuses_concurrent_dotenv_change(tmp_path, monkeypatch, when):
+    mod = runtime_validator()
+    path = tmp_path / '.env'
+    path.write_bytes(b'# original\n')
+    original = mod.snapshot(path)
+    if when == 'before': path.write_bytes(b'# concurrent\n')
+    else:
+        stage = mod.stage
+        def concurrent(*args):
+            result = stage(*args)
+            path.write_bytes(b'# concurrent\n')
+            return result
+        monkeypatch.setattr(mod,'stage',concurrent)
+    with pytest.raises(ValueError,match='changed'):
+        mod.persist_identity(path,original,{}, {'EMBEDDING_REVISION':'a'*40})
+    assert path.read_bytes() == b'# concurrent\n'
+    assert not list(tmp_path.glob('.embedding-identity-tmp-*'))
+
+
+def test_identity_pin_refuses_explicit_choice_and_symlink(tmp_path):
+    mod = runtime_validator()
+    path = tmp_path / '.env'
+    path.write_text('EMBEDDING_REVISION=chosen\n')
+    with pytest.raises(ValueError,match='conflicts'):
+        mod.persist_identity(path,mod.snapshot(path),mod.load_instance_env(path),{'EMBEDDING_REVISION':'a'*40})
+    assert path.read_text() == 'EMBEDDING_REVISION=chosen\n'
+    link = tmp_path/'link'; link.symlink_to(path)
+    with pytest.raises(OSError): mod.snapshot(link)
+
+
+def test_existing_install_dry_run_validates_without_pinning(upgrade):
+    path = upgrade[0]/'backend/.env'
+    original = path.read_bytes()
+    result = run(upgrade,'install.sh','--dry-run',TEST_UPGRADE_FAILURE='legacy-revision')
+    assert result.returncode == 0, details(result)
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob('.env.embedding-identity.bak-*'))
+    assert any('http://localhost:80/info' in c for c in calls(upgrade))
+    assert not any('up' in c or 'build' in c for c in calls(upgrade))
+
+
+@pytest.mark.parametrize('script', ['install.sh', 'upgrade.sh'])
+def test_explicit_symbolic_pin_is_preserved_and_restart_refused(upgrade, script):
+    path = upgrade[0]/'backend/.env'
+    original = b'# explicit choice\nEMBEDDING_REVISION=main\n'
+    path.write_bytes(original)
+    result = run(upgrade,script,TEST_UPGRADE_FAILURE='symbolic-revision')
+    assert result.returncode != 0
+    assert 'TEI /info model_sha ' + 'a'*40 in result.stderr
+    assert path.read_bytes() == original
+    assert not any('up' in c or 'build' in c or 'pg_dump' in c for c in calls(upgrade))
+
+
+def test_installer_checks_loaded_sha_even_when_configured_pins_match(upgrade):
+    path = upgrade[0]/'backend/.env'
+    path.write_text('EMBEDDING_REVISION='+'a'*40+'\n')
+    original = path.read_bytes()
+    result = run(upgrade,'install.sh','--no-seed',TEST_OBSERVED_REVISION='b'*40)
+    assert result.returncode != 0
+    assert 'EMBEDDING_REVISION' in result.stderr
+    assert path.read_bytes() == original
+    assert not any('up' in c or 'build' in c for c in calls(upgrade))
+
+
+def test_fresh_identity_preflight_needs_no_installed_python_dependencies(tmp_path):
+    import os
+    executable(tmp_path/'docker', '#!/bin/sh\nexit 0\n')
+    result = subprocess.run([sys.executable,'-I','-S',str(ROOT/'scripts/upgrade_runtime.py'),
+        str(tmp_path/'.env'),'--install'], input=json.dumps({'services':{},'volumes':{}}),
+        env=dict(os.environ,PATH=str(tmp_path)+':/usr/bin:/bin'), text=True,capture_output=True)
+    assert result.returncode == 0, details(result)
+    assert json.loads(result.stdout) == {}
+    assert not (tmp_path/'.env').exists()

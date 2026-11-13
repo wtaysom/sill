@@ -62,7 +62,7 @@ CUE_RE = re.compile(rf"^\s*({CUE_CLOCK})\s*-->\s*({CUE_CLOCK})(?:\s|$)")
 CLEAN_CUE_RE = re.compile(r"^\[(\d+:\d{2}:\d{2}(?:[.,]\d{1,3})?)\][ \t]*(.*)$", re.MULTILINE)
 PAREN_CUE = r"\(\s*(?:(?i:about|around|at|ca\.?|~)\s*)?"
 PAREN_RE = re.compile(PAREN_CUE + r"$")
-ABBREVIATION_RE = re.compile(r"(?i)(?<![^\W_])(?:e\.g|i\.e)$")
+ABBREVIATION_RE = re.compile(r"(?i)(?<![^\W_])(?:e\.g|i\.e)\Z")
 SENTENCE_RE = re.compile(
     r"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
     rf"(?!(?:\[[^\]\n]*\]\s*)+{PAREN_CUE}{STAMP})"
@@ -375,7 +375,18 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
 def _cue_words(text: str) -> Iterator[tuple[tuple[float, float], tuple[str, ...]]]:
     """Read SRT/VTT cues, or a plain caption file with bracketed cue starts."""
     lines = text.splitlines()
+    nonspoken = False
+    block_start = True
     for index, line in enumerate(lines):
+        if not line.strip():
+            nonspoken = False
+            block_start = True
+            continue
+        if block_start:
+            nonspoken = bool(re.match(r"^(?:WEBVTT|NOTE|STYLE|REGION)(?:[ \t]|$)", line))
+            block_start = False
+        if nonspoken:
+            continue
         if match := CUE_RE.match(line):
             end = index + 1
             while end < len(lines) and lines[end].strip() and not CUE_RE.match(lines[end]):

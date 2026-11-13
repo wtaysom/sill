@@ -365,3 +365,16 @@ sill_install_profile() {
   sill_compose config --format json |
     "$dir/python" -I "$SILL_DIR/scripts/install_profile.py" "$1" "$SILL_ENV_FILE" "$SILL_RUNTIME_ENV_FILE"
 }
+
+
+sill_preserve_embedding_identity() {
+  local settings mode="$1" flag="" profile_flag="" key value
+  if (( ! ${DRY_RUN:-0} )); then flag=--persist; fi
+  if [[ "$mode" == --install && "${EMBEDDING_PROFILE:-raw}" != raw ]]; then profile_flag=--fresh-profile; fi
+  settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$mode" ${flag:+"$flag"} ${profile_flag:+"$profile_flag"})" || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      EMBEDDING_MODEL_ID|EMBEDDING_REVISION|EMBEDDING_DIMENSION) export "$key=$value" ;;
+    esac
+  done < <(printf '%s' "$settings" | python3 -c 'import json,sys; print("\n".join(k+"="+v for k,v in json.load(sys.stdin).items()))')
+}

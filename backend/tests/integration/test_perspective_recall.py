@@ -92,10 +92,13 @@ async def test_perspective_filter_before_limit(migrated_dsn):
         assert [r.id for r in result.memories] == [target]
         await client.remember(keyword+' blank name', speaker='   ', minted_in=STAMP)
         await client.remember(keyword+' padded name', speaker=' Inez ', minted_in=STAMP)
+        for blank in ('\t', '\n', ' \t\n\r\f\v '):
+            mid = await client.remember(keyword+repr(blank), speaker=blank, minted_in=STAMP)
+            assert (await client.recall_by_id(mid)).speaker == blank
         speakers = dict(await client.speakers())
         assert speakers['Inez'] == 1 and speakers['crowd'] == 20
         assert '#Nobody' not in speakers and 'archived-only' not in speakers
-        assert '   ' not in speakers
+        assert not any(not name.strip() for name in speakers)
         assert speakers[' Inez '] == 1  # Listing never rewrites a stored identity.
         assert await client.speakers(min_count=20, limit=1) == [('crowd',20)]
 
@@ -125,3 +128,27 @@ def test_perspective_fresh_and_upgrade(fixture_dsn, fixture_container, upgrade):
                 for namespace in ('public','ag_catalog'):
                     cur.execute(f'SELECT * FROM {namespace}.hybrid_recall_perspective(%s,1,%s)',('synthetic','absent-speaker'))
                     assert cur.fetchall() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompted", [False, True])
+@pytest.mark.parametrize("fingerprint", ["matching", "mismatched", "omitted"])
+async def test_mcp_raw_batch_profile_reaches_sql_guard(migrated_dsn, prompted, fingerprint):
+    from embedding_profiles import resolve_profile
+    profile = resolve_profile('google/embeddinggemma-300m',768,revision='fixture-rev')
+    async with client_in_transaction(migrated_dsn) as (client, conn):
+        if prompted:
+            await conn.execute('UPDATE public.embedding_regime SET profile=$1::jsonb', json.dumps(profile.to_dict()))
+        args = {'contents': ['mcp supplied '+uuid4().hex], 'embeddings': [[.01]*768]}
+        if fingerprint != 'omitted':
+            args['embedding_profile'] = (profile.fingerprint if prompted else 'legacy-raw-unknown') if fingerprint == 'matching' else 'wrong'
+        if fingerprint == 'mismatched' or prompted and fingerprint == 'omitted':
+            async with conn.transaction():
+                with pytest.raises(asyncpg.PostgresError, match='embedding_profile'):
+                    # Nested transaction exits exceptionally to roll the SQL error back.
+                    async with conn.transaction():
+                        await mcp._dispatch_tool(client, 'remember_batch_raw', args)
+        else:
+            ids = await mcp._dispatch_tool(client, 'remember_batch_raw', args)
+            assert len(ids) == 1
+            assert (await client.recall_by_id(ids[0])).content == args['contents'][0]

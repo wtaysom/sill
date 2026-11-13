@@ -495,3 +495,23 @@ def test_quote_tied_timestamp_fingerprint_preserves_and_detects_changed_candidat
     assert same.status == edited.status == "unchecked"
     assert findings(same) == [(1, "text_mismatch", "preexisting")]
     assert findings(edited) == [(1, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("header", ["NOTE", "NOTE example", "STYLE", "STYLE ", "REGION", "REGION\t", "WEBVTT metadata"])
+def test_vtt_nonspoken_blocks_cannot_verify_timing_examples(tmp_path, header):
+    captions = evidence(tmp_path, "speech.vtt", "WEBVTT\n\n" + header + "\n"
+        "[00:00:02] The hidden comet was made of marmalade.\n"
+        "00:00:02.000 --> 00:00:03.000\nAnother imaginary sentence about comets.\n\n"
+        "00:00:40.000 --> 00:00:43.000\nActual speech is about rainfall.\n")
+    result = quote_check.audit({}, {NOTE: 'At 00:00:02 "The hidden comet was made of marmalade." [Speech](src)'}, {"src": [captions]})
+    assert findings(result) == [(1, "text_mismatch", "new")]
+    following = quote_check.audit({}, {NOTE: 'At 00:00:40 "Actual speech is about rainfall." [Speech](src)'}, {"src": [captions]})
+    assert following.status == "checked" and following.findings == []
+    source = quote_check._read_source(captions)
+    assert "imaginary" not in source.tokens
+
+
+def test_hard_wrapped_non_abbreviation_does_not_lend_timestamp():
+    quotes = list(quote_check._quotes('At 00:00:02 we used wiki.e\n. "Actual speech is about rainfall." [Speech](src)', {"src": [Path("speech.vtt")]}))
+    assert len(quotes) == 1
+    assert quotes[0].stamp is None

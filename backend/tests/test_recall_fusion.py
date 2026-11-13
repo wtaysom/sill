@@ -82,3 +82,13 @@ def test_legacy_two_argument_fetch_injection(core):
         return [{'id':'legacy','score':.2}]
     assert core.fused_recall('query',fetch=fetch)[0]['id'] == 'legacy'
     assert len(calls) == len(set(calls))
+
+
+@pytest.mark.parametrize("lane,floor,has_predicate", [("fast",0,False),("fast",.25,True),("hybrid",.25,False)])
+def test_real_recall_sql_zero_disables_only_cosine_floor(core, monkeypatch, lane, floor, has_predicate):
+    captured = []
+    monkeypatch.setattr(core, "_run_sql", lambda sql: captured.append(sql) or "")
+    core.recall_rows(lane,"synthetic",fast_min_similarity=floor)
+    assert ("WHERE query_similarity >=" in captured[0]) is has_predicate
+    if lane == "fast": assert "1 - (m.embedding <=> q.embedding)" in captured[0]
+    assert "WHERE score >=" not in captured[0]

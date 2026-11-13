@@ -158,7 +158,7 @@ non-interactive `--print` invocations.
 | `SILL_RECALL_MAX_MEMORIES` | `5` | Integer from 0 through 50. Zero skips store recall. |
 | `SILL_RECALL_MAX_CONVERSATIONS` | `2` | Integer from 0 through 50. Zero skips the optional conversation search. |
 | `SILL_RECALL_MIN_QUERY_LENGTH` | `20` | Integer from 0 through 10,000. Zero removes the minimum length. The 2,000-character maximum and topical keyword check still apply. |
-| `SILL_RECALL_MIN_SIMILARITY` | `0.25` | Finite number from 0 through 1. Filters the blended fast recall score. Zero disables this filter. Hybrid recall uses its own reciprocal rank fusion scores. |
+| `SILL_RECALL_MIN_SIMILARITY` | `0.25` | Finite number from 0 through 1. Filters actual query cosine similarity in fast recall, independently of its blended score. Zero disables this filter. Hybrid recall uses its own reciprocal rank fusion scores. |
 | `SILL_RECALL_QUIET` | off | Set to `1`, `true` or `yes` to hide the displayed result list. The time header, store recall failure notices and model context still appear. |
 
 Invalid numeric values use the defaults. A failed store recall points to

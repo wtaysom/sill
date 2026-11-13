@@ -7,7 +7,8 @@ Hard constraint for this file: never write to the real ``~/.claude`` or
    performs a single write anywhere in the script — see ``run()`` and every
    ``DRY_RUN``-gated branch in install.sh) *and* overrides ``HOME`` to a
    pytest ``tmp_path``, so even a latent dry-run bug can't reach the real
-   home directory.
+   home directory. Read-only runtime discovery is replaced by the Docker
+   boundary fixture below; no command can reach a real service.
 2. The two tests that exercise install.sh's real (non-dry-run) file-writing
    logic for the new home-scope helpers do so by *sourcing* install.sh in a
    subprocess (install.sh's own "main" section is guarded by a
@@ -37,6 +38,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = REPO_ROOT / "install.sh"
 UPGRADE_SH = REPO_ROOT / "upgrade.sh"
 AMBIENT_TEMPLATE = REPO_ROOT / "plugin" / "claude.home.md.template"
+
+
+@pytest.fixture(autouse=True)
+def isolated_scope_docker(tmp_path, monkeypatch):
+    """Scope rendering does not require an engine or an existing instance."""
+    bin_dir = tmp_path / "scope-bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(f"#!{sys.executable}\n" + r'''
+import json, sys
+args = sys.argv[1:]
+if args[0] == "compose" and args[-3:] == ["config", "--format", "json"]:
+    print(json.dumps({"services": {}, "volumes": {}}))
+elif args[:2] in (["container", "ls"], ["volume", "ls"]):
+    pass
+elif args[:2] == ["exec", "sill_absent_container_for_tests"]:
+    raise SystemExit(1)
+else:
+    raise AssertionError("Unexpected Docker operation in scope rendering test: " + repr(args))
+''')
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
 
 
 def run_install(args, home, extra_env=None, timeout=60):

@@ -122,6 +122,28 @@ with (root / "docker-calls").open("a") as out:
 if args[0] == "info":
     print(os.getenv("TEST_ENGINE", "linux aarch64"))
     sys.exit()
+if args[:2] == ["container", "ls"]:
+    print("sill_db\nsill_embeddings" if (root / "volume.json").exists() and (root / "embedding-choice").exists() else "")
+    sys.exit()
+if args[:2] == ["container", "inspect"]:
+    service = "db" if args[-1] == "sill_db" else "embeddings"
+    choice = json.loads((root / "embedding-choice").read_text())
+    print(json.dumps([{"State": {"Running": True}, "Config": {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.service": service}, "Cmd": ["--model-id", choice["EMBEDDING_MODEL_ID"]], "Env": ["REVISION=" + choice["EMBEDDING_REVISION"], "EMBEDDING_DIMENSION=768"]}, "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}]}]))
+    sys.exit()
+if args[0] == "exec":
+    if "http://localhost:80/info" in args:
+        choice = json.loads((root / "embedding-choice").read_text())
+        print(json.dumps({"model_id": choice["EMBEDDING_MODEL_ID"], "model_sha": choice["EMBEDDING_REVISION"]}))
+        sys.exit()
+    sql = args[-1]
+    if "embedding_dimension()" in sql: print("768")
+    elif "to_regclass" in sql: print("t")
+    elif "SELECT profile" in sql:
+        state = root / "profile-state.json"
+        value = json.loads(state.read_text())["active_profile"] if state.exists() else None
+        print(json.dumps(value) if value else "")
+    else: raise AssertionError(args)
+    sys.exit()
 if args[0] == "volume":
     volume = root / "volume.json"
     if args[1] == "ls":
@@ -198,7 +220,7 @@ if command[0] == "config":
                       "published": settings.get("POSTGRES_PORT", "5432"), "target": 5432}]}
     db["volumes"] = [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]
     db["command"] = ["postgres", "-c", "app.embedding_dimension=" + settings.get("EMBEDDING_DIMENSION", "768")]
-    emb = {"command": ["--model-id", settings.get("EMBEDDING_MODEL_ID", "unsloth/embeddinggemma-300m")], "environment": {
+    emb = {"container_name": "sill_embeddings", "command": ["--model-id", settings.get("EMBEDDING_MODEL_ID", "unsloth/embeddinggemma-300m")], "environment": {
         "REVISION": settings.get("EMBEDDING_REVISION", settings.get("SILL_DEFAULT_EMBEDDING_REVISION", "main")),
         "EMBEDDING_MODEL_ID": settings.get("EMBEDDING_MODEL_ID", "unsloth/embeddinggemma-300m"),
         "EMBEDDING_DIMENSION": settings.get("EMBEDDING_DIMENSION", "768")}}
@@ -233,9 +255,11 @@ if command[0] == "up":
     saved = dict(line.split("=", 1) for line in dot.read_text().splitlines()
                  if line and not line.startswith("#")) if dot.exists() else {}
     settings = saved | dict(os.environ)
-    names = {"EMBEDDING_IMAGE", "EMBEDDING_PLATFORM", "EMBEDDING_REVISION"}
+    names = {"EMBEDDING_IMAGE", "EMBEDDING_PLATFORM", "EMBEDDING_REVISION", "EMBEDDING_MODEL_ID", "EMBEDDING_DIMENSION"}
     chosen = {key: value for key, value in settings.items()
               if key.startswith("SILL_DEFAULT_EMBEDDING_")}
+    chosen["SILL_DEFAULT_EMBEDDING_MODEL_ID"] = "unsloth/embeddinggemma-300m"
+    chosen["SILL_DEFAULT_EMBEDDING_DIMENSION"] = "768"
     for key in names:
         chosen[key] = settings.get(key, chosen.get("SILL_DEFAULT_" + key))
     (root / "embedding-choice").write_text(json.dumps(chosen))
@@ -311,7 +335,8 @@ def test_dry_run_is_read_only_even_with_desktop_selected(runtime):
     assert "Sill is installed" not in result.stdout
     assert not (checkout / "backend/.env").exists()
     assert list(home.iterdir()) == []
-    assert not (Path(env["TEST_FIXTURE"]) / "docker-calls").exists()
+    calls = [json.loads(line) for line in (Path(env["TEST_FIXTURE"]) / "docker-calls").read_text().splitlines()]
+    assert not any("up" in c or "build" in c or "create" in c for c in calls)
 
 
 def test_persisted_registration_rejects_shell_port_conflict_before_start(runtime):
@@ -584,7 +609,7 @@ def test_prompted_interruption_preserves_operation_and_never_prepares_twice(prof
 def test_prompted_rejects_existing_or_incompatible_before_start(profile_runtime, override):
     result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1", **override)
     assert result.returncode != 0
-    assert "creation evidence" in result.stderr or "requires the tested" in result.stderr
+    assert any(message in result.stderr for message in ("creation evidence", "requires the tested", "Could not validate the existing runtime"))
     assert "Step 3/10" not in result.stdout
     assert not (Path(profile_runtime[2]["TEST_FIXTURE"]) / "profile-state.json").exists()
 
@@ -683,3 +708,20 @@ def test_prompted_backup_uses_selected_database_container(profile_runtime):
     assert result.returncode == 0, details(result)
     receipt = json.loads(profile_receipt(profile_runtime).read_text())
     assert receipt["selection"]["container"] == "selected_fixture_db"
+
+
+@pytest.mark.parametrize("scope", ["project", "home"])
+@pytest.mark.parametrize("override", [{"POSTGRES_PORT": "55432"}, {"COMPOSE_PROJECT_NAME": "another"}])
+def test_hook_only_conflicts_refused_before_runtime(runtime, scope, override):
+    checkout, home, env = runtime
+    project = checkout / "hook project"
+    project.mkdir()
+    args = ["--scope", scope]
+    if scope == "project": args += ["--hooks-for", str(project)]
+    result = run(runtime, "install.sh", "--no-seed", *args, **override)
+    assert result.returncode != 0, details(result)
+    calls = [json.loads(line) for line in (Path(env["TEST_FIXTURE"]) / "docker-calls").read_text().splitlines()]
+    assert not any("build" in c or "up" in c for c in calls)
+    for target in (home, project):
+        assert not (target / ".codex/hooks.json").exists()
+        assert not (target / ".claude/settings.json").exists()

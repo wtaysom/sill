@@ -149,7 +149,7 @@ if (( ! SCHEMA_ONLY )); then
   sill_check_running_instance
   settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$dimension")" || fail "Compose instance does not match the installed data"
   # Preserve the running embedding space, including a custom revision that
-  # predates the new defaults. Never write the operator's dotenv.
+  # predates the new defaults. Omitted fields are pinned after backup below.
   EMBEDDING_MODEL_ID="$(printf '%s' "$settings" | python3 -c 'import json,sys; print(json.load(sys.stdin)["EMBEDDING_MODEL_ID"])')"
   EMBEDDING_REVISION="$(printf '%s' "$settings" | python3 -c 'import json,sys; print(json.load(sys.stdin)["EMBEDDING_REVISION"])')"
   EMBEDDING_DIMENSION="$dimension"
@@ -176,6 +176,7 @@ mv -- "$partial" "$backup"
 partial=""
 printf 'Valid private backup: %s\n' "$backup"
 if (( ! SCHEMA_ONLY )); then
+  sill_preserve_embedding_identity "$dimension"
   # No services are changed until backup succeeds. Build/install failure
   # leaves the prior worker container available and running.
   sill_compose build db maintenance_worker

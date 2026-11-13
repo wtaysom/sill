@@ -134,13 +134,15 @@ step_install_backend() {
 
 step_prepare_instance() {
   if (( DRY_RUN )); then
+    sill_preserve_embedding_identity --install
     note "DRY: embedding profile $EMBEDDING_PROFILE (existing active profiles preserved)"
     note "DRY: would select the Compose instance and create a private $SILL_ENV_FILE if absent"
     return
   fi
   local mode=install
-  if (( ${#CLIENTS[@]} )); then mode=persist; fi
+  if (( ${#CLIENTS[@]} )) || [[ -n "$HOOKS_FOR" || "$SCOPE" == home ]]; then mode=persist; fi
   sill_prepare_instance "$mode"
+  sill_preserve_embedding_identity --install
   sill_create_env_file
   if (( ${#CLIENTS[@]} )); then
     register_clients --dry-run
