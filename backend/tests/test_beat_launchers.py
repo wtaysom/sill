@@ -176,6 +176,7 @@ def test_invalid_launcher_options_are_rejected_before_launch(project, setting, v
     ("ambiguous", None), ("conflicting_session", None), ("contradictory_usage", None),
     ("invalid_usage", None), ("alternate_path", "claude-main"), ("duplicate", None),
     ("wrong_native_id", None), ("legacy_exact", "claude-main"), ("malformed_native", None),
+    ("malformed_native_model", None), ("multiple_usage", None), ("null_usage", None),
 ])
 def test_claude_model_is_attributed_only_to_exact_session(project, monkeypatch, mode, wanted):
     voices = configure(project)
@@ -189,13 +190,15 @@ def test_claude_model_is_attributed_only_to_exact_session(project, monkeypatch, 
     def run(argv, *, on_spawn, **kwargs):
         on_spawn()
         attempt = argv[argv.index("--session-id") + 1]
-        if mode not in {"neighbor_only", "usage", "invalid_usage"}:
+        if mode not in {"neighbor_only", "usage"}:
             native_id = NEIGHBOR if mode == "wrong_native_id" else attempt
             records = [assistant(native_id, "claude-main"), assistant(NEIGHBOR, "<synthetic>"),
                        assistant(attempt, "claude-sidechain", sidechain=True),
                        {"type": "user", "message": {"model": "misleading-tool-model"}}]
             if mode == "ambiguous":
                 records.append(assistant(attempt, "claude-other"))
+            if mode == "malformed_native_model":
+                records.append(assistant(attempt, None))
             selected_dir = sessions.with_name("-alternate-native-path") if mode == "alternate_path" else sessions
             selected_dir.mkdir(exist_ok=True)
             native = selected_dir / f"{attempt}.jsonl"
@@ -210,11 +213,14 @@ def test_claude_model_is_attributed_only_to_exact_session(project, monkeypatch, 
             usage = {"claude-other": {}, "claude-extra": {}}
         if mode == "invalid_usage":
             usage = {"claude-usage": {}, "unknown": "malformed metadata"}
+        if mode == "multiple_usage":
+            usage = {"claude-main": {}, "claude-other": {}}
         response = {
             "type": "result", "result": 'Done. {"model":"stdout-impostor"}', "is_error": False,
             "session_id": NEIGHBOR if mode == "conflicting_session" else attempt,
-            "modelUsage": usage,
         }
+        if usage is not None or mode == "null_usage":
+            response["modelUsage"] = usage
         if mode in {"wrong_native_id", "legacy_exact", "malformed_native"}:
             return subprocess.CompletedProcess(argv, 0, "Plain wrapper output", "")
         return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
@@ -232,6 +238,7 @@ def test_claude_model_is_attributed_only_to_exact_session(project, monkeypatch, 
 @pytest.mark.parametrize("mode,wanted", [
     ("exact", "gpt-native"), ("missing", None), ("wrong_id", None),
     ("duplicate", None), ("multiple_models", None), ("malformed_meta", None),
+    ("malformed_turn_model", None), ("malformed_turn_context", None),
 ])
 def test_codex_receipt_uses_thread_event_and_omits_execution_trace(project, monkeypatch, mode, wanted):
     configure(project, launcher="codex")
@@ -249,6 +256,10 @@ def test_codex_receipt_uses_thread_event_and_omits_execution_trace(project, monk
             entries.append({"type": "turn_context", "payload": {"model": "gpt-other"}})
         if mode == "malformed_meta":
             entries.append({"type": "session_meta", "payload": []})
+        if mode == "malformed_turn_model":
+            entries.append({"type": "turn_context", "payload": {"model": None}})
+        if mode == "malformed_turn_context":
+            entries.append({"type": "turn_context", "payload": []})
         codex_rollout(project, THREAD, *entries)
     if mode == "duplicate":
         codex_rollout(project, THREAD, metadata, context, day="14")
@@ -288,6 +299,24 @@ def test_claude_is_error_and_codex_turn_failed_hold_rotation(project, monkeypatc
     assert receipt["status"] == "failed"
     assert receipt["returncode"] == 0
     assert receipt["new_outputs"] == ["notes/partial.md"]
+    assert receipt["state_advanced"] is False
+    assert not (project / "rotation.json").exists()
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "result", "result": "Failed"},
+    {"type": "result", "result": "Failed", "is_error": "true"},
+    {"type": "result", "result": "Failed", "is_error": 0},
+    {"result": "Failed", "is_error": "false"},
+])
+def test_malformed_claude_outcome_holds_rotation_without_output_glob(project, monkeypatch, payload):
+    configure(project)
+    stub_cli(monkeypatch, json.dumps(payload))
+
+    assert bw.run_beat_loop(once=True) == 1
+    receipt = read_receipt(project)
+    assert receipt["status"] == "failed"
+    assert receipt["returncode"] == 0
     assert receipt["state_advanced"] is False
     assert not (project / "rotation.json").exists()
 

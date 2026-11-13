@@ -77,9 +77,11 @@ def _host_dir(env: Mapping[str, str], key: str, default: str, root: Path) -> Pat
 
 
 def _claude_models(root: Path, env: Mapping[str, str], attempt_id: str) -> set[str] | None:
+    """Return native models, an empty set for invalid model data, or None for unverified identity."""
     projects = _host_dir(env, "CLAUDE_CONFIG_DIR", ".claude", root) / "projects"
     models = set()
     found_assistant = False
+    invalid_model = False
     try:
         paths = list(projects.glob(f"*/{attempt_id}.jsonl"))
         if len(paths) != 1 or not paths[0].is_file():
@@ -88,19 +90,23 @@ def _claude_models(root: Path, env: Mapping[str, str], attempt_id: str) -> set[s
             if row.get("type") != "assistant" or row.get("isSidechain"):
                 continue
             message = row.get("message")
-            if not isinstance(message, dict):
+            model = message.get("model") if isinstance(message, dict) else None
+            if model == "<synthetic>":
                 continue
-            model = message.get("model")
-            if isinstance(model, str) and model.startswith("<"):
-                continue
-            if "sessionId" in row and _session_id(row["sessionId"]) != attempt_id:
+            native_id = _session_id(row.get("sessionId"))
+            if "sessionId" in row and native_id != attempt_id:
                 return None
-            found_assistant = True
             if _model_id(model):
+                found_assistant = True
                 models.add(model)
+            else:
+                found_assistant |= native_id == attempt_id
+                invalid_model = True
     except (OSError, ValueError):
         return None
-    return models if found_assistant else None
+    if not found_assistant:
+        return None
+    return set() if invalid_model else models
 
 
 def _claude_result(
@@ -109,29 +115,32 @@ def _claude_result(
     stdout = result.stdout or ""
     payload = _json_object(stdout)
     structured = payload.get("type") == "result" or (
-        "type" not in payload and isinstance(payload.get("result"), str)
-        and isinstance(payload.get("is_error"), bool)
+        "type" not in payload and "result" in payload and "is_error" in payload
     )
     text = payload.get("result") if structured else stdout
-    failed = result.returncode != 0 or (structured and payload.get("is_error") is True)
+    outcome = payload.get("is_error")
+    failed = result.returncode != 0 or (structured and outcome is not False)
     diagnostics = result.stderr or ""
+    if structured and not isinstance(outcome, bool):
+        diagnostics = "\n".join(filter(None, (diagnostics, "Claude result did not report a boolean is_error.")))
     text = text if isinstance(text, str) else ""
 
     reported = _session_id(payload.get("session_id")) if structured else None
     if structured and payload.get("session_id") is not None and reported != attempt_id:
         return LaunchResult(None, None, None, text, diagnostics, failed)
 
-    usage = payload.get("modelUsage") if structured else None
-    usage_models = set()
-    if isinstance(usage, dict) and all(_model_id(key) and isinstance(value, dict) for key, value in usage.items()):
-        usage_models = set(usage)
+    usage = payload.get("modelUsage", {}) if structured else {}
+    valid_usage = isinstance(usage, dict) and all(
+        _model_id(key) and isinstance(value, dict) for key, value in usage.items()
+    )
+    usage_models = set(usage) if valid_usage else set()
     if reported == attempt_id and len(usage_models) == 1:
         return LaunchResult(reported, next(iter(usage_models)), "claude_result_model_usage",
                             text, diagnostics, failed)
 
     native_models = _claude_models(root, env, attempt_id) if _session_id(attempt_id) == attempt_id else None
     host_session_id = attempt_id if native_models is not None else reported
-    if native_models and len(native_models) == 1 and (not usage_models or native_models <= usage_models):
+    if valid_usage and native_models and len(native_models) == 1 and (not usage_models or native_models == usage_models):
         return LaunchResult(host_session_id, next(iter(native_models)), "claude_native_session_metadata",
                             text, diagnostics, failed)
     return LaunchResult(host_session_id, None, None, text, diagnostics, failed)
@@ -149,9 +158,11 @@ def _codex_model(root: Path, env: Mapping[str, str], thread_id: str) -> str | No
             payload = row.get("payload")
             if row.get("type") == "session_meta":
                 ids.add(_session_id(payload.get("id")) if isinstance(payload, dict) else None)
-            elif row.get("type") == "turn_context" and isinstance(payload, dict):
-                if _model_id(payload.get("model")):
-                    models.add(payload["model"])
+            elif row.get("type") == "turn_context":
+                model = payload.get("model") if isinstance(payload, dict) else None
+                if not _model_id(model):
+                    return None
+                models.add(model)
         if ids == {thread_id} and len(models) == 1:
             return next(iter(models))
     except (OSError, ValueError):
