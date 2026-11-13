@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections import Counter
 from collections.abc import Hashable, Iterable, Iterator, Mapping
@@ -17,6 +18,11 @@ MARKDOWN_SUFFIXES = {".md", ".markdown"}
 TERMINAL_STATUSES = (
     "succeeded", "skipped", "failed", "timeout", "interrupted",
     "launch_error", "no_record", "state_error",
+)
+# Match the worker's isoformat output and the equivalent UTC Z spelling.
+RECEIPT_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?P<fraction>\.[0-9]{1,6})?"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]{1,6})?)?)"
 )
 
 
@@ -63,7 +69,7 @@ class AuditConfig:
 def _read_receipt(path: Path) -> Mapping[str, object] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -71,14 +77,16 @@ def _read_receipt(path: Path) -> Mapping[str, object] | None:
 def _offset_time(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
-    # Python 3.10's fromisoformat accepts numeric offsets but lacks the Z alias.
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
+    match = RECEIPT_TIMESTAMP.fullmatch(value)
+    if match is None:
+        return None
+    pattern = "%Y-%m-%dT%H:%M:%S"
+    if match["fraction"] is not None:
+        pattern += ".%f"
     try:
-        parsed = datetime.fromisoformat(value)
+        return datetime.strptime(value, pattern + "%z")
     except ValueError:
         return None
-    return parsed if parsed.utcoffset() is not None else None
 
 
 def window_from_receipt(receipt: Mapping[str, object] | None) -> Window | None:

@@ -94,6 +94,13 @@ def test_fingerprints_are_scoped_to_file_and_check():
     {"spawned_at": None},
     {"completed_at": None},
     {"spawned_at": "2026-11-13T12:00:00"},
+    pytest.param(
+        {"spawned_at": "2026-11-13T04:00:00+00:60", "completed_at": "2026-11-13T04:02:00+01:00"},
+        id="offset-minute-overflow",
+    ),
+    pytest.param({"spawned_at": "2026-11-13T04:00:00+00:00:60"}, id="offset-second-overflow"),
+    pytest.param({"spawned_at": "2026-11-13T04+00:00"}, id="hour-only"),
+    pytest.param({"spawned_at": "2026-11-13T04:00+00:00"}, id="missing-seconds"),
     {"completed_at": "2026-11-13T03:59:00+00:00"},
     {"completed_at": "yesterday"},
     {"completed_at": 123},
@@ -104,12 +111,13 @@ def test_fingerprints_are_scoped_to_file_and_check():
     {"status": None},
 ])
 def test_invalid_or_incomplete_window_is_unchecked(tmp_path, overrides):
-    receipt = write_receipt(tmp_path, **overrides)
+    (tmp_path / "note.md").write_text("New Markdown\n", encoding="utf-8")
+    receipt = write_receipt(tmp_path, new_outputs=["note.md"], **overrides)
     config = audit.load_audit_config(write_json(tmp_path / "beats.json", {}), tmp_path)
 
-    assert audit.load_window(receipt) is None
+    window = audit.load_window(receipt)
     files, reason = audit.audit_snapshot(config, receipt)
-    assert files == {}
+    assert (window, files) == (None, {})
     assert reason
 
 
@@ -122,12 +130,43 @@ def test_missing_or_malformed_receipt_has_no_window(tmp_path, payload):
     assert audit.load_window(receipt) is None
 
 
+@pytest.mark.parametrize("entry_point", ["window", "snapshot"])
+def test_deeply_nested_receipt_leaves_evidence_unchecked(tmp_path, entry_point):
+    receipt = write_receipt(tmp_path, new_outputs=["note.md"])
+    (tmp_path / "note.md").write_text("New Markdown\n", encoding="utf-8")
+    config = audit.load_audit_config(write_json(tmp_path / "beats.json", {}), tmp_path)
+    contents = receipt.read_text(encoding="utf-8")
+    nested = "[" * 10_000 + "null" + "]" * 10_000
+    receipt.write_text(contents[:-1] + f', "nested": {nested}' + "}", encoding="utf-8")
+
+    if entry_point == "window":
+        assert audit.load_window(receipt) is None
+    else:
+        files, reason = audit.audit_snapshot(config, receipt)
+        assert files == {}
+        assert reason
+
+
 def test_window_uses_offset_aware_receipt_times(tmp_path):
     receipt = write_receipt(tmp_path)
     assert audit.load_window(receipt) == audit.Window(
         datetime(2026, 11, 13, 4, tzinfo=timezone.utc),
         datetime(2026, 11, 13, 4, 2, tzinfo=timezone.utc),
     )
+
+
+def test_window_accepts_fractional_seconds_and_negative_offset(tmp_path):
+    receipt = write_receipt(tmp_path, spawned_at="2026-11-12T23:00:00.123456-05:00")
+    window = audit.load_window(receipt)
+    assert window is not None
+    assert window.start == datetime(2026, 11, 13, 4, 0, 0, 123456, tzinfo=timezone.utc)
+
+
+def test_window_preserves_offset_seconds_and_fraction(tmp_path):
+    receipt = write_receipt(tmp_path, spawned_at="2026-11-13T04:00:00+00:00:00.500000")
+    window = audit.load_window(receipt)
+    assert window is not None
+    assert window.start == datetime(2026, 11, 13, 3, 59, 59, 500000, tzinfo=timezone.utc)
 
 
 def test_terminal_failure_can_supply_a_zero_duration_window(tmp_path):
