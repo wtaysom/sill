@@ -3,10 +3,8 @@
 Four things these tests pin, none of which a careful reading would reliably
 catch on its own:
 
-1. **Phase order.** Permissions before first beats; christening before
-   scheduling. Both orderings exist to prevent a specific silent failure
-   (see `docs/onboarding/README.md`), and both are the kind of thing a
-   later edit reshuffles without noticing.
+1. **Phase order.** A real remember/recall round trip before optional setup,
+   and permissions and christening before scheduling.
 2. **The freedom framing comes first in the christening** — asserted by
    *character position*, not mere presence. A document that buried "this
    is yours, point it at anything" under a questionnaire would pass a
@@ -19,6 +17,7 @@ catch on its own:
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -60,7 +59,7 @@ HEXY = re.compile(r"\b[0-9a-f]{8}\b")
 # system's, plus the agent CLIs Sill is a plugin for.
 EXTERNAL_BINARIES = {
     "cat", "cd", "chmod", "claude", "codex", "cp", "date", "diff", "docker",
-    "echo", "find", "grep", "head", "launchctl", "ls", "mkdir", "mv",
+    "echo", "find", "git", "grep", "head", "launchctl", "ls", "mkdir", "mv",
     "printf", "python3", "rm", "systemctl", "tail", "wc",
 }
 
@@ -73,6 +72,7 @@ INTERPRETER_DOCS = [
     "docs/concepts.md",
     "docs/beats.md",
     "docs/adapters.md",
+    "docs/desktop-clients.md",
     "docs/hooks.md",
     "docs/extending.md",
     "scheduling/README.md",
@@ -151,6 +151,50 @@ def test_the_letter_stays_short_enough_to_re_read():
 # --- phase order -------------------------------------------------------------
 
 
+def test_readme_clone_command_uses_the_public_distribution():
+    commands = list(iter_command_lines(read("README.md")))
+    assert any(
+        command.split()[:3] == ["git", "clone", "https://github.com/wtaysom/sill.git"]
+        for command in commands
+    ), "the Quick start must be runnable against the public repository"
+
+
+def test_agent_entry_points_lead_to_the_first_use_runbook():
+    for rel, target in [
+        ("AGENTS.md", "docs/onboarding/README.md"),
+        ("CLAUDE.md", "AGENTS.md"),
+        ("README.md", "docs/onboarding/README.md"),
+    ]:
+        assert (ROOT / rel).is_file(), f"{rel} is missing"
+        assert f"]({target})" in read(rel), f"{rel} must link to {target}"
+
+
+def test_runbook_proves_memory_before_optional_setup():
+    index = read("docs/onboarding/README.md").lower()
+    assert "\n## optional" in index, "put optional setup in its own section"
+    first_use, optional = index.split("## optional", 1)
+    assert "01-install.md" in first_use
+    assert "remember" in first_use and "recall" in first_use and "uuid" in first_use
+    assert all(item in optional for item in ("identity", "charter", "backfill", "schedule"))
+
+    install = read("docs/onboarding/01-install.md").lower()
+    assert "\n## optional" in install, "put optional setup after the exercise"
+    exercise, optional = install.split("## optional", 1)
+    assert "remember" in exercise and "recall" in exercise
+    assert "fresh session" in exercise and "uuid" in exercise
+    assert "sill identity init" in optional
+
+
+def test_installer_banner_guides_first_memory_before_optional_setup():
+    result = subprocess.run(
+        ["bash", "-c", 'installer="$1"; shift; source "$installer" && step_banner', "bash", str(ROOT / "install.sh")],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    next_steps, optional = result.stdout.lower().split("optional follow-ups", 1)
+    assert all(term in next_steps for term in ("restart", "permission", "remember", "recall"))
+    assert all(term in optional for term in ("identity", "charter", "schedul"))
+
+
 def test_readme_puts_permissions_before_first_beats():
     text = read("docs/onboarding/README.md").lower()
     assert text.index("permissions verified") < text.index("first beats"), (
@@ -162,9 +206,10 @@ def test_readme_puts_permissions_before_first_beats():
 
 def test_readme_puts_christening_before_scheduling():
     text = read("docs/onboarding/README.md").lower()
-    assert text.index("christening") < text.index("schedule"), (
-        "a cadence started before a beat has demonstrably produced output is a "
-        "scheduler ticking over a system that thinks nothing"
+    christening = re.search(r"^\| \d+\. christening \|", text, re.M)
+    schedule = re.search(r"^\| \d+\. schedule \|", text, re.M)
+    assert christening and schedule and christening.start() < schedule.start(), (
+        "the optional cadence must follow christening and supervised output"
     )
 
 

@@ -284,16 +284,13 @@ step_banner() {
   cat <<'EOF'
     Sill is installed.
 
-    Next: turn this working install into somebody's Sill.
-      Read docs/onboarding/README.md — a phased runbook, walked with the
-      person present, ending at a christening: a charter in their own
-      words, a name, a first deliberate memory, a chosen cadence.
+    Restart each connected client, then approve the Sill tool calls if
+    prompted for permission. Follow docs/onboarding/README.md to remember
+    a test preference and recall its UUID in a fresh session.
 
     Optional follow-ups:
-      * Install the episodic-memory marketplace plugin in Claude Code for richer recall.
-      * Restart any connected client so it picks up the new MCP entry.
-      * Configure SILL_EPISODIC_MEMORY_PATH in your shell if you want the
-        spontaneous-recall hook to inject conversation snippets.
+      * Set an identity and charter, backfill with consent, or schedule beats.
+      * Configure SILL_EPISODIC_MEMORY_PATH for conversation snippets in recall.
 
     To remove everything: ./uninstall.sh
     To wipe the db and re-seed: ./reset.sh
