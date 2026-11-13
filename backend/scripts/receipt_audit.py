@@ -26,11 +26,14 @@ SLOT_RE = re.compile(
     r"\s*:(?:[*_]{2})?\s*",
     re.IGNORECASE,
 )
-TOKEN = re.compile(r"`*([0-9a-f]{8}[A-Za-z0-9_-]*)", re.IGNORECASE)
+TOKEN = re.compile(r"[0-9a-f]{8}[A-Za-z0-9_-]*", re.IGNORECASE)
+KEY_START = re.compile(r"[0-9a-f]{8}", re.IGNORECASE)
 SUPERSEDES_RE = re.compile(r"\bsupersed\w*\s+", re.IGNORECASE)
-PENDING_RE = re.compile(r"`*MINT-PENDING\b", re.IGNORECASE)
+PENDING_RE = re.compile(r"MINT-PENDING\b", re.IGNORECASE)
 FENCE_RE = re.compile(rf"^[ \t]*(?:{LIST_MARKER})?(`{{3,}}|~{{3,}})(.*)$")
 BACKTICKS_RE = re.compile(r"`+")
+NEW_BLOCK_RE = re.compile(rf"^[ \t]*(?:{LIST_MARKER}|#{{1,6}}[ \t]+|>)")
+HEADING_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]+|>)")
 UUID_SEGMENTS = (8, 4, 4, 4, 12)
 QUERY_TIMEOUT = 20
 MAX_KEYS = 1024
@@ -77,26 +80,59 @@ class Reference:
         return self.kind, self.key, self.parent
 
 
+def _code_spans(text: str, start: int = 0) -> Iterator[tuple[re.Match, re.Match]]:
+    """Pair backtick runs of the same length within a Markdown block."""
+    markers = list(BACKTICKS_RE.finditer(text, start))
+    next_by_length = {}
+    closes = {}
+    for index in range(len(markers) - 1, -1, -1):
+        length = len(markers[index][0])
+        if length in next_by_length:
+            closes[index] = next_by_length[length]
+        next_by_length[length] = index
+
+    index = 0
+    while index < len(markers):
+        opening = markers[index]
+        before = opening.start()
+        while before and text[before - 1] == "\\":
+            before -= 1
+        if (opening.start() - before) % 2 == 0 and index in closes:
+            index = closes[index]
+            yield opening, markers[index]
+        index += 1
+
+
+def _slot_value(text: str, start: int) -> tuple[str, int] | None:
+    if opening := BACKTICKS_RE.match(text, start):
+        for closing in BACKTICKS_RE.finditer(text, opening.end()):
+            if closing[0] == opening[0]:
+                return text[opening.end():closing.start()].strip().lower(), closing.end()
+        return None
+    if match := TOKEN.match(text, start) or PENDING_RE.match(text, start):
+        return match[0].lower(), match.end()
+    return None
+
+
 def _supersedes(text: str, start: int) -> Iterator[str]:
-    code = ""
-    for marker in BACKTICKS_RE.finditer(text, start):
-        if not code:
-            yield from _supersedes_in_text(text, start, marker.start())
-            code = marker[0]
-        elif marker[0] == code:
-            code = ""
-        start = marker.end()
-    if not code:
-        yield from _supersedes_in_text(text, start, len(text))
+    code_spans = _code_spans(text, start)
+    for opening, closing in code_spans:
+        yield from _supersedes_in_text(text, start, opening.start())
+        start = closing.end()
+    yield from _supersedes_in_text(text, start, len(text))
 
 
 def _supersedes_in_text(text: str, start: int, end: int) -> Iterator[str]:
     for marker in SUPERSEDES_RE.finditer(text, start, end):
-        if target := TOKEN.match(text, marker.end()):
-            yield target[1].lower()
+        target = _slot_value(text, marker.end())
+        if target and KEY_START.match(target[0]):
+            yield target[0]
 
 
-def _references(text: str) -> Iterator[Reference]:
+def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
+    """Group adjacent inline lines without crossing block boundaries or fences."""
+    lines: list[str] = []
+    start = 1
     fence = ""
     for number, line in enumerate(text.splitlines(), 1):
         marker = FENCE_RE.match(line)
@@ -104,27 +140,44 @@ def _references(text: str) -> Iterator[Reference]:
             if marker and marker[1].startswith(fence) and not marker[2].strip():
                 fence = ""
             continue
+        if lines and (marker or not line.strip() or NEW_BLOCK_RE.match(line)):
+            yield start, lines
+            lines = []
         if marker:
             fence = marker[1]
-            continue
-        slot = SLOT_RE.match(line)
-        if slot is None:
-            continue
-        if PENDING_RE.match(line, slot.end()):
-            yield Reference(number, "pending", "")
-            continue
-        receipt = TOKEN.match(line, slot.end())
-        if receipt is not None:
-            key = receipt[1].lower()
-            yield Reference(number, "receipt", key)
-            # Skip the ID's closing code delimiter before finding prose cues.
-            end = receipt.end()
-            quoted = receipt[0].startswith("`")
-            closing = BACKTICKS_RE.match(line, end) if quoted else None
-            if closing:
-                end = closing.end()
-            for superseded in _supersedes(line, end):
-                yield Reference(number, "supersedes", superseded, key)
+        elif HEADING_RE.match(line):
+            yield number, [line]
+        elif line.strip():
+            if not lines:
+                start = number
+            lines.append(line)
+    if lines:
+        yield start, lines
+
+
+def _references(text: str) -> Iterator[Reference]:
+    for start, lines in _blocks(text):
+        spans = _code_spans("\n".join(lines))
+        active = next(spans, None)
+        offset = 0
+        for number, line in enumerate(lines, start):
+            while active and active[1].end() <= offset:
+                active = next(spans, None)
+            inside_code = active is not None and active[0].start() < offset
+            offset += len(line) + 1
+            slot = SLOT_RE.match(line)
+            if inside_code or slot is None:
+                continue
+            value = _slot_value(line, slot.end())
+            if value is None:
+                continue
+            key, end = value
+            if key == "mint-pending":
+                yield Reference(number, "pending", "")
+            elif KEY_START.match(key):
+                yield Reference(number, "receipt", key)
+                for superseded in _supersedes(line, end):
+                    yield Reference(number, "supersedes", superseded, key)
 
 
 async def _read_selected(payload: dict) -> list[list[str]]:

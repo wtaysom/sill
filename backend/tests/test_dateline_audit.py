@@ -214,3 +214,79 @@ def test_explicit_iso_fraction_counts_at_the_grace_boundary():
         NOTE: "Clock read 2026-11-13T16:04:30.25Z",
     }, WINDOW)
     assert [item.code for item in result.findings] == ["outside_window"]
+
+
+@pytest.mark.parametrize("header", [
+    "Date: 2026-11-13, 16:01 utc",
+    "Date: 2026-11-13, 16:01 gMt",
+    "Date: 2026-11-13, 11:01 utc-05:00",
+    "`date` read Fri Nov 13 16:01:00 gmt 2026",
+    "Date: 2026-11-13, 23:57 before the run",
+    "Date: 2026-11-13, 23:57 in the log",
+    "Date: 2026-11-13, 23:57 UTCish",
+])
+def test_case_insensitive_zones_have_token_boundaries(header):
+    result = datelines.audit({}, {NOTE: header}, WINDOW)
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+@pytest.mark.parametrize("header", [
+    "Date: 2026-11-13, 23:57 cst",
+    "Clock read 2026-11-13T23:57:00cSt",
+    "Clock read 2026-11-13T23:57:00unknown",
+])
+def test_unsupported_lowercase_zones_preserve_the_reading(header):
+    result = datelines.audit({}, {NOTE: header}, WINDOW)
+    assert result.status == "unchecked"
+    assert [item.code for item in result.findings] == ["unsupported_timezone"]
+
+
+def test_explicit_lowercase_z_timestamp_is_compared():
+    result = datelines.audit({}, {NOTE: "Clock read 2026-11-12T16:03:00z"}, WINDOW)
+    assert [item.code for item in result.findings] == ["outside_window"]
+
+
+@pytest.mark.parametrize("day", ["9999-12-31", "0001-01-01"])
+def test_boundary_datelines_keep_independent_findings_and_cli_json(day, tmp_path, capsys):
+    note = tmp_path / "boundary.md"
+    independent = tmp_path / "independent.md"
+    note.write_text(f"Date: {day}, 00:01")
+    independent.write_text("Date: 2026-11-09, 03:15")
+    receipt = tmp_path / "attempt.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1, "status": "succeeded",
+        "spawned_at": WINDOW.start.isoformat(), "completed_at": WINDOW.end.isoformat(),
+    }))
+
+    assert datelines.main(["--receipt", str(receipt), "--json", str(note), str(independent)]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "checked"
+    assert [(item["file"], item["code"]) for item in result["findings"]] == [
+        (str(note), "outside_window"),
+        (str(independent), "outside_window"),
+    ]
+
+
+def test_unrepresentable_range_end_does_not_suppress_other_findings():
+    result = datelines.audit({}, {
+        NOTE: "Clock read 9999-12-31T23:57:00Z–00:01",
+        Path("other.md"): "Date: 2026-11-09, 03:15",
+    }, WINDOW)
+    assert result.status == "unchecked"
+    assert [(item.file, item.code) for item in result.findings] == [
+        (str(NOTE), "unrepresentable_clock"),
+        ("other.md", "outside_window"),
+    ]
+
+
+def test_header_metadata_cues_are_checked_without_scanning_body_metadata():
+    after = {NOTE: (
+        "# Note\n\n**Evidence:** clock read 03:00 CST\n\n"
+        "The discussion starts here.\n\n**Other evidence:** clock read 07:00 PST"
+    )}
+    result = datelines.audit({}, after, WINDOW)
+    assert result.status == "unchecked"
+    assert [(item.line, item.code) for item in result.findings] == [
+        (3, "unsupported_timezone"),
+    ]

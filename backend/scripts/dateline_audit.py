@@ -37,19 +37,27 @@ CUE_RE = re.compile(
 CLOCK_LEAD_RE = re.compile(r"^\s*[*_]{0,2}(?:(?:session|bench|wall)\s+)?(?:clock\b|`date\b)", re.IGNORECASE)
 UNIX_DATE_RE = re.compile(
     r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?P<mon>[A-Z][a-z]{2})\s+(?P<d>\d{1,2})\s+"
-    r"(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})\s+(?P<abbr>[A-Z]{2,6})\s+(?P<y>\d{4})"
+    r"(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})\s+(?P<abbr>[A-Z]{2,6})\s+(?P<y>\d{4})",
+    re.IGNORECASE,
 )
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 OFFSET = r"\d{2}:?\d{2}"
+# With whitespace before a zone, recognize common abbreviations regardless
+# of case and any other all-caps abbreviation. A following prose word is
+# not a timezone. Attached alphabetic suffixes explicitly name a zone.
+ZONE_ABBREVIATIONS = (
+    r"UTC|GMT|CST|CDT|PST|PDT|EST|EDT|MST|MDT|HST|HDT|AST|ADT|AKST|AKDT|"
+    r"WET|WEST|CET|CEST|EET|EEST|BST|IST|JST|KST|AEST|AEDT|ACST|ACDT|AWST|NZST|NZDT"
+)
 # An attached HH:MM-HH:MM is a range, except on an ISO or seconds reading.
 TIME_RE = re.compile(
-    r"(?:(?P<day>\d{4}-\d{2}-\d{2})(?:(?P<iso>T)|,?\s+))?"
+    r"(?:(?P<day>\d{4}-\d{2}-\d{2})(?:(?P<iso>[Tt])|,?\s+))?"
     r"(?<![\d:])(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2})(?:\.(?P<fraction>\d{1,6}))?)?(?![\d:])"
     r"(?:\s*(?P<ampm>[AaPp]\.?[Mm]\.?)(?![A-Za-z]))?"
-    rf"(?:\s*(?:UTC|GMT)\s*(?P<named_offset>[+-]{OFFSET})"
-    rf"|\s*(?P<offset>\+{OFFSET}|-\d{{4}}|Z)"
-    rf"|(?P<negative>\s+-{OFFSET}|(?(s)|(?(iso)|(?!)))-{OFFSET})"
-    r"|\s*(?P<abbr>[A-Z]{2,6}))?(?![\w:])"
+    rf"(?:[ \t]*(?i:UTC|GMT)[ \t]*(?P<named_offset>[+-]{OFFSET})"
+    rf"|[ \t]*(?P<offset>\+{OFFSET}|-\d{{4}}|[Zz])"
+    rf"|(?P<negative>[ \t]+-{OFFSET}|(?(s)|(?(iso)|(?!)))-{OFFSET})"
+    rf"|(?P<abbr>[ \t]+(?:(?i:{ZONE_ABBREVIATIONS})|[A-Z]{{2,6}})|[A-Za-z]+))?(?![\w:])"
 )
 RANGE_RE = re.compile(r"\s*[–—-]\s*~?\s*")
 APPROX_RE = re.compile(r"(?:~|\b(?:about|approx\.?|approximately|around|circa))\s*$", re.IGNORECASE)
@@ -112,8 +120,7 @@ def _header(text: str) -> Iterator[tuple[int, str]]:
                 if STOP_RE.match(following) or HEADING_RE.match(following) or LABEL_RE.match(following):
                     break
                 index += 1
-        if title or dateline or clock:
-            yield start + 1, "\n".join(lines[start:index])
+        yield start + 1, "\n".join(lines[start:index])
 
 
 def _date(raw: str | None) -> date | None:
@@ -125,7 +132,8 @@ def _date(raw: str | None) -> date | None:
 
 def _zone(match: re.Match) -> timezone | str | None:
     offset = (match["named_offset"] or match["offset"] or match["negative"] or "").strip()
-    if offset == "Z" or match["abbr"] in {"UTC", "GMT"}:
+    abbreviation = (match["abbr"] or "").strip().upper()
+    if offset.upper() == "Z" or abbreviation in {"UTC", "GMT"}:
         return timezone.utc
     if offset:
         digits = offset[1:].replace(":", "")
@@ -134,7 +142,7 @@ def _zone(match: re.Match) -> timezone | str | None:
             return offset
         delta = timedelta(hours=hours, minutes=minutes)
         return timezone(delta if offset[0] == "+" else -delta)
-    return match["abbr"]
+    return abbreviation or None
 
 
 def _reading(match: re.Match, *, header_date: bool = False) -> Reading | None:
@@ -182,11 +190,12 @@ def _parse_claim(
 
 def _unix_claim(match: re.Match, line: int) -> Claim | None:
     try:
-        day = date(int(match["y"]), MONTHS.index(match["mon"]) + 1, int(match["d"]))
+        day = date(int(match["y"]), MONTHS.index(match["mon"].title()) + 1, int(match["d"]))
         clock = time(int(match["h"]), int(match["m"]), int(match["s"]))
     except ValueError:
         return None
-    zone = timezone.utc if match["abbr"] in {"UTC", "GMT"} else match["abbr"]
+    abbreviation = match["abbr"].upper()
+    zone = timezone.utc if abbreviation in {"UTC", "GMT", "Z"} else abbreviation
     return Claim(Reading(day, clock, zone), None, False, False, line=line, text=match[0])
 
 
@@ -239,9 +248,25 @@ def _span_width(claim: Claim) -> timedelta | None:
         return None
     anchor = first.day or date(2000, 1, 1)
     low, high = datetime.combine(anchor, first.clock), datetime.combine(last.day or anchor, last.clock)
-    if last.day is None and high < low:
-        high += timedelta(days=1)
-    return high - low
+    width = high - low
+    if last.day is None and width < timedelta(0):
+        width += timedelta(days=1)
+    return width
+
+
+def _nearby_dates(ordinal: int) -> Iterator[date]:
+    for candidate in range(max(1, ordinal - 1), min(date.max.toordinal(), ordinal + 1) + 1):
+        yield date.fromordinal(candidate)
+
+
+def _date_in_zone(instant: datetime, zone: timezone) -> int:
+    """Project into a fixed offset without constructing an out-of-range date."""
+    clock = timedelta(
+        hours=instant.hour, minutes=instant.minute,
+        seconds=instant.second, microseconds=instant.microsecond,
+    )
+    shifted = clock + zone.utcoffset(instant) - instant.utcoffset()
+    return instant.date().toordinal() + shifted.days
 
 
 def _candidate_starts(first: Reading, zone: timezone, day: date | None, window: Window) -> Iterator[datetime]:
@@ -251,26 +276,28 @@ def _candidate_starts(first: Reading, zone: timezone, day: date | None, window: 
 
     home = window.start.tzinfo
     if day is None:
-        local_start = window.start.astimezone(zone).date()
-        local_end = window.end.astimezone(zone).date()
+        local_start = _date_in_zone(window.start, zone)
+        local_end = _date_in_zone(window.end, zone)
         for base in dict.fromkeys((local_start, local_end)):
-            for shift in (-1, 0, 1):
-                yield datetime.combine(base + timedelta(days=shift), first.clock, zone)
+            for candidate in _nearby_dates(base):
+                yield datetime.combine(candidate, first.clock, zone)
         return
 
     # A header date is in the receipt's offset, even for a reading from
     # another offset. Borrow an adjacent date only at an actual midnight crossing.
     days = [day]
-    began, ended = window.start.date(), window.end.astimezone(home).date()
-    if began < day <= ended:
+    began = window.start.date().toordinal()
+    ended = _date_in_zone(window.end, home)
+    ordinal = day.toordinal()
+    if began < ordinal <= ended and day > date.min:
         days.append(day - timedelta(days=1))
-    if began <= day < ended:
+    if began <= ordinal < ended and day < date.max:
         days.append(day + timedelta(days=1))
     for local_day in days:
-        near = datetime.combine(local_day, time(12), home).astimezone(zone).date()
-        for shift in (-1, 0, 1):
-            candidate = datetime.combine(near + timedelta(days=shift), first.clock, zone)
-            if candidate.astimezone(home).date() == local_day:
+        near = _date_in_zone(datetime.combine(local_day, time(12), home), zone)
+        for candidate_day in _nearby_dates(near):
+            candidate = datetime.combine(candidate_day, first.clock, zone)
+            if _date_in_zone(candidate, home) == local_day.toordinal():
                 yield candidate
 
 
@@ -288,11 +315,17 @@ def _compare(
     for low in _candidate_starts(first, first_zone, claim.day, window):
         high = low
         if last is not None:
-            day = last.day or low.astimezone(last_zone).date()
-            high = datetime.combine(day, last.clock, last_zone)
+            ordinal = last.day.toordinal() if last.day else _date_in_zone(low, last_zone)
+            if not 1 <= ordinal <= date.max.toordinal():
+                continue
+            high = datetime.combine(date.fromordinal(ordinal), last.clock, last_zone)
             if last.day is None and high < low:
+                if high.date() == date.max:
+                    continue
                 high += timedelta(days=1)
         spans.append((low, high))
+    if not spans:
+        return "unrepresentable_clock", f"{claim.text!r} has no date in the supported calendar"
     low, high = min(spans, key=lambda span: _distance(*span, window))
     if high < low:
         return "invalid_range", f"{claim.text!r} ends before it starts"
@@ -320,6 +353,7 @@ def audit(
     if before is None or window is None:
         reasons.append("Clock attribution requires a completed attempt and a baseline")
     unsupported = set()
+    unrepresentable = False
     findings = []
     grace = timedelta(seconds=grace_seconds)
     for path, text in after.items():
@@ -345,9 +379,12 @@ def audit(
                 verdict = None
             if verdict is not None:
                 code, detail = verdict
+                unrepresentable = unrepresentable or code == "unrepresentable_clock"
                 findings.append(Finding(str(path), claim.line, code, detail, origin))
     if unsupported:
         reasons.append(f"Unsupported clock timezone: {', '.join(sorted(unsupported))}")
+    if unrepresentable:
+        reasons.append("At least one clock claim is outside the supported calendar")
     return AuditResult("unchecked" if reasons else "checked", findings, ". ".join(reasons) or None)
 
 

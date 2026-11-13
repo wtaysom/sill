@@ -280,3 +280,44 @@ def test_fences_inside_lists_and_inline_supersedes_mentions_are_ignored():
     result = receipts.audit({}, after, WINDOW, lookup=lookup)
     assert result.status == "checked"
     assert result.findings == []
+
+
+def test_code_delimited_receipt_and_supersedes_tokens_are_checked_whole():
+    after = {NOTE: "\n".join((
+        "Stored: `deadbeef+fake`.",
+        f"Stored: ``{FIRST}`` [supersedes `deadbeef+fake`]",
+        f"Stored: `{FIRST}`. [supersedes ``{OLDER}``]",
+    ))}
+
+    def lookup(keys):
+        assert keys == {FIRST, OLDER}
+        return store((FIRST, MINTED), (OLDER, EARLIER))(keys)
+
+    result = receipts.audit({}, after, WINDOW, lookup=lookup)
+    assert findings(result) == [
+        (1, "invalid_receipt", "new"),
+        (2, "invalid_supersedes", "new"),
+    ]
+
+
+def test_multiline_inline_code_is_excluded_only_inside_its_markdown_block():
+    after = {NOTE: "\n".join((
+        "``example",
+        "Stored: deadbeef",
+        "more text``",
+        "",
+        f"Stored: `{FIRST}`",
+        "",
+        "an unmatched `` opener",
+        "",
+        f"Stored: `{OLDER}`",
+        "a `` pair on the other side of the blank line",
+    ))}
+
+    def lookup(keys):
+        assert keys == {FIRST, OLDER}
+        return store((FIRST, MINTED), (OLDER, MINTED))(keys)
+
+    result = receipts.audit({}, after, WINDOW, lookup=lookup)
+    assert result.status == "checked"
+    assert result.findings == []
