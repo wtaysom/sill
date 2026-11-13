@@ -47,6 +47,9 @@ module is a broken harness, not a broken test.
 """
 import json
 import os
+import re
+from collections.abc import Mapping
+from hashlib import sha256
 from typing import Iterator, Literal
 
 Harness = Literal["claude", "codex", "unknown"]
@@ -95,6 +98,11 @@ def _as_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _nonblank_string(value: object) -> str | None:
+    """Preserve the original string if it contains any non-whitespace."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _tool_name(payload: object) -> str | None:
     d = _as_dict(payload)
     return _as_str(d.get("tool_name")) if d is not None else None
@@ -108,20 +116,52 @@ def _tool_input(payload: object) -> dict | None:
 def detect(payload: object) -> Harness:
     """Identify which harness produced this hook payload.
 
-    Codex-positive only: every Codex event carries "turn_id" and no
-    Claude Code payload does, so its presence is a reliable marker.
-    Claude Code payloads have no equivalent unique marker to key on, so
-    they — and anything else — fall through to "unknown" rather than a
-    guessed "claude". Do not invent a Claude-side positive marker here;
-    none has been found to exist.
+    A nonblank "turn_id" marks a Codex event. Events without that marker,
+    including the captured Claude Code events, are "unknown".
     """
     try:
         d = _as_dict(payload)
-        if d is not None and _as_str(d.get("turn_id")) is not None:
+        if d is not None and _nonblank_string(d.get("turn_id")) is not None:
             return "codex"
         return "unknown"
     except Exception:
         return "unknown"
+
+
+def hook_session_id(payload: object, *, env: Mapping[str, str]) -> str | None:
+    """Resolve the ID shared by callbacks that read and write session state.
+
+    Codex uses the payload's session_id. For events without a Codex marker,
+    Claude's stable CLAUDE_CODE_SESSION_ID override takes precedence when set.
+    Use hook_session_path_key before putting this ID in a filename. Durable
+    attribution has its own contract in backend/session_identity.py.
+    """
+    try:
+        data = _as_dict(payload)
+        if data is None:
+            return None
+        session_id = _nonblank_string(data.get("session_id"))
+        if detect(data) == "codex":
+            return session_id
+        return _nonblank_string(env.get("CLAUDE_CODE_SESSION_ID")) or session_id
+    except Exception:
+        return None
+
+
+def hook_session_path_key(session_id: object) -> str | None:
+    """Return a filesystem-safe session key, preserving native UUID filenames.
+
+    Lowercase canonical UUIDs pass through. Other nonblank strings use a
+    separate hash namespace that preserves differences in case and keeps
+    path separators and reserved names such as "recent" out of filenames.
+    """
+    sid = _nonblank_string(session_id)
+    if sid is None:
+        return None
+    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid):
+        return sid
+    # JSON can carry lone surrogates as escapes. Preserve them in the hash.
+    return "sha256-" + sha256(sid.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def tool_kind(payload: object) -> ToolKind:
@@ -246,6 +286,14 @@ def shell_command(payload: object) -> str | None:
         return None
 
 
+def _patch_body(tool_input: dict) -> str | None:
+    """Read the first nonblank string from Codex's command and legacy input fields."""
+    return (
+        _nonblank_string(tool_input.get("command"))
+        or _nonblank_string(tool_input.get("input"))
+    )
+
+
 def _parse_patch_path(patch: str) -> str | None:
     for line in patch.splitlines():
         for header in _PATCH_HEADERS:
@@ -276,7 +324,7 @@ def written_path(payload: object) -> str | None:
         if ti is None:
             return None
         if _tool_name(payload) == "apply_patch":
-            patch = _as_str(ti.get("input"))
+            patch = _patch_body(ti)
             return _parse_patch_path(patch) if patch is not None else None
         return _as_str(ti.get("file_path"))
     except Exception:
@@ -346,7 +394,7 @@ def written_text(payload: object) -> str | None:
         if ti is None:
             return None
         if _tool_name(payload) == "apply_patch":
-            patch = _as_str(ti.get("input"))
+            patch = _patch_body(ti)
             return _patch_added_text(patch) if patch is not None else None
         if kind == "write":
             return _as_str(ti.get("content"))
@@ -424,7 +472,7 @@ def written_files(payload: object) -> list[tuple[str, str]]:
         if ti is None:
             return []
         if _tool_name(payload) == "apply_patch":
-            patch = _as_str(ti.get("input"))
+            patch = _patch_body(ti)
             return _parse_patch_files(patch) if patch is not None else []
         path = _as_str(ti.get("file_path"))
         if path is None:
