@@ -97,8 +97,13 @@ BEGIN
     wrapper_trust := p_trust_level;
     IF p_type_metadata IS NOT NULL THEN
         IF p_type = 'semantic' THEN
-            -- create_semantic_memory, with batch_create_memories' confidence default.
-            semantic_confidence := COALESCE(NULLIF(p_type_metadata->>'confidence', '')::float, 0.8);
+            -- Legacy create_semantic_memory carries its explicit NULL verbatim:
+            -- the stock NOT NULL constraint rejects it. Only omitted confidence
+            -- (e.g. {} metadata) receives the ordinary creation default.
+            semantic_confidence := CASE
+                WHEN p_type_metadata->'confidence' = 'null'::jsonb THEN NULL
+                ELSE COALESCE(NULLIF(p_type_metadata->>'confidence', '')::float, 0.8)
+            END;
             semantic_refs := dedupe_source_references(p_type_metadata->'source_references');
             wrapper_source := normalize_source_reference(p_source_attribution);
             IF wrapper_source = '{}'::jsonb AND jsonb_typeof(semantic_refs) = 'array' AND jsonb_array_length(semantic_refs) > 0 THEN
@@ -108,7 +113,7 @@ BEGIN
                 wrapper_source := jsonb_build_object('kind', 'unattributed', 'observed_at', CURRENT_TIMESTAMP);
             END IF;
             wrapper_trust := COALESCE(p_trust_level,
-                compute_semantic_trust(LEAST(1.0, GREATEST(0.0, semantic_confidence)), semantic_refs, 0.0));
+                compute_semantic_trust(LEAST(1.0, GREATEST(0.0, COALESCE(semantic_confidence, 0.5))), semantic_refs, 0.0));
         ELSE
             -- create_episodic_memory, create_procedural_memory, create_strategic_memory.
             wrapper_source := normalize_source_reference(p_source_attribution);

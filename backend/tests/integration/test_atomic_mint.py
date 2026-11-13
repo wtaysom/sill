@@ -399,3 +399,33 @@ def test_seed_precheck_is_scoped_to_its_null_speaker(db, author):
     mint(db, words, source_attribution=source)
     with db.cursor() as cur:
         assert seed_import._already_present(cur, words, author)
+
+
+@pytest.mark.parametrize('nullable_fixture', [False, True])
+def test_legacy_explicit_null_confidence_is_not_defaulted(db, nullable_fixture):
+    words = 'A legacy semantic confidence explicitly supplied as unknown.'
+    counts = query(db, 'SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM memory_graph."MemoryNode")')
+    if nullable_fixture:
+        # Only this transaction relaxes the fixture constraint. The public
+        # baseline remains NOT NULL; this isolates the adapter's actual value.
+        query(db, 'ALTER TABLE semantic_memories ALTER COLUMN confidence DROP NOT NULL')
+        mid = query(db, 'SELECT public.create_semantic_memory(%s,NULL)', (words,))[0][0]
+        assert query(db, 'SELECT confidence FROM semantic_memories WHERE memory_id=%s', (mid,)) == [(None,)]
+        before = snapshot(db, mid)
+        assert query(db, 'SELECT public.create_semantic_memory(%s,0.8)', (words,))[0][0] == mid
+        assert snapshot(db, mid) == before
+    else:
+        query(db, 'SAVEPOINT null_confidence')
+        with pytest.raises(psycopg2.errors.NotNullViolation) as error:
+            query(db, 'SELECT public.create_semantic_memory(%s,NULL)', (words,))
+        assert error.value.diag.column_name == 'confidence'
+        query(db, 'ROLLBACK TO SAVEPOINT null_confidence')
+        assert query(db, 'SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM memory_graph."MemoryNode")') == counts
+
+    # Omission and ordinary batch defaults remain distinct from the legacy
+    # wrapper's explicit NULL. Both still request a confidence of 0.8.
+    default_id = mint(db, 'A mint with empty metadata retains its confidence default.', type_metadata={})[0]
+    batch_id = query(db, 'SELECT public.batch_create_memories(%s)::text[]', (Json([
+        {'type': 'semantic', 'content': 'An ordinary typed batch retains its confidence default.', 'confidence': None}
+    ]),))[0][0][0]
+    assert query(db, 'SELECT confidence FROM semantic_memories WHERE memory_id=ANY(%s::uuid[])', ([default_id, batch_id],)) == [(0.8,), (0.8,)]
