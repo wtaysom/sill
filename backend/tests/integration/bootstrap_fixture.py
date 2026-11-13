@@ -9,7 +9,7 @@ probe ports; never drops a caller's existing database. Fixture teardown can drop
 only the uniquely named database this module just created. No private data.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import os
 import re
 import subprocess
@@ -48,34 +48,58 @@ def load_sql(container, name, text):
         raise RuntimeError("fixture SQL failed:\n" + result.stderr[-6000:])
 
 
+def verify_container_identity(container, name, marker):
+    # No writes through Docker until its database proves it is the one just
+    # created through the guarded TCP connection. A mismatched/absent marker,
+    # missing table, failed command or timeout fails closed.
+    result = subprocess.run([
+        "docker", "exec", container, "psql", "-X", "-qAt", "-U", "sill_test",
+        "-d", name, "-v", "ON_ERROR_STOP=1", "-c",
+        "BEGIN READ ONLY; SELECT marker FROM public.fixture_identity; COMMIT;",
+    ], text=True, capture_output=True, timeout=10)
+    if result.returncode or result.stdout.strip() != marker:
+        raise RuntimeError("container/DSN fixture identity mismatch")
+
+
+def drop_owned_fixture(dsn, name):
+    # Call only after this invocation witnessed successful CREATE DATABASE.
+    # Never FORCE a drop or terminate another connection.
+    with closing(psycopg2.connect(dsn)) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
+
+
 def create_fixture(dsn, container, name, through="009"):
     guarded_dsn(dsn, os.environ.get("SILL_TEST_ALLOW_DATABASE"))
     guarded_container(container)
     if not re.fullmatch(r"sill_test_[a-z0-9_]+", name):
         raise ValueError("new fixture name must start sill_test_")
     target = make_dsn(dsn, dbname=name)
-    # Connect to the explicitly selected fixture server; CREATE fails if the
-    # name exists. There is no DROP/rebuild fallback.
-    conn = psycopg2.connect(dsn)
-    conn.autocommit = True
+    created = False
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
-            cur.execute(sql.SQL("ALTER DATABASE {} SET search_path=ag_catalog,public").format(sql.Identifier(name)))
-    finally:
-        conn.close()
-    load_sql(container, name, baseline_sql())
-    # Check docker target and explicit TCP target reached the same new database.
-    marker = str(uuid4())
-    load_sql(container, name, "CREATE TABLE public.fixture_identity(marker text); "
-             + "INSERT INTO public.fixture_identity VALUES ('" + marker + "');")
-    with psycopg2.connect(target) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT marker FROM public.fixture_identity")
-            if cur.fetchone() != (marker,):
-                raise RuntimeError("container/DSN fixture identity mismatch")
-    apply_migrations(target, through=through)
-    return target
+        # CREATE fails if the name exists. Only a witnessed successful CREATE
+        # gives this invocation permission to clean up on initialization failure.
+        with closing(psycopg2.connect(dsn)) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
+                created = True
+                cur.execute(sql.SQL("ALTER DATABASE {} SET search_path=ag_catalog,public").format(sql.Identifier(name)))
+        marker = str(uuid4())
+        with closing(psycopg2.connect(target)) as conn:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("CREATE TABLE public.fixture_identity(marker text)")
+                    cur.execute("INSERT INTO public.fixture_identity VALUES (%s)", (marker,))
+        verify_container_identity(container, name, marker)
+        load_sql(container, name, baseline_sql())
+        apply_migrations(target, through=through)
+        return target
+    except BaseException:
+        if created:
+            drop_owned_fixture(dsn, name)
+        raise
 
 
 def apply_migrations(dsn, *, through="009", after="000"):
@@ -105,14 +129,7 @@ def temporary_fixture(dsn, container, *, through="009"):
     try:
         yield target
     finally:
-        # Only the unique name created above; no FORCE, no terminating others.
-        conn = psycopg2.connect(dsn)
-        conn.autocommit = True
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
-        finally:
-            conn.close()
+        drop_owned_fixture(dsn, name)
 
 
 if __name__ == "__main__":

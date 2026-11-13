@@ -221,3 +221,39 @@ def test_supersession_concurrent_loser_does_not_create_a_second_successor(isolat
         loser.rollback()
         winner.close()
         loser.close()
+
+
+@pytest.mark.parametrize("field", ["source_attribution", "production_add", "production_not_carried", "concepts"])
+def test_optional_json_null_is_omission(db, field):
+    old = seed(db, production=DECLARATION)
+    cid = scalar(db, "INSERT INTO concepts(name) VALUES(%s) RETURNING id", ("null fixture " + str(uuid4()),))
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO memory_concepts(memory_id,concept_id,strength) VALUES(%s,%s,.6)", (old, cid))
+    new = supersede(db, old, {field: None})
+    assert row(db, new)["production"] == DECLARATION
+    assert row(db, new)["source_attribution"]["concepts_explicit"] is False
+    assert scalar(db, "SELECT strength FROM memory_concepts WHERE memory_id=%s AND concept_id=%s", (new, cid)) == .6
+
+
+def test_null_amendments_do_not_conflict_or_strip_nested_nulls(db):
+    declared = {"made": [], "unknown": None, "note": None}
+    source = {"kind": "fixture", "detail": {"unknown": None}}
+    old = seed(db)
+    new = supersede(db, old, {"production": declared, "production_add": None,
+                             "production_not_carried": None, "source_attribution": source})
+    got = row(db, new)
+    assert got["production"] == declared
+    assert got["source_attribution"]["detail"] == {"unknown": None}
+
+
+@pytest.mark.parametrize("metadata,match", [
+    ({"source_attribution": []}, "source_attribution"),
+    ({"production_add": {}}, "production_add"),
+    ({"production_not_carried": "wrong"}, "production_not_carried"),
+    ({"concepts": {}}, "concepts"),
+])
+def test_malformed_nonnull_optional_metadata_remains_rejected(db, metadata, match):
+    old = seed(db)
+    with refused(db, match):
+        supersede(db, old, metadata)
+    assert row(db, old)["status"] == "active"

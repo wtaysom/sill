@@ -82,6 +82,7 @@ DECLARE
     procedural_data procedural_memories%ROWTYPE;
     strategic_data strategic_memories%ROWTYPE;
     allowed_type_keys TEXT[];
+    optional_key TEXT;
     new_production JSONB;
     production_item JSONB;
     instr JSONB;
@@ -96,10 +97,14 @@ BEGIN
         RAISE EXCEPTION 'supersession metadata must be an object with supported keys'
             USING ERRCODE = '22023';
     END IF;
-    -- JSON null means no declaration, just like an absent optional field.
-    IF p_metadata->'production' = 'null'::jsonb THEN
-        p_metadata:=p_metadata-'production';
-    END IF;
+    -- Null optional top-level values mean omission. Keep explicit [] (clearing)
+    -- and nested nulls in source/declaration objects exactly as supplied.
+    FOREACH optional_key IN ARRAY ARRAY['speaker','force','source_attribution','concepts','type_metadata',
+        'production','production_add','production_not_carried','minted_in'] LOOP
+        IF p_metadata->optional_key = 'null'::jsonb THEN
+            p_metadata:=p_metadata-optional_key;
+        END IF;
+    END LOOP;
     IF p_metadata ? 'production' AND (p_metadata ? 'production_add' OR p_metadata ? 'production_not_carried') THEN
         RAISE EXCEPTION 'production re-declares the whole object; do not combine it with production_add or production_not_carried'
             USING ERRCODE='22023';

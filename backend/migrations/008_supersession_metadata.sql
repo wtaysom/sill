@@ -27,6 +27,7 @@ DECLARE
     procedural_data procedural_memories%ROWTYPE;
     strategic_data strategic_memories%ROWTYPE;
     allowed_type_keys TEXT[];
+    optional_key TEXT;
 BEGIN
     p_metadata:=COALESCE(NULLIF(p_metadata,'null'::jsonb),'{}'::jsonb);
     IF p_metadata IS NULL OR jsonb_typeof(p_metadata) <> 'object'
@@ -35,6 +36,13 @@ BEGIN
         RAISE EXCEPTION 'supersession metadata must be an object with supported keys'
             USING ERRCODE = '22023';
     END IF;
+    -- Null optional top-level values mean omission. Keep explicit [] (clearing)
+    -- and nested nulls in source/declaration objects exactly as supplied.
+    FOREACH optional_key IN ARRAY ARRAY['speaker','force','source_attribution','concepts','type_metadata'] LOOP
+        IF p_metadata->optional_key = 'null'::jsonb THEN
+            p_metadata:=p_metadata-optional_key;
+        END IF;
+    END LOOP;
     IF p_new_content IS NULL OR btrim(p_new_content) = '' THEN
         RAISE EXCEPTION 'replacement content must not be empty' USING ERRCODE = '22023';
     END IF;

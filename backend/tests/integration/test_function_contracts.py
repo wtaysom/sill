@@ -63,3 +63,19 @@ def test_fresh_and_v02_function_contracts(fixture_dsn, fixture_container):
                     conn.close()
             # Bodies as well as signatures/settings must agree across install paths.
             assert snapshots[0] == snapshots[1]
+
+
+def test_migration008_null_source_and_concepts_mean_omission(fixture_dsn, fixture_container):
+    with temporary_fixture(fixture_dsn, fixture_container, through="008") as dsn:
+        conn = psycopg2.connect(dsn)
+        try:
+            old = seed(conn)
+            named = supersede(conn, old, {"concepts": [{"name": "fixture inherited concept"}]})
+            new = supersede(conn, named, {"source_attribution": None, "concepts": None})
+            assert row(conn, new)["source_attribution"]["concepts_explicit"] is False
+            assert scalar(conn, "SELECT count(*) FROM memory_concepts WHERE memory_id=%s", (new,)) == 1
+            cleared = supersede(conn, new, {"concepts": []})
+            assert scalar(conn, "SELECT count(*) FROM memory_concepts WHERE memory_id=%s", (cleared,)) == 0
+        finally:
+            conn.rollback()
+            conn.close()
