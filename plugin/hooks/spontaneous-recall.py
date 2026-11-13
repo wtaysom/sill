@@ -17,8 +17,21 @@ import sys
 import re
 import subprocess
 import os
+import time
 from datetime import datetime
 from pathlib import Path
+
+# The shipped hook command has a 45-second host timeout. Reserve five
+# seconds for process startup and cleanup, result formatting and delivery.
+_SUBPROCESS_DEADLINE = time.monotonic() + 40
+
+
+def _run_with_budget(args, *, timeout: float, **kwargs):
+    remaining = _SUBPROCESS_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(args, 0)
+    return subprocess.run(args, timeout=min(timeout, remaining), **kwargs)
+
 
 _SILL_LOG_DIR = Path(os.environ.get("SILL_LOG_DIR", "/tmp"))
 LOG_FILE = _SILL_LOG_DIR / "spontaneous-recall.log"
@@ -191,7 +204,7 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
         """
 
     try:
-        result = subprocess.run(
+        result = _run_with_budget(
             ['docker', 'exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', DB_NAME,
              '-t', '-A', '-F', '|||', '-c', query],
             capture_output=True, text=True, timeout=15  # Longer timeout for embedding
@@ -320,7 +333,7 @@ def search_episodic_memory(query: str) -> list[dict]:
         env["EPISODIC_MEMORY_CONFIG_DIR"] = str(SUPERPOWERS_DIR)
         env["EPISODIC_MEMORY_READONLY"] = "1"
 
-        result = subprocess.run(
+        result = _run_with_budget(
             [str(EPISODIC_CLI), 'search', query, '--limit', str(MAX_CONVERSATIONS)],
             capture_output=True,
             text=True,
@@ -509,7 +522,7 @@ def track_session_time(session_id: str, project: str) -> dict | None:
            (SELECT prompt_count FROM up);
     """
     try:
-        r = subprocess.run(
+        r = _run_with_budget(
             ['docker', 'exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', DB_NAME,
              '-t', '-A', '-F', '|||', '-c', q],
             capture_output=True, text=True, timeout=8,
@@ -611,8 +624,8 @@ def _stable_project(raw: str) -> str:
     so prefer CLAUDE_PROJECT_DIR (the launch dir, immune to cd) and fold any
     path inside a repo to the repo root."""
     try:
-        r = subprocess.run(["git", "-C", raw, "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True, timeout=3)
+        r = _run_with_budget(["git", "-C", raw, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=3)
         top = r.stdout.strip()
         if r.returncode == 0 and top:
             return top
@@ -758,7 +771,7 @@ def _touch_access(memories_list):
         f"WHERE id IN ({idlist});"
     )
     try:
-        result = subprocess.run(
+        result = _run_with_budget(
             ["docker", "exec", DB_CONTAINER, "psql", "-U", DB_USER, "-d", DB_NAME,
              "-q", "-c", query],
             capture_output=True, text=True, timeout=10,

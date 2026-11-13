@@ -16,6 +16,7 @@ this module carries the mint path only.
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -160,7 +161,7 @@ def _source_json(source: str,
     """Build the source_attribution jsonb literal for a memory's origin.
 
     `source` is the address a later reader can actually open — a repo-relative
-    path, or a URI. Without it create_memory() stamps kind='unattributed', and
+    path, or a URI. Without it mint_memory() stamps kind='unattributed', and
     the memory becomes unre-readable: nothing in it says which file to reopen.
     """
     kind = source_kind or ("url" if source.startswith(("http://", "https://")) else "file")
@@ -226,7 +227,7 @@ def notice(content: str, memory_type: str = "semantic",
            source_label: str | None = None) -> str | None:
     """Store something important. Returns memory ID or None on failure.
 
-    Handles dedup (create_memory does this), concept linking, and logging.
+    Atomically mints the act and its concepts; retries leave the existing act unchanged.
 
     Speech-act tags (migration 001):
       force   — illocutionary force: assertive/directive/commissive/expressive/declaration.
@@ -242,58 +243,30 @@ def notice(content: str, memory_type: str = "semantic",
     """
     if force is not None and force not in VALID_FORCES:
         raise ValueError(f"force must be one of {sorted(VALID_FORCES)} or None, got {force!r}")
-    escaped_content = _escape(content)
+    if memory_type not in {"semantic", "episodic", "procedural", "strategic"}:
+        raise ValueError(f"invalid memory type: {memory_type!r}")
     source_arg = (f"'{_source_json(source, source_kind, source_label)}'::jsonb"
                   if source else "NULL")
-    # Use the same SQL path as the MCP remember tool: create_memory has dedup
-    # built in.
+    speaker_arg = f"'{_escape(speaker)}'" if speaker is not None else "NULL"
+    force_arg = f"'{force}'" if force is not None else "NULL"
+    concepts_arg = ("ARRAY[" + ",".join(f"'{_escape(c)}'" for c in concepts) + "]::text[]"
+                    if concepts is not None else "NULL")
+    # One statement owns attribution, subtype, graph and concepts. A failed or
+    # missing migration is an error; never fall back to create-then-retag.
     rows = _query_db(f"""
-        SELECT create_memory(
-            '{memory_type}'::memory_type,
-            '{escaped_content}',
-            {importance},
-            {source_arg}
-        )::text;
+        SELECT memory_id::text,outcome,restates::text FROM public.mint_memory(
+            '{memory_type}'::memory_type, '{_escape(content)}', {float(importance)}, {source_arg},
+            p_speaker => {speaker_arg}, p_force => {force_arg}, p_concepts => {concepts_arg}
+        );
     """, timeout=60)
-
-    memory_id = rows[0][0] if rows and rows[0] else None
-    if memory_id is None:
-        # A client-side timeout can outlive a server-side commit — a mint
-        # that times out at the client can still have committed; re-query
-        # before declaring failure, and adopt the row so the patches below
-        # still run instead of orphaning a row that already exists.
-        probe = _query_db(f"""
-            SELECT id::text FROM memories
-            WHERE created_at > NOW() - INTERVAL '5 minutes'
-              AND left(content, 200) = left('{escaped_content}', 200)
-            ORDER BY created_at DESC LIMIT 1;
-        """, timeout=10)
-        memory_id = probe[0][0] if probe and probe[0] else None
-
-    if not memory_id:
+    if not rows or not rows[0]:
         return None
-
-    # Speech-act tags: create_memory doesn't set these, so patch them post-insert
-    # (only sets what was given; leaves the other NULL).
-    if (force or speaker) and memory_id:
-        sets = []
-        if force:
-            sets.append(f"force = '{force}'")
-        if speaker:
-            sets.append(f"speaker = '{_escape(speaker)}'")
-        _query_db(f"UPDATE memories SET {', '.join(sets)} WHERE id = '{memory_id}'::uuid;")
-
-    # Link concepts if provided
-    if concepts and memory_id:
-        for concept in concepts:
-            escaped_concept = _escape(concept)
-            _query_db(f"""
-                SELECT link_memory_to_concept(
-                    '{memory_id}'::uuid,
-                    '{escaped_concept}'
-                );
-            """)
-
+    memory_id, outcome, restates = rows[0]
+    logging.getLogger(__name__).info("memory mint id=%s outcome=%s restates=%s", memory_id, outcome, restates)
+    if outcome == "reused":
+        print("Reused existing memory; its attribution and concepts are unchanged.", file=sys.stderr)
+    elif restates:
+        print(f"Restates memory {restates}.", file=sys.stderr)
     return memory_id
 
 

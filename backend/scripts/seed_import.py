@@ -14,35 +14,18 @@ Each row in the JSONL file has shape:
 
 Embedding strategy
 ------------------
-The Postgres schema ships a `public.create_memory(type, content, importance,
-source_attribution, trust_level)` function that internally calls
-`get_embedding(content)`, which POSTs the text to the embedding service via
-the pgsql-http extension. We delegate to that flow rather than computing
-embeddings client-side. This is the same path used by the MCP server and the
-research worker, so seed rows take exactly the same trajectory as a real
-`remember()` call. The embeddings service URL lives in `embedding_config` and
-is set to `http://embeddings:80/embed` by default — the db container reaches
-it on the private Docker network, so the host doesn't need to expose port 80.
+The importer uses public.mint_memory with explicit subtype metadata. Base row,
+subtype and graph are one transaction. Retrying content in the NULL-speaker
+namespace returns the existing UUID without changing it. Source author remains
+source metadata; it is never inferred to be a speaker.
 
-For type-specific rows we follow up with the matching subtype helper:
-`create_semantic_memory`, `create_episodic_memory`, `create_procedural_memory`,
-`create_strategic_memory`. The simplest path is: insert via
-`create_memory()`, then INSERT the subtype row directly (because the helpers
-re-call create_memory and trigger exact-content dedup; we'd just be looking
-up the same UUID).
+SILL_FAKE_EMBEDDINGS=1 supplies a deterministic zero vector through
+public.mint_memory_with_embedding for disposable tests. It still follows the
+same atomic and uniqueness contracts, and never bypasses embedding profile
+validation. The CLI does not set this flag.
 
-For the test environment we honor `SILL_FAKE_EMBEDDINGS=1`, which short-
-circuits to a deterministic zero-vector INSERT path that skips the http call.
-That lets `test_seed_import.py` run without spinning up the embeddings
-service. The CLI never sets this flag — it's strictly a test escape hatch.
-
-Idempotency
------------
-Before inserting, we SELECT for an existing active memory whose content
-matches and whose `source_attribution->>'author'` matches the incoming row's
-author. If found, we skip. (We don't add a UNIQUE constraint — the schema's
-own dedup already returns the existing UUID on exact-content match, so a
-narrower pre-check is enough and keeps the schema unmodified.)
+The existing source-author precheck avoids unnecessary calls on repeat packs;
+the database's speaker/content uniqueness is authoritative under concurrency.
 """
 
 from __future__ import annotations
@@ -131,7 +114,7 @@ def _author(row: dict[str, Any]) -> str | None:
 
 
 def _already_present(cur, content: str, author: str | None) -> bool:
-    """Return True if an active memory with this (author, content) already exists."""
+    """Return True only for an active NULL-speaker memory with this author/content."""
     if author is None:
         cur.execute(
             """
@@ -139,6 +122,7 @@ def _already_present(cur, content: str, author: str | None) -> bool:
             FROM memories
             WHERE content = %s
               AND archived_at IS NULL
+              AND coalesce(speaker, '') = ''
               AND (source_attribution ? 'author') = FALSE
             LIMIT 1
             """,
@@ -151,6 +135,7 @@ def _already_present(cur, content: str, author: str | None) -> bool:
             FROM memories
             WHERE content = %s
               AND archived_at IS NULL
+              AND coalesce(speaker, '') = ''
               AND source_attribution->>'author' = %s
             LIMIT 1
             """,
@@ -173,84 +158,41 @@ def _insert_with_fake_embedding(
     importance: float,
     source_attribution: dict[str, Any],
 ) -> str:
-    """Test-only path: insert a memories row with a zero-vector embedding.
-
-    Bypasses get_embedding() / the http extension. We still write the
-    appropriate subtype row so the schema invariants hold.
-    """
+    """Test-only supplied-vector path; retains the ordinary atomic mint contract."""
     dim = _fake_embedding_dim(cur)
     zero_vec = "[" + ",".join(["0"] * dim) + "]"
     cur.execute(
-        """
-        INSERT INTO memories (type, content, embedding, importance, source_attribution, trust_level)
-        VALUES (%s, %s, %s::vector, %s, %s::jsonb, %s)
-        RETURNING id
-        """,
-        (
-            mem_type,
-            content,
-            zero_vec,
-            importance,
-            json.dumps(source_attribution),
-            0.7,
-        ),
+        """SELECT memory_id FROM public.mint_memory_with_embedding(
+            %s::memory_type,%s,%s::vector,%s,%s::jsonb,
+            p_type_metadata=>%s::jsonb,p_trust_level=>0.7)""",
+        (mem_type, content, zero_vec, importance, json.dumps(source_attribution),
+         json.dumps(_seed_metadata(mem_type, content))),
     )
-    new_id = cur.fetchone()[0]
-    _insert_subtype_row(cur, mem_type, new_id, content)
-    return str(new_id)
+    return str(cur.fetchone()[0])
 
 
-def _insert_subtype_row(cur, mem_type: str, memory_id: str, content: str) -> None:
-    if mem_type == "episodic":
-        cur.execute(
-            "INSERT INTO episodic_memories (memory_id) VALUES (%s) ON CONFLICT DO NOTHING",
-            (memory_id,),
-        )
-    elif mem_type == "semantic":
-        cur.execute(
-            """
-            INSERT INTO semantic_memories (memory_id, confidence)
-            VALUES (%s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (memory_id, 0.7),
-        )
-    elif mem_type == "procedural":
-        cur.execute(
-            """
-            INSERT INTO procedural_memories (memory_id, steps)
-            VALUES (%s, %s::jsonb)
-            ON CONFLICT DO NOTHING
-            """,
-            (memory_id, json.dumps([{"step": content[:200]}])),
-        )
-    elif mem_type == "strategic":
-        cur.execute(
-            """
-            INSERT INTO strategic_memories (memory_id, pattern_description, confidence_score)
-            VALUES (%s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (memory_id, content[:200], 0.7),
-        )
+def _seed_metadata(mem_type: str, content: str) -> dict[str, Any]:
+    if mem_type == "semantic":
+        return {"confidence": 0.7}
+    if mem_type == "procedural":
+        return {"steps": [{"step": content[:200]}]}
+    if mem_type == "strategic":
+        return {"pattern_description": content[:200], "confidence_score": 0.7}
+    return {}
 
 
 def _insert_via_create_memory(
-    cur,
-    *,
-    mem_type: str,
-    content: str,
-    importance: float,
+    cur, *, mem_type: str, content: str, importance: float,
     source_attribution: dict[str, Any],
 ) -> str:
-    """Production path: delegate to public.create_memory, then write subtype row."""
+    """Production seed path: one atomic statement, no post-reuse subtype writes."""
     cur.execute(
-        "SELECT public.create_memory(%s::memory_type, %s, %s, %s::jsonb, NULL)",
-        (mem_type, content, importance, json.dumps(source_attribution)),
+        """SELECT memory_id FROM public.mint_memory(%s::memory_type,%s,%s,%s::jsonb,
+            p_type_metadata=>%s::jsonb)""",
+        (mem_type, content, importance, json.dumps(source_attribution),
+         json.dumps(_seed_metadata(mem_type, content))),
     )
-    new_id = cur.fetchone()[0]
-    _insert_subtype_row(cur, mem_type, new_id, content)
-    return str(new_id)
+    return str(cur.fetchone()[0])
 
 
 def _connect_explicit(dsn: str):

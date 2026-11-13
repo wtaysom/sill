@@ -11,6 +11,7 @@ import os
 import runpy
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -29,23 +30,36 @@ def recall_hook(monkeypatch, capsys, tmp_path):
     episodic_cli.touch()
 
     def run(*, settings=None, prompt="Cedar meadow survey records",
-            store_response=None, episodes=""):
+            store_response=None, episodes="", delays=None):
         calls = {"store": [], "episodes": []}
+        elapsed = 0.0
 
-        def fake_run(args, **kwargs):
+        def spend(stage, args, timeout):
+            nonlocal elapsed
+            delay = (delays or {}).get(stage, 0)
+            elapsed += min(delay, timeout)
+            if delay > timeout:
+                raise subprocess.TimeoutExpired(args, timeout)
+
+        def fake_run(args, *, timeout, **kwargs):
             if args[0] == "git":
+                spend("project", args, timeout)
                 return subprocess.CompletedProcess(args, 0, str(tmp_path), "")
             if args[0] == str(episodic_cli):
                 assert args[1:4] == ["search", prompt, "--limit"]
                 calls["episodes"].append(int(args[4]))
+                spend("episodes", args, timeout)
                 return subprocess.CompletedProcess(args, 0, episodes, "")
             assert args[0] == "docker", args
             query = args[-1]
             if "INSERT INTO session_activity" in query:
+                spend("clock", args, timeout)
                 return subprocess.CompletedProcess(args, 0, "|||-1|||1\n", "")
             if query.startswith("UPDATE memories "):
+                spend("access", args, timeout)
                 return subprocess.CompletedProcess(args, 0, "", "")
             calls["store"].append(query)
+            spend("store", args, timeout)
             if isinstance(store_response, Exception):
                 raise store_response
             if store_response is not None:
@@ -61,6 +75,8 @@ def recall_hook(monkeypatch, capsys, tmp_path):
             for name, value in (settings or {}).items():
                 patch.setenv(name, value)
             patch.setattr(subprocess, "run", fake_run)
+            if delays is not None:
+                patch.setattr(time, "monotonic", lambda: elapsed)
             patch.setattr(sys, "stdin", io.StringIO(json.dumps({
                 "prompt": prompt, "session_id": "test-session", "cwd": str(tmp_path),
             })))
@@ -70,6 +86,8 @@ def recall_hook(monkeypatch, capsys, tmp_path):
         captured = capsys.readouterr()
         assert exited.value.code == 0
         assert captured.err == ""
+        if delays is not None:
+            calls["elapsed"] = elapsed
         return json.loads(captured.out), calls
 
     return run

@@ -26,9 +26,9 @@ def test_migrations_sequential_no_gaps():
 def test_each_migration_names_its_lineage():
     for name in numbered_files():
         head = "\n".join((MIGRATIONS / name).read_text().splitlines()[:10])
-        assert ("Ported from agi-memory" in head) or ("sill original" in head), (
+        assert ("Ported from agi-memory" in head) or ("Ported from Sili" in head) or ("sill original" in head), (
             f"{name}: header needs a provenance line "
-            "('Ported from agi-memory migration NNN (date)' or 'sill original')"
+            "('Ported from agi-memory migration NNN (date)' or 'Ported from Sili migration NNN (date)' or 'sill original')"
         )
 
 
