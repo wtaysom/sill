@@ -51,7 +51,8 @@ needing to produce an artifact. Neither performs the other's job.
 ## Voice config format
 
 `SILL_BEAT_CONFIG` (default `beats.json` at the project root) is a JSON
-object with one top-level `voices` array. Each entry:
+object with a top-level `voices` array and optional `audits` settings.
+Each voice accepts the following fields.
 
 | Field          | Required | Meaning |
 |-----------------|----------|---------|
@@ -255,6 +256,44 @@ receipt with `state_advanced: null`, then writes `next_index` and
 sets `state_advanced: true`. If the last write fails, the worker logs the
 attempt ID and resumes at the saved index. The rotation file's attempt ID
 identifies the committed transition.
+
+## Audit scope and results
+
+The optional `audits` object in `beats.json` configures Markdown checks.
+
+| Field | Meaning |
+|---|---|
+| `scan_roots` | Markdown files or directories inside the project. Directories are searched recursively. The scan reads UTF-8 `.md` and `.markdown` files and deduplicates overlapping roots by resolved path. |
+| `link_roots` | Explicit locations a link check may use as local targets. |
+| `quote_sources` | Exact local Markdown citation targets mapped to lists of permitted text, VTT, or SRT evidence files. |
+
+Relative paths are resolved from the project root. `link_roots` and
+`quote_sources` can name external locations explicitly. A scan follows
+the resolved boundaries of its configured roots. When `scan_roots` is
+omitted, receipt-based checks use the attempt's newly created regular
+Markdown files listed in `new_outputs`. Paths that traverse symbolic
+links leave the receipt-only scope `unchecked`. An explicit empty list
+selects no files. Empty or unreadable scope and missing prerequisites
+also make the affected check `unchecked`.
+
+The receipt window uses `spawned_at` and `completed_at` from a completed
+schema-version-1 attempt. Both timestamps need UTC offsets and the end
+must be at or after the start. A missing or invalid window leaves any
+check that requires it `unchecked`.
+
+Check commands use `--json` to emit a result with `status`, `findings`,
+and `reason`. Each finding includes `file`, `line`, `code`, `detail`, and
+`origin`. Checks with a baseline compare the captured Markdown text and
+count matching defects per check and file. Adding lines above a defect
+preserves its `preexisting` origin. Additional occurrences are `new`.
+Without a baseline, origin is `unknown`.
+
+| Exit code | Result |
+|---|---|
+| `0` | `checked` with no new findings |
+| `1` | `checked` with new findings |
+| `2` | Invalid invocation or internal `error` |
+| `3` | `unchecked`, with a reason and any independent findings |
 
 ---
 
