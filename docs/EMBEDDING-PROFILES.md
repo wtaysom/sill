@@ -167,8 +167,56 @@ prompt activation, and vectors generated with that profile's document policy.
 Omissions remain compatible only in raw mode; wrong fingerprints are rejected
 before writes. `status` reports the current fingerprint.
 
-A standard fresh database already contains seeded boundary vectors. Configure its
-pinned service explicitly, attest the raw identity that the installer just used,
-then run the same prepare/resume/activate sequence before exposing the application.
-This is an explicit fresh-install choice. Ordinary upgrades remain raw until the
-operator requests a transition; migration 014 contains no fresh-install shortcut.
+## Explicit fresh installation
+
+`./install.sh --embedding-profile embeddinggemma-search-v1` selects prompts for
+one tested tuple only: `unsloth/embeddinggemma-300m`, revision
+`bfa3c846ac738e62aa61806ef9112d34acb1dc5a`, dimension 768, normalization `l2`.
+The installer supplies both prefixes explicitly, including their trailing spaces:
+`task: search result | query: ` and `title: none | text: `. It does not treat the
+unsloth model name as an automatic alias for Google's profile policy.
+
+The default `--embedding-profile raw` never changes the active profile. Ordinary
+upgrades and reruns also preserve the active profile. Custom models, revisions
+and dimensions use the ordinary raw path; the explicit prompted choice refuses
+incompatible configurations before starting the runtime.
+
+A fresh database already generates raw boundary vectors during initialization.
+Before starting that initialization, the prompted installer writes a private
+`backend/.env.embedding-profile.json` receipt with the exact source attestation,
+target fingerprint and creation nonce. It creates the previously absent local
+PostgreSQL volume with that nonce as a label, verifies the label and records its
+creation identity. Existing volumes without matching creation evidence are
+refused, even if empty. Keep this receipt with the installation; copying an env
+file alone does not transfer freshness evidence. No credential is stored in it.
+
+Once every migration in the checkout's ledger is present and the services are
+ready, the installer verifies the selected connection and mounted volume, binds
+the receipt to the PostgreSQL system identifier/database name/OID, and uses the
+same `ProfileMigration.prepare`, `resume` and `activate` operation described above.
+Prepare uses the selected database container's verified PostgreSQL backup tools.
+Backups stay under `backend/.env.embedding-profile-backups/`. The historical
+attestation remains `declared-unverified`; installer evidence never promotes it to
+verified historical model identity. Activation finishes before maintenance,
+methodology seed import and client registration. No backup is restored or volume
+deleted automatically on failure.
+
+Rerun the same explicit command to resume an operation whose ID was saved. Its
+source, target, database and volume must still match. An already active exact
+fingerprint is a no-op on the same proven-created database. Keep the pinned
+service unchanged and do not run independent embedding operations concurrently.
+
+There is a deliberately conservative interruption boundary: if prepare was
+started but no returned operation ID reached the receipt, the installer refuses
+a second prepare. This includes failures before prepare committed. It never
+adopts a latest operation just because its profiles look similar. Retain the
+receipt, volume and backups. Using the installed Python environment and the
+selected DSN environment variable, run `python -m scripts.reembed_documents status`
+from `backend/`. Inspect the operation ID, source/target profiles, provenance and
+backup against the receipt. If an operation was committed and you establish that
+it is the intended one, explicitly run `resume` and `activate` as shown above,
+then rerun the installer; it recognizes the exact active fingerprint without
+claiming ownership of that operation. If no operation was committed, or another
+operation intervened, stop for operator reconciliation rather than deleting the
+receipt to bypass the guard. The raw store remains usable until activation;
+`./install.sh --embedding-profile raw` does not perform a transition.

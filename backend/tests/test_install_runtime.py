@@ -122,7 +122,34 @@ with (root / "docker-calls").open("a") as out:
 if args[0] == "info":
     print(os.getenv("TEST_ENGINE", "linux aarch64"))
     sys.exit()
+if args[0] == "volume":
+    volume = root / "volume.json"
+    if args[1] == "ls":
+        print("backend_postgres_data" if volume.exists() or os.getenv("TEST_EXISTING_VOLUME") else "")
+    elif args[1] == "create":
+        assert not os.getenv("TEST_EXISTING_VOLUME")
+        receipt_path = checkout / "backend/.env.embedding-profile.json"
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt_path.stat().st_mode & 0o777 == 0o600
+        assert receipt["selection"]["source"] == {
+            "model_id": "unsloth/embeddinggemma-300m", "revision": "bfa3c846ac738e62aa61806ef9112d34acb1dc5a",
+            "dimension": 768, "normalization": "l2", "query_prefix": "", "document_prefix": ""}
+        labels = dict(args[i+1].split("=", 1) for i, v in enumerate(args) if v == "--label")
+        if os.getenv("TEST_VOLUME_RACE"):
+            labels = {}
+        volume.write_text(json.dumps({"Name": args[-1], "Labels": labels, "CreatedAt": "fixture-created", "Driver": "local", "Options": None}))
+        if os.getenv("TEST_PROFILE_FAILURE") == "volume-created":
+            sys.exit(72)
+    elif args[1] == "inspect":
+        print("[" + volume.read_text() + "]")
+    else:
+        raise AssertionError(args)
+    sys.exit()
 if args[0] == "inspect":
+    if args[1] != "--format":
+        volume = json.loads((root / "volume.json").read_text())
+        print(json.dumps([{"Mounts": [{"Type": "volume", "Name": volume["Name"], "Destination": "/var/lib/postgresql/data"}]}]))
+        sys.exit()
     if ".NetworkSettings.Ports" in args[2]:
         value = os.getenv("TEST_ACTUAL_PORT")
         if not value:
@@ -169,7 +196,13 @@ if command[0] == "config":
             ("POSTGRES_DB", "sill"), ("POSTGRES_USER", "sill"), ("POSTGRES_PASSWORD", "sill_password"),
         )}, "ports": [{"host_ip": settings.get("SILL_BIND_ADDR", "127.0.0.1"),
                       "published": settings.get("POSTGRES_PORT", "5432"), "target": 5432}]}
-    print(json.dumps({"name": settings.get("COMPOSE_PROJECT_NAME", "backend"), "services": {"db": db}}))
+    db["volumes"] = [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]
+    db["command"] = ["postgres", "-c", "app.embedding_dimension=" + settings.get("EMBEDDING_DIMENSION", "768")]
+    emb = {"command": ["--model-id", settings.get("EMBEDDING_MODEL_ID", "unsloth/embeddinggemma-300m")], "environment": {
+        "REVISION": settings.get("EMBEDDING_REVISION", settings.get("SILL_DEFAULT_EMBEDDING_REVISION", "main")),
+        "EMBEDDING_MODEL_ID": settings.get("EMBEDDING_MODEL_ID", "unsloth/embeddinggemma-300m"),
+        "EMBEDDING_DIMENSION": settings.get("EMBEDDING_DIMENSION", "768")}}
+    print(json.dumps({"name": settings.get("COMPOSE_PROJECT_NAME", "backend"), "services": {"db": db, "embeddings": emb}, "volumes": {"postgres_data": {"name": "backend_postgres_data"}}}))
     sys.exit()
 if command[0] == "ps":
     if "-q" in command:
@@ -192,6 +225,10 @@ if command[0] == "exec":
         print("t")
     sys.exit()
 if command[0] == "up":
+    if os.getenv("TEST_REQUIRE_PROFILE_RECEIPT"):
+        receipt = json.loads((checkout / "backend/.env.embedding-profile.json").read_text())
+        assert receipt["volume_identity"]["name"] == "backend_postgres_data"
+        assert receipt["volume_identity"]["nonce"] == receipt["nonce"]
     dot = checkout / "backend/.env"
     saved = dict(line.split("=", 1) for line in dot.read_text().splitlines()
                  if line and not line.startswith("#")) if dot.exists() else {}
@@ -407,3 +444,242 @@ def test_current_schema_refuses_ambiguous_ledger(runtime):
     assert result.returncode != 0, details(result)
     assert "schema_migrations" in result.stderr and "multiple" in result.stderr
     assert "Sill is installed" not in result.stdout
+
+
+def test_explicit_raw_selection_keeps_normal_install_behavior(runtime):
+    result = run(runtime, "install.sh", "--no-seed", "--embedding-profile", "raw")
+    assert result.returncode == 0, details(result)
+    assert not (runtime[0] / "backend/.env.embedding-profile.json").exists()
+
+
+def test_prompted_profile_dry_run_does_not_create_receipt(runtime):
+    result = run(runtime, "install.sh", "--dry-run", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode == 0, details(result)
+    assert "embeddinggemma-search-v1" in result.stdout
+    assert not (runtime[0] / "backend/.env.embedding-profile.json").exists()
+
+
+@pytest.mark.parametrize("value", ["unknown", ""])
+def test_invalid_profile_is_rejected_before_runtime(runtime, value):
+    result = run(runtime, "install.sh", "--embedding-profile", value)
+    assert result.returncode == 2
+    assert "embedding-profile" in result.stderr
+    assert not (Path(runtime[2]["TEST_FIXTURE"]) / "docker-calls").exists()
+
+
+@pytest.fixture
+def profile_runtime(runtime):
+    # M5 itself has real PostgreSQL integration coverage. Replace that API at
+    # the process boundary here; run the real installer/receipt protocol.
+    checkout, _, env = runtime
+    (checkout / "backend/scripts/reembed_documents.py").write_text(PROFILE_OPERATOR)
+    env["TEST_REQUIRE_PROFILE_RECEIPT"] = "1"
+    return runtime
+
+
+PROFILE_OPERATOR = r'''
+import json, os
+from pathlib import Path
+from contextlib import contextmanager
+from embedding_profiles import EmbeddingProfile
+root = Path(os.environ["TEST_FIXTURE"])
+state_file = root / "profile-state.json"
+receipt_file = Path(os.environ["TEST_CHECKOUT"]) / "backend/.env.embedding-profile.json"
+class Cursor:
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def execute(self, query):
+        assert "pg_control_system" in query
+    def fetchone(self):
+        return ["7531438976150207200", "sill", os.getenv("TEST_DATABASE_OID", "16384")]
+class Connection:
+    def cursor(self): return Cursor()
+class ProfileMigration:
+    def __init__(self, dsn):
+        assert dsn.startswith("postgresql://")
+    @contextmanager
+    def connection(self): yield Connection()
+    def status(self):
+        return json.loads(state_file.read_text()) if state_file.exists() else {
+            "active_profile": None, "active_fingerprint": "legacy-raw-unknown", "operation": None}
+    def prepare(self, target, *, source_attestation, backup_dir, pg_tools_container):
+        assert pg_tools_container == os.getenv("TEST_EXPECT_TOOLS_CONTAINER", "sill_db")
+        assert source_attestation.query_prefix == source_attestation.document_prefix == ""
+        assert target.query_prefix == "task: search result | query: "
+        assert target.document_prefix == "title: none | text: "
+        receipt = json.loads(receipt_file.read_text())
+        assert receipt["prepare_started"] and receipt["database_identity"]
+        assert not self.status()["operation"], "second prepare"
+        Path(backup_dir).mkdir(parents=True, exist_ok=True)
+        (Path(backup_dir) / "retained-backup").write_text("fixture archive")
+        state = self.status()
+        state["operation"] = {"id": "fixture-operation", "state": "preparing",
+            "source_profile": source_attestation.to_dict(), "target_profile": target.to_dict()}
+        state_file.write_text(json.dumps(state))
+        if os.getenv("TEST_PROFILE_FAILURE") == "commit-gap":
+            raise ValueError("fixture interruption after prepare commit")
+        return {"id": "fixture-operation", "state": "preparing"}
+    def resume(self):
+        assert json.loads(receipt_file.read_text())["operation_id"] == "fixture-operation"
+        if os.getenv("TEST_PROFILE_FAILURE") == "resume":
+            raise ValueError("fixture interrupted resume")
+        return {"remaining": 0}
+    def activate(self):
+        state = self.status()
+        state["active_profile"] = state["operation"]["target_profile"]
+        state["active_fingerprint"] = EmbeddingProfile(**state["active_profile"]).fingerprint
+        state["operation"]["state"] = "active"
+        state_file.write_text(json.dumps(state))
+        return {"fingerprint": state["active_fingerprint"], "state": "active"}
+'''
+
+
+def profile_receipt(runtime):
+    return runtime[0] / "backend/.env.embedding-profile.json"
+
+
+def test_fresh_prompted_install_activates_before_worker_seed_and_clients(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 "--client", "claude-desktop")
+    assert result.returncode == 0, details(result)
+    assert (profile_runtime[1] / "Library/Application Support/Claude/claude_desktop_config.json").exists()
+    receipt = profile_receipt(profile_runtime)
+    saved = json.loads(receipt.read_text())
+    assert receipt.stat().st_mode & 0o777 == 0o600
+    assert saved["operation_id"] == "fixture-operation"
+    assert saved["database_identity"] == ["7531438976150207200", "sill", "16384"]
+    assert result.stdout.index("Embedding profile active:") < result.stdout.index("maintenance_worker: running")
+    assert result.stdout.index("Embedding profile active:") < result.stdout.index("import methodology seed")
+    before = receipt.read_bytes()
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode == 0, details(result)
+    assert receipt.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["resume", "commit-gap"])
+def test_prompted_interruption_preserves_operation_and_never_prepares_twice(profile_runtime, failure):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 "--client", "claude-desktop", TEST_PROFILE_FAILURE=failure)
+    assert result.returncode != 0
+    assert not (profile_runtime[1] / "Library").exists()
+    assert "maintenance_worker: running" not in result.stdout
+    assert "import methodology seed" not in result.stdout
+    receipt = json.loads(profile_receipt(profile_runtime).read_text())
+    assert receipt["prepare_started"]
+    assert (profile_receipt(profile_runtime).parent / ".env.embedding-profile-backups/retained-backup").exists()
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    if failure == "resume":
+        assert result.returncode == 0, details(result)
+    else:
+        assert result.returncode != 0
+        assert "reconciliation" in result.stderr
+        assert "status" in result.stderr and "resume" in result.stderr
+
+
+@pytest.mark.parametrize("override", [
+    {"TEST_EXISTING_VOLUME": "1"}, {"TEST_VOLUME_RACE": "1"},
+    {"EMBEDDING_MODEL_ID": "custom/model"}, {"EMBEDDING_REVISION": "main"},
+    {"EMBEDDING_DIMENSION": "384"},
+])
+def test_prompted_rejects_existing_or_incompatible_before_start(profile_runtime, override):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1", **override)
+    assert result.returncode != 0
+    assert "creation evidence" in result.stderr or "requires the tested" in result.stderr
+    assert "Step 3/10" not in result.stdout
+    assert not (Path(profile_runtime[2]["TEST_FIXTURE"]) / "profile-state.json").exists()
+
+
+def test_prompted_resume_refuses_replaced_database_and_changed_intent(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 TEST_PROFILE_FAILURE="resume")
+    assert result.returncode != 0
+    for overrides in ({"TEST_DATABASE_OID": "16385"}, {"EMBEDDING_REVISION": "changed"}):
+        result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1", **overrides)
+        assert result.returncode != 0
+        assert "Embedding profile active:" not in result.stdout
+
+
+def test_default_rerun_preserves_active_prompted_profile(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode == 0, details(result)
+    state_file = Path(profile_runtime[2]["TEST_FIXTURE"]) / "profile-state.json"
+    original = state_file.read_bytes()
+    result = run(profile_runtime, "install.sh", "--no-seed")
+    assert result.returncode == 0, details(result)
+    assert state_file.read_bytes() == original
+
+
+def test_prompted_resume_retains_nonce_after_volume_creation_interruption(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 TEST_PROFILE_FAILURE="volume-created")
+    assert result.returncode != 0
+    assert "Step 3/10" not in result.stdout
+    receipt = json.loads(profile_receipt(profile_runtime).read_text())
+    assert receipt["volume_identity"] is None
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode == 0, details(result)
+    assert json.loads(profile_receipt(profile_runtime).read_text())["nonce"] == receipt["nonce"]
+
+
+@pytest.mark.parametrize("changed", ["operation_id", "target_profile", "source_profile", "volume", "active_profile"])
+def test_prompted_resume_refuses_unowned_operation_or_replaced_volume(profile_runtime, changed):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 TEST_PROFILE_FAILURE="resume")
+    assert "fixture interrupted resume" in result.stderr
+    root = Path(profile_runtime[2]["TEST_FIXTURE"])
+    if changed == "volume":
+        path = root / "volume.json"
+        state = json.loads(path.read_text())
+        state["CreatedAt"] = "replacement"
+    else:
+        path = root / "profile-state.json"
+        state = json.loads(path.read_text())
+        if changed == "operation_id":
+            state["operation"]["id"] = "somebody-elses-operation"
+        elif changed == "active_profile":
+            state["active_profile"] = dict(state["operation"]["source_profile"], revision="other")
+        else:
+            state["operation"][changed]["query_prefix"] = "other"
+    path.write_text(json.dumps(state))
+    before = path.read_bytes()
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode != 0
+    assert path.read_bytes() == before
+    assert "maintenance_worker: running" not in result.stdout
+
+
+def test_commit_gap_can_accept_independently_activated_exact_fingerprint(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 TEST_PROFILE_FAILURE="commit-gap")
+    assert "fixture interruption after prepare commit" in result.stderr
+    path = Path(profile_runtime[2]["TEST_FIXTURE"]) / "profile-state.json"
+    state = json.loads(path.read_text())
+    receipt = json.loads(profile_receipt(profile_runtime).read_text())
+    assert receipt["operation_id"] is None
+    state["active_profile"] = state["operation"]["target_profile"]
+    state["active_fingerprint"] = receipt["selection"]["fingerprint"]
+    state["operation"]["state"] = "active"
+    path.write_text(json.dumps(state))
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1")
+    assert result.returncode == 0, details(result)
+    assert "already satisfied" in result.stdout
+    assert json.loads(profile_receipt(profile_runtime).read_text())["operation_id"] is None
+
+
+@pytest.mark.parametrize("failure", ["ledger", "terminal"])
+def test_prompted_profile_waits_for_schema_and_service_readiness(profile_runtime, failure):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 TEST_FAILURE=failure)
+    assert result.returncode != 0
+    receipt = json.loads(profile_receipt(profile_runtime).read_text())
+    assert not receipt["prepare_started"]
+    assert receipt["database_identity"] is None
+    assert not (Path(profile_runtime[2]["TEST_FIXTURE"]) / "profile-state.json").exists()
+
+
+def test_prompted_backup_uses_selected_database_container(profile_runtime):
+    result = run(profile_runtime, "install.sh", "--embedding-profile", "embeddinggemma-search-v1",
+                 SILL_DB_CONTAINER="selected_fixture_db", TEST_EXPECT_TOOLS_CONTAINER="selected_fixture_db")
+    assert result.returncode == 0, details(result)
+    receipt = json.loads(profile_receipt(profile_runtime).read_text())
+    assert receipt["selection"]["container"] == "selected_fixture_db"
