@@ -119,3 +119,26 @@ jobs:
       - name: Remove owned transactional container
         if: always()
         run: docker rm -fv sill_test_ci || true
+
+  native-linux-runtime:
+    name: cold install and MCP round trip (Linux amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Required native runtime rehearsal with real TEI
+        run: python -I .github/scripts/native_linux_runtime.py "${RUNNER_TEMP}/sill-native-evidence"
+      - name: Save installer, initdb, readiness and MCP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-runtime-evidence
+          path: ${{ runner.temp }}/sill-native-evidence
+          if-no-files-found: error
