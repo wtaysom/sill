@@ -95,6 +95,23 @@ def _available_roots(root: Path, link_roots: list[Path]) -> list[Path]:
     return available
 
 
+def _missing_leaf(target: Path) -> bool:
+    """Require a traversable parent and no directory entry for the leaf."""
+    try:
+        parent_mode = target.parent.stat().st_mode
+    except OSError:
+        return False
+    if not stat.S_ISDIR(parent_mode):
+        return False
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _check_link(target: Path, roots: list[Path]) -> tuple[str | None, str | None]:
     if not roots:
         return UNCHECKED, None
@@ -108,8 +125,12 @@ def _check_link(target: Path, roots: list[Path]) -> tuple[str | None, str | None
         return UNCHECKED, None
     try:
         mode = target.stat().st_mode
-    except (FileNotFoundError, NotADirectoryError):
-        return BROKEN, str(resolved)
+    except FileNotFoundError:
+        # Non-strict realpath can remove a failed traversal such as
+        # missing-dir/.., or one within a dangling final symlink's payload.
+        return BROKEN, str(resolved) if _missing_leaf(target) else None
+    except NotADirectoryError:
+        return BROKEN, None
     except (OSError, ValueError):
         return UNCHECKED, None
     if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
@@ -121,8 +142,8 @@ def scan(root: Path, files: dict[Path, str], link_roots: list[Path]) -> AuditRes
     """Observe the current filesystem for the supplied Markdown snapshot.
 
     Finding details hold the written absolute path, decoded and without a
-    query, fragment, or line suffix. Broken findings also carry the resolved
-    in-scope target so equivalent paths share an identity across scans.
+    query, fragment, or line suffix. When traversal establishes a resolved
+    in-scope target, broken findings also carry that identity across scans.
     """
     if not link_roots:
         return AuditResult("unchecked", [], NO_ROOTS)

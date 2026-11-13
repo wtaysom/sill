@@ -94,6 +94,27 @@ def test_rewritten_old_note_retains_only_the_baseline_number_of_occurrences(tmp_
     ]
 
 
+@pytest.mark.parametrize("obstacle_exists", [False, True], ids=["missing", "not-directory"])
+@pytest.mark.parametrize("via_symlink", [False, True], ids=["direct", "symlink"])
+def test_rewrite_through_untraversable_parent_is_a_new_break(tmp_path, obstacle_exists, via_symlink):
+    note = tmp_path / "note.md"
+    before = link_check.scan(tmp_path, {note: "[source](target.md)"}, [tmp_path])
+    (tmp_path / "target.md").touch()
+    if obstacle_exists:
+        (tmp_path / "obstacle").touch()
+
+    destination = "obstacle/../target.md"
+    if via_symlink:
+        (tmp_path / "alias.md").symlink_to(destination)
+        destination = "alias.md"
+    current = link_check.scan(tmp_path, {note: f"[source]({destination})"}, [tmp_path])
+    result = link_check.compare(current, before)
+
+    [finding] = result.findings
+    assert (finding.code, finding.origin) == ("broken_link", "new")
+    assert result.exit_code == 1
+
+
 def test_link_without_baseline_has_unknown_origin(tmp_path):
     files = {tmp_path / "note.md": "[gone](nowhere.md)"}
     current = link_check.scan(tmp_path, files, [tmp_path])
