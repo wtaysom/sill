@@ -321,3 +321,21 @@ def test_multiline_inline_code_is_excluded_only_inside_its_markdown_block():
     result = receipts.audit({}, after, WINDOW, lookup=lookup)
     assert result.status == "checked"
     assert result.findings == []
+
+
+def test_multiline_inline_code_cannot_supply_a_supersedes_cue():
+    after = {NOTE: "\n".join((
+        "Stored: deadbeef (example: `supersedes ffffffff",
+        "more text`)",
+        f"Stored: {FIRST} [supersedes ``{OLDER}``] (example: `supersedes ffffffff",
+        "more text`)",
+    ))}
+    receipt = "deadbeef-aabb-42dc-b200-000000000004"
+
+    def lookup(keys):
+        assert keys == {"deadbeef", FIRST, OLDER}
+        return store((receipt, MINTED), (FIRST, MINTED), (OLDER, EARLIER))(keys)
+
+    result = receipts.audit({}, after, WINDOW, lookup=lookup)
+    assert result.status == "checked"
+    assert result.findings == []

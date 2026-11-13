@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -80,9 +81,9 @@ class Reference:
         return self.kind, self.key, self.parent
 
 
-def _code_spans(text: str, start: int = 0) -> Iterator[tuple[re.Match, re.Match]]:
+def _code_spans(text: str) -> Iterator[tuple[re.Match, re.Match]]:
     """Pair backtick runs of the same length within a Markdown block."""
-    markers = list(BACKTICKS_RE.finditer(text, start))
+    markers = list(BACKTICKS_RE.finditer(text))
     next_by_length = {}
     closes = {}
     for index in range(len(markers) - 1, -1, -1):
@@ -103,30 +104,17 @@ def _code_spans(text: str, start: int = 0) -> Iterator[tuple[re.Match, re.Match]
         index += 1
 
 
-def _slot_value(text: str, start: int) -> tuple[str, int] | None:
-    if opening := BACKTICKS_RE.match(text, start):
-        for closing in BACKTICKS_RE.finditer(text, opening.end()):
-            if closing[0] == opening[0]:
-                return text[opening.end():closing.start()].strip().lower(), closing.end()
+def _slot_value(
+    text: str, start: int, end: int, code: dict[int, tuple[re.Match, re.Match]],
+) -> tuple[str, int] | None:
+    if span := code.get(start):
+        opening, closing = span
+        if closing.end() <= end:
+            return text[opening.end():closing.start()].strip().lower(), closing.end()
         return None
-    if match := TOKEN.match(text, start) or PENDING_RE.match(text, start):
+    if match := TOKEN.match(text, start, end) or PENDING_RE.match(text, start, end):
         return match[0].lower(), match.end()
     return None
-
-
-def _supersedes(text: str, start: int) -> Iterator[str]:
-    code_spans = _code_spans(text, start)
-    for opening, closing in code_spans:
-        yield from _supersedes_in_text(text, start, opening.start())
-        start = closing.end()
-    yield from _supersedes_in_text(text, start, len(text))
-
-
-def _supersedes_in_text(text: str, start: int, end: int) -> Iterator[str]:
-    for marker in SUPERSEDES_RE.finditer(text, start, end):
-        target = _slot_value(text, marker.end())
-        if target and KEY_START.match(target[0]):
-            yield target[0]
 
 
 def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
@@ -155,29 +143,40 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
         yield start, lines
 
 
+def _block_references(start: int, lines: list[str]) -> Iterator[Reference]:
+    block = "\n".join(lines)
+    code = {opening.start(): (opening, closing) for opening, closing in _code_spans(block)}
+    starts = list(code)
+
+    def inside_code(position: int) -> bool:
+        previous = bisect_right(starts, position) - 1
+        return previous >= 0 and position < code[starts[previous]][1].end()
+
+    offset = 0
+    for number, line in enumerate(lines, start):
+        line_start, line_end = offset, offset + len(line)
+        offset = line_end + 1
+        slot = SLOT_RE.match(line)
+        if slot is None or inside_code(line_start):
+            continue
+        value = _slot_value(block, line_start + slot.end(), line_end, code)
+        if value is None:
+            continue
+        key, end = value
+        if key == "mint-pending":
+            yield Reference(number, "pending", "")
+        elif KEY_START.match(key):
+            yield Reference(number, "receipt", key)
+            for cue in SUPERSEDES_RE.finditer(block, end, line_end):
+                if not inside_code(cue.start()):
+                    target = _slot_value(block, cue.end(), line_end, code)
+                    if target and KEY_START.match(target[0]):
+                        yield Reference(number, "supersedes", target[0], key)
+
+
 def _references(text: str) -> Iterator[Reference]:
     for start, lines in _blocks(text):
-        spans = _code_spans("\n".join(lines))
-        active = next(spans, None)
-        offset = 0
-        for number, line in enumerate(lines, start):
-            while active and active[1].end() <= offset:
-                active = next(spans, None)
-            inside_code = active is not None and active[0].start() < offset
-            offset += len(line) + 1
-            slot = SLOT_RE.match(line)
-            if inside_code or slot is None:
-                continue
-            value = _slot_value(line, slot.end())
-            if value is None:
-                continue
-            key, end = value
-            if key == "mint-pending":
-                yield Reference(number, "pending", "")
-            elif KEY_START.match(key):
-                yield Reference(number, "receipt", key)
-                for superseded in _supersedes(line, end):
-                    yield Reference(number, "supersedes", superseded, key)
+        yield from _block_references(start, lines)
 
 
 async def _read_selected(payload: dict) -> list[list[str]]:

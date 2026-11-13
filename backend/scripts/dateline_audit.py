@@ -54,10 +54,10 @@ TIME_RE = re.compile(
     r"(?:(?P<day>\d{4}-\d{2}-\d{2})(?:(?P<iso>[Tt])|,?\s+))?"
     r"(?<![\d:])(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2})(?:\.(?P<fraction>\d{1,6}))?)?(?![\d:])"
     r"(?:\s*(?P<ampm>[AaPp]\.?[Mm]\.?)(?![A-Za-z]))?"
-    rf"(?:[ \t]*(?i:UTC|GMT)[ \t]*(?P<named_offset>[+-]{OFFSET})"
-    rf"|[ \t]*(?P<offset>\+{OFFSET}|-\d{{4}}|[Zz])"
-    rf"|(?P<negative>[ \t]+-{OFFSET}|(?(s)|(?(iso)|(?!)))-{OFFSET})"
-    rf"|(?P<abbr>[ \t]+(?:(?i:{ZONE_ABBREVIATIONS})|[A-Z]{{2,6}})|[A-Za-z]+))?(?![\w:])"
+    rf"(?:\s*(?i:UTC|GMT)\s*(?P<named_offset>[+-]{OFFSET})"
+    rf"|\s*(?P<offset>\+{OFFSET}|-\d{{4}}|[Zz])"
+    rf"|(?P<negative>\s+-{OFFSET}|(?(s)|(?(iso)|(?!)))-{OFFSET})"
+    rf"|(?P<abbr>\s+(?:(?i:{ZONE_ABBREVIATIONS})|[A-Z]{{2,6}})|[A-Za-z]+))?(?![\w:])"
 )
 RANGE_RE = re.compile(r"\s*[–—-]\s*~?\s*")
 APPROX_RE = re.compile(r"(?:~|\b(?:about|approx\.?|approximately|around|circa))\s*$", re.IGNORECASE)

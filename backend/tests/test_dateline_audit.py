@@ -290,3 +290,21 @@ def test_header_metadata_cues_are_checked_without_scanning_body_metadata():
     assert [(item.line, item.code) for item in result.findings] == [
         (3, "unsupported_timezone"),
     ]
+
+
+@pytest.mark.parametrize("reading", [
+    "16:01\nUTC",
+    "16:01\n+00:00",
+    "11:01\n-05:00",
+    "11:01 utc\n-05:00",
+])
+def test_supported_zones_on_dateline_continuations(reading):
+    result = datelines.audit({}, {NOTE: f"Date: 2026-11-13, {reading}"}, WINDOW)
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+def test_unsupported_zone_on_dateline_continuation_remains_unchecked():
+    result = datelines.audit({}, {NOTE: "Date: 2026-11-13, 23:57\ncSt"}, WINDOW)
+    assert result.status == "unchecked"
+    assert [item.code for item in result.findings] == ["unsupported_timezone"]
