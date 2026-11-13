@@ -10,6 +10,7 @@ sentence, even before a capitalized name. Without that comma, lowercase prose
 or a directly introduced quote continues; capitalized prose starts a sentence.
 Markdown emphasis is transparent to this rule. Ambiguous prose should put the
 timestamp next to the quote rather than rely on natural-language inference.
+Equally near distinct timestamps leave timing unchecked; wording is still checked.
 """
 
 from __future__ import annotations
@@ -84,10 +85,16 @@ class Quote:
     target: str | None
     stamp: Stamp | None
     ambiguous: bool
+    tied_stamps: tuple[Stamp, ...] = ()
 
     @property
-    def fingerprint(self) -> tuple[str, str | None, tuple[tuple[float, float], ...]]:
-        return " ".join(self.text.split()), self.target, self.stamp.spans if self.stamp else ()
+    def fingerprint(self) -> tuple[
+        str, str | None, tuple[tuple[float, float], ...], tuple[tuple[tuple[float, float], ...], ...]
+    ]:
+        return (
+            " ".join(self.text.split()), self.target, self.stamp.spans if self.stamp else (),
+            tuple(sorted(stamp.spans for stamp in self.tied_stamps)),
+        )
 
 
 @dataclass(frozen=True)
@@ -168,7 +175,8 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
             # Otherwise `>` and its preceding spaces are literal code content.
             fence_line = expanded if fence_quoted else raw.expandtabs(4)
             fence_line_indent = len(fence_line) - len(fence_line.lstrip(" "))
-            if (fence_quoted and not in_quote) or (not blank and fence_line_indent < fence_indent):
+            fence_blank = not fence_line.strip()
+            if (fence_quoted and not in_quote) or (not fence_blank and fence_line_indent < fence_indent):
                 fence = ""  # The containing block ended before the fence closed.
             else:
                 closing = FENCE_RE.match(fence_line[fence_indent:])
@@ -314,14 +322,22 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
         stamps = list(_stamps(stamp_text))
         boundaries = [0]
         for boundary in SENTENCE_RE.finditer(stamp_text):
-            before_period = stamp_text[:boundary.start()]
+            # Three abbreviation characters plus their word-boundary context.
+            # Never scan a growing paragraph prefix for each sentence boundary.
+            tail_start = max(0, boundary.start() - 4)
+            before_period = stamp_text[tail_start:boundary.start()]
             if abbreviation := ABBREVIATION_RE.search(before_period):
                 # A comma introduces an example/explanation, including names.
                 # Ignore emphasis on either side of the abbreviation; otherwise
                 # retain the existing capitalized-prose boundary convention.
-                introduced = before_period[:abbreviation.start()].rstrip(" \t\n*_").endswith(",")
-                following = stamp_text[boundary.end():].lstrip("*_")
-                next_char = following[:1]
+                preceding = tail_start + abbreviation.start() - 1
+                while preceding >= 0 and stamp_text[preceding] in " \t\n*_":
+                    preceding -= 1
+                introduced = preceding >= 0 and stamp_text[preceding] == ","
+                following = boundary.end()
+                while following < len(stamp_text) and stamp_text[following] in "*_":
+                    following += 1
+                next_char = stamp_text[following:following + 1]
                 if introduced or next_char.islower() or next_char in {"“", '"'}:
                     continue
             boundaries.append(boundary.end())
@@ -341,8 +357,19 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
                         nearby.append((match.start() - end, stamp))
                     elif start >= match.end() and not forward:
                         nearby.append((start - match.end(), stamp))
-            stamp = min(nearby, key=lambda item: item[0])[1] if nearby else None
-            yield Quote(line + block.count("\n", 0, match.start()), quote, parts, target, stamp, len(targets) > 1)
+            stamp = None
+            tied_stamps = ()
+            if nearby:
+                distance = min(distance for distance, _ in nearby)
+                nearest = {item.spans: item for gap, item in nearby if gap == distance}
+                if len(nearest) == 1:
+                    stamp = next(iter(nearest.values()))
+                else:
+                    tied_stamps = tuple(nearest.values())
+            yield Quote(
+                line + block.count("\n", 0, match.start()), quote, parts, target, stamp,
+                len(targets) > 1, tied_stamps,
+            )
 
 
 def _cue_words(text: str) -> Iterator[tuple[tuple[float, float], tuple[str, ...]]]:
@@ -542,6 +569,10 @@ def audit(before: dict[Path, str] | None, after: dict[Path, str], sources: dict[
                 if source not in cache:
                     cache[source] = _read_source(source)
                 evidence[source] = cache[source]
+            if quote.tied_stamps:
+                unchecked["ambiguous equally near timestamps: " + ", ".join(
+                    stamp.text for stamp in quote.tied_stamps
+                )] += 1
             code, detail = _check(quote, evidence)
             if code == "unchecked":
                 unchecked[detail] += 1

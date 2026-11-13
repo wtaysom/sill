@@ -450,3 +450,48 @@ def test_quote_list_fence_ends_when_its_container_dedents(tmp_path):
     result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
     assert result.status == "checked"
     assert findings(result) == [(4, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("separator,expected_lines", [
+    (">", [4]),
+    (" >", [4]),
+    ("  >", []),  # Still inside the list fence: the marker is literal code.
+    ("", []),     # A genuinely blank line cannot close the fence.
+])
+def test_quote_list_fence_blankness_uses_its_own_container(tmp_path, separator, expected_lines):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = '- ```text\n  fenced code\n' + separator + '\n  > “The sky is stormy” [Talk](src)\n'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(line, "text_mismatch", "new") for line in expected_lines]
+
+
+@pytest.mark.parametrize("first,last", [("00:00:10", "00:05:00"), ("00:05:00", "00:00:10")])
+@pytest.mark.parametrize("wording,mismatch", [("clear", False), ("stormy", True)])
+def test_quote_equally_near_distinct_timestamps_remain_unchecked(tmp_path, first, last, wording, mismatch):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:00:10] The sky is clear.\n")
+    note = f'At {first}, e.g. Alice says “the sky is {wording}” at approximately {last} [Talk](src).'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "unchecked"
+    assert "ambiguous" in result.reason.lower() and "timestamp" in result.reason.lower()
+    assert findings(result) == ([(1, "text_mismatch", "new")] if mismatch else [])
+
+
+def test_quote_equally_near_repeated_timestamp_is_unambiguous(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:00:10] The sky is clear.\n")
+    note = 'At 00:00:10, e.g. Alice says “the sky is clear” at approximately 00:00:10.0 [Talk](src).'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+def test_quote_tied_timestamp_fingerprint_preserves_and_detects_changed_candidates(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:00:10] The sky is clear.\n")
+    original = 'At 00:00:10, e.g. Alice says “the sky is stormy” at approximately 00:05:00 [Talk](src).'
+    changed = original.replace("00:05:00", "00:06:00")
+    sources = {"src": [captions]}
+    same = quote_check.audit({NOTE: original}, {NOTE: original}, sources)
+    edited = quote_check.audit({NOTE: original}, {NOTE: changed}, sources)
+    assert same.status == edited.status == "unchecked"
+    assert findings(same) == [(1, "text_mismatch", "preexisting")]
+    assert findings(edited) == [(1, "text_mismatch", "new")]
