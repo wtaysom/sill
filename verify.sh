@@ -18,14 +18,17 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
 
 NO_SEED=0
+RUNTIME_ONLY=0
 while (( $# )); do
   case "$1" in
     --no-seed) NO_SEED=1; shift ;;
+    --runtime-only) RUNTIME_ONLY=1; shift ;;
     --help|-h) printf 'Usage: verify.sh [--no-seed]\n'; exit 0 ;;
     *) printf 'verify.sh: unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 trap sill_cleanup_instance EXIT
+if (( RUNTIME_ONLY )); then export SILL_EXPECTED_VERSION="$(sill_checkout_version)"; fi
 
 fail() {
   printf '  FAIL: %s\n' "$*" >&2
@@ -158,6 +161,9 @@ if not isinstance(result, dict):
 info = result.get("serverInfo") or {}
 if info.get("name") != "sill":
     die(f"handshake answered by {info.get('name')!r}, expected 'sill'", proc)
+expected = os.environ.get("SILL_EXPECTED_VERSION")
+if expected and info.get("version") != expected:
+    die(f"MCP running version {info.get('version')!r}, expected {expected}", proc)
 if "protocolVersion" not in result:
     die(f"handshake reply names no protocolVersion: {result}", proc)
 
@@ -192,6 +198,11 @@ else
   fi
 fi
 pass "MCP handshake answered by $handshake"
+
+if (( RUNTIME_ONLY )); then
+  sill_check_runtime_versions
+  exit 0
+fi
 
 # --- check 3 -------------------------------------------------------------------
 say "Check 3/6: seed loaded (memories count >= 22)"

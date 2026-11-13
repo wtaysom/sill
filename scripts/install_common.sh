@@ -323,3 +323,32 @@ sill_import_seed() {
   sill_check_running_instance || return 1
   "$cli" seed import "$SILL_DIR/seed/methodology.jsonl" --env-file "$SILL_RUNTIME_ENV_FILE"
 }
+
+# A full upgrade must check the actual processes, even under --no-verify.
+sill_checkout_version() {
+  python3 - "$SILL_BACKEND/pyproject.toml" <<'PYVERSION'
+import pathlib, re, sys
+print(re.search(r'^version = "([^" ]+)"', pathlib.Path(sys.argv[1]).read_text(), re.M).group(1))
+PYVERSION
+}
+
+sill_check_runtime_versions() {
+  local expected cli installed worker image_ref built running worker_version
+  expected="$(sill_checkout_version)" || return 1
+  cli="$(sill_bin sill-mcp)" || return 1
+  installed="$("$cli" --version)" || return 1
+  if [[ "$installed" != "sill-mcp $expected" ]]; then
+    printf 'Installed sill-mcp version differs: %s (expected %s).\n' "$installed" "$expected" >&2
+    return 1
+  fi
+  image_ref="$(sill_compose config --format json | python3 -c 'import json,sys; c=json.load(sys.stdin); print(c["services"]["maintenance_worker"].get("image", c["name"]+"-maintenance_worker"))')" || return 1
+  built="$(docker image inspect --format '{{.Id}}' "$image_ref")" || return 1
+  worker="$(sill_compose ps -q maintenance_worker)" || return 1
+  running="$(docker inspect --format '{{.Image}}' "$worker")" || return 1
+  worker_version="$(docker exec "$worker" python -c 'from importlib.metadata import version; print(version("sill-memory"))')" || return 1
+  if [[ -z "$built" || "$built" != "$running" || "$worker_version" != "$expected" ]]; then
+    printf 'Maintenance worker is stale: image %s, package %s; expected image %s, package %s.\n' "$running" "$worker_version" "$built" "$expected" >&2
+    return 1
+  fi
+  printf 'Runtime version %s verified: installed MCP, MCP initialize, worker image %s and package.\n' "$expected" "$built"
+}

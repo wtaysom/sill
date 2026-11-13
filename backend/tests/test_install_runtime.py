@@ -184,7 +184,8 @@ if command[0] == "exec":
     elif "pg_catalog.pg_class" in command[-1]:
         print(2 if os.getenv("TEST_FAILURE") == "duplicate-ledger" else 1)
     elif "schema_migrations" in command[-1]:
-        print("001\n002\n003\n004\n005\n006" + ("\n007" if os.getenv("TEST_FAILURE") != "ledger" else ""))
+        ids = [p.name[:3] for p in sorted((checkout / "backend/migrations").glob("[0-9][0-9][0-9]_*.sql"))]
+        print("\n".join(ids[:-1] if os.getenv("TEST_FAILURE") == "ledger" else ids))
     elif "count(*) FROM memories" in command[-1]:
         print(22)
     else:

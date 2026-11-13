@@ -264,7 +264,7 @@ def test_rendered_hook_command_handles_spaces_and_apostrophes(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     command = json.loads((home / "hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert shlex.split(command) == [str(interpreter), str(plugin / "hooks/response-patterns.py")]
+    assert shlex.split(command) == ["env", "SILL_INSTANCE_ENV_FILE=" + str(REPO_ROOT / "backend/.env"), str(interpreter), str(plugin / "hooks/response-patterns.py")]
 
 
 def test_home_scope_claude_merge_is_idempotent_and_preserves_other_content(tmp_path):
@@ -473,12 +473,8 @@ def test_upgrade_never_writes_outside_hooks_for_path(tmp_path):
     assert not (decoy_home / ".claude").exists()
 
 
-def test_upgrade_hooks_refresh_runs_before_db_preflight(tmp_path):
-    """Confirms hook refresh is reached even in a combined (non
-    --hooks-only) invocation, and confirms it happens BEFORE the DB
-    preflight check — using a nonexistent container so preflight fails fast
-    and safely rather than reaching this machine's real sill_db (confirmed
-    live via `docker ps` during development; see module docstring)."""
+def test_upgrade_does_not_refresh_hooks_before_db_preflight(tmp_path):
+    """Full upgrade must not write hook settings when DB preflight fails."""
     project = tmp_path / "proj"
     project.mkdir()
     r = run_upgrade(
@@ -486,7 +482,7 @@ def test_upgrade_hooks_refresh_runs_before_db_preflight(tmp_path):
         extra_env={"SILL_DB_CONTAINER": "sill_absent_container_for_tests"},
         timeout=30,
     )
-    assert (project / ".codex" / "hooks.json").exists(), \
-        "hooks refresh must run even when the DB step that follows it fails"
-    assert r.returncode != 0, "the fake container must make DB preflight fail"
+    assert not (project / ".codex/hooks.json").exists()
+    assert not (project / ".claude/settings.local.json").exists()
+    assert r.returncode != 0
     assert "sill_absent_container_for_tests" in (r.stdout + r.stderr)

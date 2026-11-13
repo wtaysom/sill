@@ -193,81 +193,16 @@ step_mcp_wiring() {
 # --scope project (per-project .codex/hooks.json) and --scope home
 # (~/.codex/hooks.json).
 _render_codex_hooks() {
-  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4"
-  if (( DRY_RUN )); then
-    note "DRY: would render $template -> $dst with SILL_PLUGIN_DIR=$plugin_dir SILL_PYTHON=$sill_py"
-    return 0
-  fi
-  mkdir -p "$(dirname "$dst")"
-  if [[ -f "$dst" ]]; then
-    note "  $dst already exists; leaving as-is (see ./upgrade.sh --hooks-for to refresh)"
-    return 0
-  fi
-  python3 - "$template" "$dst" "$plugin_dir" "$sill_py" <<'PY'
-import json, pathlib, shlex, sys
-src, dst, plugin, py = sys.argv[1:5]
-data = json.loads(pathlib.Path(src).read_text())
-for entries in data["hooks"].values():
-    for entry in entries:
-        for hook in entry["hooks"]:
-            command = hook["command"]
-            prefix = "{{SILL_PYTHON}} {{SILL_PLUGIN_DIR}}/"
-            if command.startswith(prefix):
-                hook["command"] = shlex.join([py, str(pathlib.Path(plugin) / command[len(prefix):])])
-pathlib.Path(dst).write_text(json.dumps(data, indent=2) + "\n")
-print(f"  wrote {dst}")
-PY
+  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4" flags=()
+  if [[ -f "$dst" ]]; then note "$dst already exists; leaving as-is (see ./upgrade.sh --hooks-for to refresh)"; return; fi
+  if (( DRY_RUN )); then flags[0]=--dry-run; fi
+  python3 "$SILL_DIR/scripts/install_hooks.py" "$template" "$dst" "$plugin_dir" "$sill_py" "$SILL_ENV_FILE" --codex ${flags[@]+"${flags[@]}"}
 }
 
-# Idempotently merge the template's hooks block into a Claude Code hooks
-# JSON file. Both destinations this installer writes share the same
-# top-level {"hooks": {...}} shape: <project>/.claude/settings.local.json
-# (project scope) and ~/.claude/settings.json (home scope — Claude Code's
-# own "globally" location; see docs/extending.md's "Adding your own hooks"
-# section, and this repo's own live ~/.claude/settings.json, which already
-# carries unrelated hooks under the same key).
 _merge_claude_hooks() {
-  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4"
-  if (( DRY_RUN )); then
-    note "DRY: would idempotently merge hooks block into $dst"
-    return 0
-  fi
-  mkdir -p "$(dirname "$dst")"
-  python3 - "$template" "$dst" "$plugin_dir" "$sill_py" <<'PY'
-import json, pathlib, shlex, sys
-template_path, dst_path, plugin, py = sys.argv[1:5]
-template = json.loads(pathlib.Path(template_path).read_text())
-for entries in template["hooks"].values():
-    for entry in entries:
-        for hook in entry["hooks"]:
-            command = hook["command"]
-            prefix = "{{SILL_PYTHON}} {{SILL_PLUGIN_DIR}}/"
-            if command.startswith(prefix):
-                hook["command"] = shlex.join([py, str(pathlib.Path(plugin) / command[len(prefix):])])
-dst = pathlib.Path(dst_path)
-data = {}
-if dst.exists():
-    try:
-        data = json.loads(dst.read_text() or "{}")
-    except json.JSONDecodeError:
-        print(f"install.sh: {dst} isn't valid JSON; leaving it alone.")
-        sys.exit(0)
-hooks = data.setdefault("hooks", {})
-changed = False
-for event, entries in template.get("hooks", {}).items():
-    existing = hooks.setdefault(event, [])
-    # naive dedup: compare exact JSON repr
-    existing_repr = {json.dumps(e, sort_keys=True) for e in existing}
-    for entry in entries:
-        if json.dumps(entry, sort_keys=True) not in existing_repr:
-            existing.append(entry)
-            changed = True
-if changed:
-    dst.write_text(json.dumps(data, indent=2) + "\n")
-    print(f"  merged sill hooks into {dst}")
-else:
-    print(f"  {dst} already has sill hooks; nothing to do")
-PY
+  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4" flags=()
+  if (( DRY_RUN )); then flags[0]=--dry-run; fi
+  python3 "$SILL_DIR/scripts/install_hooks.py" "$template" "$dst" "$plugin_dir" "$sill_py" "$SILL_ENV_FILE" ${flags[@]+"${flags[@]}"}
 }
 
 # Idempotently append plugin/claude.home.md.template's ambient-instructions
