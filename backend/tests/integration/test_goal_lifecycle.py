@@ -266,3 +266,86 @@ def test_migrations_leave_historical_goals_unchanged(fixture_dsn, fixture_contai
             # AGE-first legacy route also must not invent a completion date.
             query(conn, "SELECT change_goal_priority(%s,'completed')", (gid,))
             assert state(conn, gid) == ('completed', None, None, None)
+
+
+@pytest.mark.parametrize('first', ['notice', 'close'])
+def test_home_supersession_and_close_use_goal_first_lock_order(
+        fixture_dsn, fixture_container, monkeypatch, first):
+    """Catch memory→goal inversion using the real notice SQL, not manual prelocks.
+
+    Pause the embedding boundary only after supersede_memory has locked its
+    predecessor, then start closing. Both transactions must serialize without
+    deadlock; a close-first notice must reject without writing a successor.
+    """
+    import sill
+    with temporary_fixture(fixture_dsn, fixture_container, through='013') as dsn:
+        with closing(psycopg2.connect(dsn)) as monitor, monitor:
+            gid = goal(monitor)
+            old = mint(monitor, 'Synthetic lock-order predecessor ' + str(uuid4()))[0]
+            link(monitor, old, gid)
+            monitor.commit()
+            pause_key = uuid4().int % (2**63)
+            query(monitor, 'SELECT pg_advisory_lock(%s)', (pause_key,))
+            monitor_pid = query(monitor, 'SELECT pg_backend_pid()')[0][0]
+            notice_conn, close_conn = psycopg2.connect(dsn), psycopg2.connect(dsn)
+            try:
+                for conn in (notice_conn, close_conn):
+                    query(conn, "SET LOCAL statement_timeout='8s'")
+                    query(conn, "SET LOCAL deadlock_timeout='100ms'")
+                notice_pid = query(notice_conn, 'SELECT pg_backend_pid()')[0][0]
+                close_pid = query(close_conn, 'SELECT pg_backend_pid()')[0][0]
+                # The network boundary is a deterministic barrier. All
+                # supersession, home-link, closure and archive SQL stays real.
+                query(notice_conn, f"""CREATE OR REPLACE FUNCTION public.get_embedding(text_content text)
+                    RETURNS vector LANGUAGE plpgsql AS $$ BEGIN
+                        PERFORM pg_advisory_xact_lock({pause_key});
+                        RETURN array_fill(0.01::real, ARRAY[public.embedding_dimension()])::vector;
+                    END $$""")
+                monkeypatch.setattr(sill, '_query_db', lambda sql, timeout=60: query(notice_conn, sql))
+                def wait_blocked(waiter, blocker):
+                    deadline = time.monotonic() + 3
+                    while not query(monitor, 'SELECT %s=ANY(pg_blocking_pids(%s))', (blocker, waiter))[0][0]:
+                        assert time.monotonic() < deadline, 'expected concurrent lock wait did not occur'
+                        time.sleep(.01)
+                def notice():
+                    try:
+                        mid = sill.notice('Synthetic lock-order successor ' + str(uuid4()),
+                                          speaker='test', supersedes=old, goal=gid,
+                                          minted_in={'via': 'synthetic-lock-order'})
+                        notice_conn.commit()
+                        return ('ok', mid)
+                    except psycopg2.Error as exc:
+                        notice_conn.rollback()
+                        return (exc.pgcode, str(exc))
+                def close():
+                    try:
+                        query(close_conn, "SELECT public.change_goal_priority(%s,'completed')", (gid,))
+                        close_conn.commit()
+                        return ('ok', None)
+                    except psycopg2.Error as exc:
+                        close_conn.rollback()
+                        return (exc.pgcode, str(exc))
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    if first == 'notice':
+                        pending_notice = pool.submit(notice)
+                        wait_blocked(notice_pid, monitor_pid)
+                        pending_close = pool.submit(close)
+                        wait_blocked(close_pid, notice_pid)
+                        query(monitor, 'SELECT pg_advisory_unlock(%s)', (pause_key,))
+                        noticed, closed = pending_notice.result(timeout=10), pending_close.result(timeout=10)
+                        assert noticed[0] == closed[0] == 'ok', (noticed, closed)
+                        assert not active(monitor, noticed[1])
+                        assert query(monitor, 'SELECT goal_release_owner FROM memories WHERE id=%s', (noticed[1],)) == [(gid,)]
+                    else:
+                        query(close_conn, "SELECT public.change_goal_priority(%s,'completed')", (gid,))
+                        pending_notice = pool.submit(notice)
+                        wait_blocked(notice_pid, close_pid)
+                        close_conn.commit()
+                        noticed = pending_notice.result(timeout=10)
+                        assert noticed[0] == '23514' and 'reopen' in noticed[1], noticed
+                        assert not query(monitor, 'SELECT id FROM memories WHERE supersedes_id=%s', (old,))
+                assert not active(monitor, old)
+            finally:
+                notice_conn.rollback(); notice_conn.close()
+                close_conn.rollback(); close_conn.close()
+                query(monitor, 'SELECT pg_advisory_unlock_all()')

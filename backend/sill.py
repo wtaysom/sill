@@ -288,7 +288,17 @@ def notice(content: str, memory_type: str = "semantic",
             p_production => {production_arg}, p_minted_in => {stamp_arg}
         )"""
     if goal is not None:
-        sql = f"""WITH minted AS MATERIALIZED ({mint_sql}),
+        home_lock_sql = ""
+        if supersedes is not None:
+            # A real dependency, not just textual CTE order: the volatile
+            # supersession target is evaluated only for the row produced by
+            # this materialized lock/validation step. Closure uses goal→memory
+            # order too. Ordinary mint reuse must not acquire/change a home.
+            home_lock_sql = f"""home_lock AS MATERIALIZED (
+                SELECT public._lock_open_commitment_home('{goal}'::uuid) AS goal_id
+            ),"""
+            mint_sql += " FROM home_lock WHERE home_lock.goal_id IS NOT NULL"
+        sql = f"""WITH {home_lock_sql} minted AS MATERIALIZED ({mint_sql}),
             linked AS (
                 INSERT INTO goal_memory_links(memory_id,goal_id,link_type)
                 SELECT memory_id,'{goal}'::uuid,'home' FROM minted WHERE outcome='inserted'

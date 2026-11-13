@@ -29,6 +29,21 @@ ALTER TABLE memories ADD COLUMN goal_release_owner uuid, ADD COLUMN goal_release
 COMMENT ON COLUMN memories.goal_release_token IS
     'Unique release receipt; an explicit later archive write revokes restoration ownership.';
 
+-- Internal precondition for a combined supersession/home notice. Closure locks
+-- goal then memories, so supersession must acquire this lock before its existing
+-- predecessor lock. No writes: missing/closed homes fail before any mint work.
+CREATE FUNCTION public._lock_open_commitment_home(p_goal_id uuid) RETURNS uuid
+LANGUAGE plpgsql SET search_path = public, ag_catalog AS $$
+DECLARE home_priority goal_priority;
+BEGIN
+    SELECT priority INTO STRICT home_priority FROM goals WHERE id=p_goal_id FOR UPDATE;
+    IF home_priority IN ('completed','abandoned') THEN
+        RAISE EXCEPTION 'home goal % is closed; reopen it before linking a new commitment', p_goal_id
+            USING ERRCODE='23514';
+    END IF;
+    RETURN p_goal_id;
+END $$;
+
 CREATE FUNCTION public.guard_commitment_home() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, ag_catalog AS $$
 DECLARE home_priority goal_priority;
