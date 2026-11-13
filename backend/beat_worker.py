@@ -38,6 +38,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -474,6 +475,43 @@ def _write_transcript(
 # Spawning a beat
 # ---------------------------------------------------------------------------
 
+@contextmanager
+def _defer_stop_signals() -> Iterator[None]:
+    """Run existing Python stop handlers after Popen has returned the child."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    handlers = {}
+    pending = None
+
+    def defer(signum, frame):
+        nonlocal pending
+        if pending is None:
+            pending = signum, frame
+
+    try:
+        # Deferring in Python leaves the child's inherited signal mask intact.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handler = signal.getsignal(signum)
+            if callable(handler):
+                handlers[signum] = handler
+                signal.signal(signum, defer)
+        yield
+    finally:
+        # Restore all handlers before a newly arriving signal can interrupt
+        # restoration. This mask is set only in the parent, after Popen.
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handlers)
+        try:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        if pending is not None:
+            signum, frame = pending
+            handlers[signum](signum, frame)
+
+
 def _run_beat_subprocess(
     argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float, lock_fd: int,
 ) -> subprocess.CompletedProcess[str]:
@@ -484,22 +522,25 @@ def _run_beat_subprocess(
     with (
         tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stdout,
         tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr,
-        subprocess.Popen(
-            argv, cwd=cwd, env=env, start_new_session=True, pass_fds=(lock_fd,),
-            stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-        ) as process,
     ):
+        process = None
         try:
+            with _defer_stop_signals():
+                process = subprocess.Popen(
+                    argv, cwd=cwd, env=env, start_new_session=True, pass_fds=(lock_fd,),
+                    stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                )
             returncode = process.wait(timeout=timeout)
             stdout.seek(0)
             stderr.seek(0)
             return subprocess.CompletedProcess(argv, returncode, stdout.read(), stderr.read())
         except BaseException:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
             raise
 
 

@@ -351,6 +351,76 @@ wait
         assert not Path(env["SILL_BEAT_STATE_PATH"]).exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+def test_stop_during_cli_startup_reaps_child_and_releases_lock(beat_project, signal_name):
+    root, cli = beat_project
+    env = _beat_env(root, cli, timeout=10)
+    state = Path(env["SILL_BEAT_STATE_PATH"])
+    marker = root / "delayed-marker"
+    pid_file = root / "started-pid"
+    cli.write_text("""#!/bin/sh
+i=0
+while [ "$i" -lt 100 ]; do
+    if [ -e release-cli ]; then
+        touch delayed-marker
+        exit 0
+    fi
+    i=$((i + 1))
+    sleep 0.05
+done
+exit 1
+""")
+    start_and_signal = """
+import os
+import signal
+import sys
+from pathlib import Path
+
+import beat_worker
+
+popen = beat_worker.subprocess.Popen
+
+def start_then_signal(*args, **kwargs):
+    process = popen(*args, **kwargs)
+    Path("started-pid").write_text(str(process.pid))
+    os.kill(os.getpid(), getattr(signal, sys.argv[1]))
+    return process
+
+beat_worker.subprocess.Popen = start_then_signal
+stop_signals = (signal.SIGTERM, signal.SIGINT)
+previous_handlers = [signal.getsignal(signum) for signum in stop_signals]
+status = beat_worker.main(once=True)
+assert [signal.getsignal(signum) for signum in stop_signals] == previous_handlers
+raise SystemExit(status)
+"""
+    try:
+        worker = subprocess.run(
+            [sys.executable, "-c", start_and_signal, signal_name],
+            cwd=root, env=env, capture_output=True, text=True, timeout=5,
+        )
+        assert worker.returncode == 1, worker.stderr
+        assert f"Interrupted ({'Ctrl-C' if signal_name == 'SIGINT' else signal_name})" in worker.stderr
+        child_pid = int(pid_file.read_text())
+        with bw.worker_lock(state) as lock_fd:
+            released = lock_fd is not None
+
+        (root / "release-cli").touch()
+        if _pid_exists(child_pid):
+            _wait_for(marker.exists, what="surviving CLI's delayed effect")
+
+        assert not marker.exists()
+        assert released
+        assert not _pid_exists(child_pid)
+        assert not state.exists()
+    finally:
+        if pid_file.exists():
+            try:
+                os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 @pytest.mark.skipif(os.name != "posix", reason="flock is POSIX")
 def test_once_uses_same_lock_and_does_not_sleep(beat_project):
     root, cli = beat_project
