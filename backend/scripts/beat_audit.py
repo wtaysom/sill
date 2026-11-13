@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import stat
 from collections import Counter
-from collections.abc import Hashable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, TypeGuard
 
@@ -240,3 +241,49 @@ def classify_findings(
         else:
             findings.append(replace(finding, origin="new"))
     return findings
+
+
+def run_audit_cli(
+    audit: Callable[..., AuditResult], description: str, argv: list[str] | None = None,
+) -> int:
+    """Audit explicit file scope, with old files supplied as historical evidence."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--receipt", type=Path, help="completed attempt receipt for the positional files")
+    parser.add_argument("--old", type=Path, action="append", default=[], help="historical file (repeatable)")
+    parser.add_argument("--grace", type=float, default=90, metavar="SECONDS")
+    parser.add_argument("--json", action="store_true", help="emit the audit result as JSON")
+    parser.add_argument("files", type=Path, nargs="*", help="files attributed to the supplied attempt")
+    args = parser.parse_args(argv)
+
+    if not args.files and not args.old:
+        parser.error("supply at least one file")
+    try:
+        timedelta(seconds=args.grace)
+        if args.grace < 0:
+            raise ValueError
+    except (OverflowError, ValueError):
+        parser.error("--grace must be a finite nonnegative duration")
+
+    try:
+        old = {_resolve(path) for path in args.old}
+        files = dict.fromkeys(_resolve(path) for path in [*args.files, *args.old])
+        after = {path: path.read_text(encoding="utf-8") for path in files}
+    except (OSError, ValueError) as exc:
+        result = AuditResult("error", [], str(exc))
+    else:
+        window = load_window(args.receipt) if args.receipt is not None else None
+        before = {path: text for path, text in after.items() if path in old}
+        result = audit(before, after, window, grace_seconds=args.grace)
+        if window is None:
+            findings = [
+                finding if Path(finding.file) in old else replace(finding, origin="unknown")
+                for finding in result.findings
+            ]
+            result = replace(result, findings=findings)
+    if args.json:
+        print(result.to_json())
+    else:
+        print(result.status + (f" - {result.reason}" if result.reason else ""))
+        for finding in result.findings:
+            print(f"{finding.file}:{finding.line}: {finding.code} ({finding.origin}): {finding.detail}")
+    return result.exit_code
