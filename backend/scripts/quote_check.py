@@ -5,6 +5,11 @@ or reference citation uses its exact configured target. A quote needs at least
 three words unless its block has an unambiguous mapped citation. Plain text
 proves wording. Timed quotes need a matched caption word within 90 seconds
 of the citation, and a match cannot cross a caption gap greater than 90 seconds.
+Sentence boundaries are lexical: comma-introduced e.g./i.e. continues the
+sentence, even before a capitalized name. Without that comma, lowercase prose
+or a directly introduced quote continues; capitalized prose starts a sentence.
+Markdown emphasis is transparent to this rule. Ambiguous prose should put the
+timestamp next to the quote rather than rely on natural-language inference.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ CUE_RE = re.compile(rf"^\s*({CUE_CLOCK})\s*-->\s*({CUE_CLOCK})(?:\s|$)")
 CLEAN_CUE_RE = re.compile(r"^\[(\d+:\d{2}:\d{2}(?:[.,]\d{1,3})?)\][ \t]*(.*)$", re.MULTILINE)
 PAREN_CUE = r"\(\s*(?:(?i:about|around|at|ca\.?|~)\s*)?"
 PAREN_RE = re.compile(PAREN_CUE + r"$")
-ABBREVIATION_RE = re.compile(r"(?i)\b(?:e\.g|i\.e)$")
+ABBREVIATION_RE = re.compile(r"(?i)(?<![^\W_])(?:e\.g|i\.e)$")
 SENTENCE_RE = re.compile(
     r"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
     rf"(?!(?:\[[^\]\n]*\]\s*)+{PAREN_CUE}{STAMP})"
@@ -159,11 +164,14 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
         blank = not line.strip()
 
         if fence:
-            if (fence_quoted and not in_quote) or (not blank and indent < fence_indent):
+            # Only strip a blockquote prefix when the opening fence had one.
+            # Otherwise `>` and its preceding spaces are literal code content.
+            fence_line = expanded if fence_quoted else raw.expandtabs(4)
+            fence_line_indent = len(fence_line) - len(fence_line.lstrip(" "))
+            if (fence_quoted and not in_quote) or (not blank and fence_line_indent < fence_indent):
                 fence = ""  # The containing block ended before the fence closed.
             else:
-                closing_line = expanded if fence_quoted else raw.expandtabs(4)
-                closing = FENCE_RE.match(closing_line[fence_indent:])
+                closing = FENCE_RE.match(fence_line[fence_indent:])
                 if closing and closing[1].startswith(fence) and not closing[2].strip():
                     fence = ""
                 continue
@@ -306,13 +314,16 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
         stamps = list(_stamps(stamp_text))
         boundaries = [0]
         for boundary in SENTENCE_RE.finditer(stamp_text):
-            # These abbreviations can introduce lowercase prose or a quote.
-            # A capitalized prose start keeps the punctuation boundary.
-            before_period = stamp_text[max(0, boundary.start() - 4):boundary.start()]
-            next_char = stamp_text[boundary.end()]
-            continues = next_char.islower() or next_char in {"“", '"'}
-            if continues and ABBREVIATION_RE.search(before_period):
-                continue
+            before_period = stamp_text[:boundary.start()]
+            if abbreviation := ABBREVIATION_RE.search(before_period):
+                # A comma introduces an example/explanation, including names.
+                # Ignore emphasis on either side of the abbreviation; otherwise
+                # retain the existing capitalized-prose boundary convention.
+                introduced = before_period[:abbreviation.start()].rstrip(" \t\n*_").endswith(",")
+                following = stamp_text[boundary.end():].lstrip("*_")
+                next_char = following[:1]
+                if introduced or next_char.islower() or next_char in {"“", '"'}:
+                    continue
             boundaries.append(boundary.end())
         boundaries.append(len(block))
         for match in quoted:

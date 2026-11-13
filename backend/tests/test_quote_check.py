@@ -413,3 +413,40 @@ def test_quote_keeps_timestamp_when_abbreviation_introduces_quote_directly(tmp_p
     result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
     assert result.status == "checked"
     assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+@pytest.mark.parametrize("introduction,continuation", [
+    (", e.g.", "*that*"),
+    (", e.g.", "**that**"),
+    (", e.g.", "Alice says"),
+    (", *e.g.*", "**Alice** says"),
+    (", _i.e._", "Alice says"),
+    (" e.g.", "*that*"),
+    (" i.e.", "_that_"),
+])
+def test_quote_keeps_timestamp_for_formatted_or_named_abbreviation_continuation(tmp_path, introduction, continuation):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    note = f'At 00:00:10 the speaker gives examples{introduction} {continuation} “the sky is clear” [Talk](src).'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+@pytest.mark.parametrize("body,prose_line", [
+    ('  > “The sky is cloudy” [Talk](src)\n', 5),
+    ('  > ```\n  “The sky is cloudy” [Talk](src)\n', 6),
+])
+def test_quote_list_fence_treats_blockquote_markers_as_literal_code(tmp_path, body, prose_line):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = '- ```text\n' + body + '  ```\n\n  “The sky is stormy” [Talk](src)\n'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(prose_line, "text_mismatch", "new")]
+
+
+def test_quote_list_fence_ends_when_its_container_dedents(tmp_path):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = '- ```text\n  > “The sky is cloudy” [Talk](src)\n\n“The sky is stormy” [Talk](src)\n'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(4, "text_mismatch", "new")]
