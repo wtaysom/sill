@@ -181,7 +181,6 @@ def test_docker_transport_uses_configured_fixture(migrated_dsn,fixture_container
     monkeypatch.setenv('SILL_DB_CONTAINER',fixture_container)
     monkeypatch.setenv('SILL_DB_USER','sill_test')
     monkeypatch.setenv('SILL_DB_NAME',parse_dsn(migrated_dsn)['dbname'])
-    monkeypatch.setenv('DOCKER_CONTEXT','orbstack')
     assert isinstance(core.recall_rows('hybrid','synthetic fixture',1),list)
 
 

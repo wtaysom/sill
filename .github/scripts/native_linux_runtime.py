@@ -1,6 +1,7 @@
 """Cold Sill installer acceptance on a disposable GitHub-hosted Linux amd64 VM."""
 import asyncio
 from collections import Counter
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -225,7 +226,36 @@ def preflight(docker, project):
                 f"fixture project label already exists on a {kind}")
 
 
-def snapshot(docker, owned, checkout, pack):
+def validate_seed_rows(rows, pack):
+    require(len(rows) == len(pack), "methodology seed row count differs from the pack")
+    # The current pack supplies author and origin. normalize_source_reference
+    # drops origin and defaults trust and observed_at. The observed_at default
+    # and the memories.created_at default use the same transaction timestamp.
+    require(all(set(row["source_attribution"]) == {"author", "origin"} for row in pack),
+            "methodology seed pack attribution fields changed")
+    expected = Counter((row["content"], row["type"], row["source_attribution"]["author"]) for row in pack)
+    actual = Counter()
+    for row in rows:
+        label = f"methodology seed row {row['id']}"
+        attribution = row["attribution"]
+        require(isinstance(attribution, dict) and attribution.keys() == {"author", "trust", "observed_at"}
+                and attribution["trust"] == 0.5 and isinstance(attribution["author"], str),
+                f"{label} has invalid normalized attribution")
+        try:
+            observed = datetime.fromisoformat(attribution["observed_at"])
+            created = datetime.fromisoformat(row["created_at"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{label} has invalid observed_at or created_at") from exc
+        require(observed.tzinfo is not None and observed == created,
+                f"{label} observed_at differs from its creation timestamp")
+        require(row["speaker"] is None and row["status"] == "active"
+                and row["archived_at"] is None and row["dimension"] == 768,
+                f"{label} has unexpected speaker, status, archive timestamp, or vector dimension")
+        actual[(row["content"], row["type"], attribution["author"])] += 1
+    require(actual == expected, "methodology seed content, type, or author differs from the pack")
+
+
+def snapshot(docker, owned, checkout, pack, store):
     def db(sql):
         return json.loads(docker("exec", owned["db"]["Id"], "psql", "-h", "127.0.0.1",
                                 "-XAt", "-v", "ON_ERROR_STOP=1", "-U", "sill", "-d", "sill", "-c", sql))
@@ -265,16 +295,15 @@ def snapshot(docker, owned, checkout, pack):
             and any(mount["Name"] == volume["Name"] and mount["Destination"] == "/var/lib/postgresql/data"
                     for mount in owned["db"]["Mounts"] if mount["Type"] == "volume"),
             "creation receipt does not match the operation, profile, database and owned volume")
-    rows = db("""SELECT json_agg(json_build_array(id, content, source_attribution, speaker,
-                       archived_at, vector_dims(embedding)) ORDER BY id) FROM public.memories
-                 WHERE source_attribution->>'author'='sill-seed-v0.1'""")
-    require(Counter((row[1], json.dumps(row[2], sort_keys=True)) for row in rows) ==
-            Counter((row["content"], json.dumps(row["source_attribution"], sort_keys=True)) for row in pack)
-            and all(row[3:] == [None, None, 768] for row in rows),
-            "methodology seed rows, attribution, or vector shape differ from the pack")
-    return dict(ledger=ledger, profile=profile, operation=operation, database_identity=identity,
-                receipt_sha256=hashlib.sha256(raw).hexdigest(), seed_count=len(rows),
-                seed_rows_sha256=object_digest(rows))
+    rows = db("""SELECT json_agg(json_build_object('id',id,'content',content,'type',type,
+                       'attribution',source_attribution,'created_at',created_at,'speaker',speaker,
+                       'status',status,'archived_at',archived_at,'dimension',vector_dims(embedding))
+                       ORDER BY id) FROM public.memories
+                 WHERE source_attribution->>'author'='sill-seed-v0.1'""") or []
+    store.update(ledger=ledger, profile=profile, operation=operation, database_identity=identity,
+                 receipt_sha256=hashlib.sha256(raw).hexdigest(), seed_count=len(rows),
+                 seed_rows_sha256=object_digest(rows), seed_rows=rows)
+    validate_seed_rows(rows, pack)
 
 
 def runtime_evidence(docker, owned, project, ports, installed, checkout, outside, env, version):
@@ -431,7 +460,7 @@ def rehearse(source, temporary, evidence, report):
                                                 "--embedding-profile", "embeddinggemma-search-v1", "--client", "codex")
         report["cold_readiness_seconds"] = readiness((evidence / "install-cold.log").read_text())
         resources = owned()
-        report["cold_store"] = snapshot(docker, resources, checkout, pack)
+        snapshot(docker, resources, checkout, pack, report.setdefault("cold_store", {}))
         report["runtime"] = runtime_evidence(docker, resources, project, ports, installed, checkout, outside, env, version)
         registered = registrations()
         require(schedule_state(home, env) == initial_schedule, "cold install changed the runner schedule")
@@ -440,7 +469,8 @@ def rehearse(source, temporary, evidence, report):
         phase("default raw rerun")
         report["rerun_seconds"] = install(checkout, outside, env, evidence, "install-rerun.log", 360, "--client", "codex")
         resources = owned()
-        require(snapshot(docker, resources, checkout, pack) == report["cold_store"],
+        snapshot(docker, resources, checkout, pack, report.setdefault("rerun_store", {}))
+        require(report["rerun_store"] == report["cold_store"],
                 "default raw rerun changed the profile, creation receipt, operations, ledger or seed rows")
         rerun = runtime_evidence(docker, resources, project, ports, installed, checkout, outside, env, version)
         require(rerun["images"]["embeddings"] == report["runtime"]["images"]["embeddings"],
