@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts import link_check
-from scripts.beat_audit import AuditResult
+from scripts.beat_audit import AuditResult, Finding
 
 
 def test_link_checker_uses_explicit_roots_and_skips_remote_and_fenced_links(tmp_path):
@@ -74,7 +74,12 @@ def test_link_target_move_is_new_break_even_in_untouched_note(tmp_path):
 
 def test_rewritten_old_note_retains_only_the_baseline_number_of_occurrences(tmp_path):
     note = tmp_path / "old.md"
-    before = link_check.scan(tmp_path, {note: "[source](old%20file.txt:7#heading)"}, [tmp_path])
+    (tmp_path / "sub").mkdir()
+    before = link_check.scan(tmp_path, {note: "[source](sub/../old%20file.txt:7#heading)"}, [tmp_path])
+    payload = json.loads(before.to_json())
+    assert payload["findings"][0]["resolved_target"] == str(tmp_path.resolve() / "old file.txt")
+    baseline = AuditResult(payload["status"], [Finding(**item) for item in payload["findings"]], payload["reason"])
+    assert baseline == before
     current = link_check.scan(tmp_path, {note: (
         '# Rewritten heading\n\n'
         '[updated label](<old file.txt?mode=preview>)\n'
@@ -82,7 +87,7 @@ def test_rewritten_old_note_retains_only_the_baseline_number_of_occurrences(tmp_
         '[another target](new.txt)\n'
     )}, [tmp_path])
 
-    result = link_check.compare(current, before)
+    result = link_check.compare(current, baseline)
 
     assert [(finding.line, finding.origin) for finding in result.findings] == [
         (3, "preexisting"), (4, "new"), (5, "new"),
@@ -112,12 +117,16 @@ def test_previously_unchecked_occurrences_do_not_prove_new_breaks(tmp_path):
     outside.mkdir()
     (root / "target").symlink_to(outside, target_is_directory=True)
     note = root / "note.md"
-    prior_text = "[unchecked](target/missing.md)\n[old break](old.md)"
+    (root / "inside").mkdir()
+    prior_text = "[unchecked](target/missing.md)\n[old break](inside/missing.md)"
     before = link_check.scan(root, {note: prior_text}, [root])
     assert before.status == "unchecked"
+    legacy_finding = json.loads(before.to_json())["findings"][0]
+    assert "resolved_target" not in legacy_finding
+    assert Finding(**legacy_finding) == before.findings[0]
 
     (root / "target").unlink()
-    (root / "target").mkdir()
+    (root / "target").symlink_to(root / "inside", target_is_directory=True)
     after_text = prior_text + "\n[extra occurrence](target/missing.md)\n[another](new.md)"
     result = link_check.compare(link_check.scan(root, {note: after_text}, [root]), before)
 

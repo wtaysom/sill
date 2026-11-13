@@ -40,6 +40,7 @@ class Finding:
     code: str
     detail: str
     origin: Literal["new", "preexisting", "unknown"]
+    resolved_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,11 @@ class AuditResult:
     reason: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self))
+        payload = asdict(self)
+        for finding in payload["findings"]:
+            if finding["resolved_target"] is None:
+                del finding["resolved_target"]
+        return json.dumps(payload)
 
     @property
     def exit_code(self) -> int:

@@ -95,27 +95,34 @@ def _available_roots(root: Path, link_roots: list[Path]) -> list[Path]:
     return available
 
 
-def _link_code(target: Path, roots: list[Path]) -> str | None:
+def _check_link(target: Path, roots: list[Path]) -> tuple[str | None, str | None]:
+    if not roots:
+        return UNCHECKED, None
     try:
         # realpath resolves symlinks without Path.resolve's extra final stat.
         # Test existence only after the resolved target passes containment.
         resolved = Path(os.path.realpath(target))
-        if not any(resolved.is_relative_to(root) for root in roots):
-            return UNCHECKED
+    except (OSError, RecursionError, ValueError):
+        return UNCHECKED, None
+    if not any(resolved.is_relative_to(root) for root in roots):
+        return UNCHECKED, None
+    try:
         mode = target.stat().st_mode
     except (FileNotFoundError, NotADirectoryError):
-        return BROKEN
-    except (OSError, RecursionError, ValueError):
-        return UNCHECKED
-    return None if stat.S_ISREG(mode) or stat.S_ISDIR(mode) else BROKEN
+        return BROKEN, str(resolved)
+    except (OSError, ValueError):
+        return UNCHECKED, None
+    if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+        return None, None
+    return BROKEN, str(resolved)
 
 
 def scan(root: Path, files: dict[Path, str], link_roots: list[Path]) -> AuditResult:
     """Observe the current filesystem for the supplied Markdown snapshot.
 
-    Finding details hold the absolute link path, decoded and without a query,
-    fragment, or line suffix. They preserve '..' across symlink components and
-    remain stable when a symlink target changes between scans.
+    Finding details hold the written absolute path, decoded and without a
+    query, fragment, or line suffix. Broken findings also carry the resolved
+    in-scope target so equivalent paths share an identity across scans.
     """
     if not link_roots:
         return AuditResult("unchecked", [], NO_ROOTS)
@@ -137,9 +144,9 @@ def scan(root: Path, files: dict[Path, str], link_roots: list[Path]) -> AuditRes
             if target is None:
                 continue
             candidate = path.parent / target
-            code = _link_code(candidate, roots) if roots else UNCHECKED
+            code, resolved = _check_link(candidate, roots)
             if code is not None:
-                findings.append(Finding(str(path), line, code, str(candidate), "unknown"))
+                findings.append(Finding(str(path), line, code, str(candidate), "unknown", resolved_target=resolved))
 
     if not roots:
         return AuditResult("unchecked", findings, "No configured link roots are available")
@@ -160,20 +167,29 @@ def compare(current: AuditResult, baseline: AuditResult | None) -> AuditResult:
     if baseline is not None and (
         baseline.status == "checked" or baseline.findings or baseline.reason == NO_FILES
     ) and baseline.status != "error":
-        earlier = [(finding.detail, finding) for finding in baseline.findings if finding.code == BROKEN]
+        earlier = [
+            (finding.resolved_target or finding.detail, finding)
+            for finding in baseline.findings if finding.code == BROKEN
+        ]
         unknown.update((finding.file, finding.detail) for finding in baseline.findings if finding.code == UNCHECKED)
-    classified = iter(classify_findings(
-        ((finding.detail, finding) for finding in current.findings if finding.code == BROKEN), earlier,
-    ))
-    findings = []
-    for finding in current.findings:
-        if finding.code == BROKEN:
-            finding = next(classified)
-            key = (finding.file, finding.detail)
-            if finding.origin == "new" and unknown[key] > 0:
-                finding = replace(finding, origin="unknown")
-                unknown[key] -= 1
-        findings.append(finding)
+    findings = current.findings.copy()
+    breaks = []
+    for index, finding in enumerate(findings):
+        if finding.code != BROKEN:
+            continue
+        # Reserve unchecked occurrences by spelling before consuming known
+        # breaks. An alias newly in scope can now share a known broken target.
+        key = (finding.file, finding.detail)
+        if unknown[key] > 0:
+            findings[index] = replace(finding, origin="unknown")
+            unknown[key] -= 1
+        else:
+            breaks.append((index, finding))
+    classified = classify_findings(
+        ((finding.resolved_target or finding.detail, finding) for _, finding in breaks), earlier,
+    )
+    for (index, _), finding in zip(breaks, classified):
+        findings[index] = finding
     return replace(current, findings=findings)
 
 
