@@ -365,6 +365,7 @@ class CognitiveMemory:
             )
             if not row:
                 return None
+            await self._record_access(conn, [row["id"]], used=True)
             return Memory(
                 id=row["id"],
                 **_attribution(row),
@@ -445,6 +446,7 @@ class CognitiveMemory:
                         concepts=list(row["concepts"]) if row["concepts"] else None,
                     )
                 )
+            await self._record_access(conn, [m.id for m in previews])
             return PreviewResult(previews=previews, query=query, total_matches=total)
 
     async def recall_batch(self, memory_ids: list[UUID]) -> list[Memory]:
@@ -470,6 +472,7 @@ class CognitiveMemory:
                 """,
                 memory_ids,
             )
+            await self._record_access(conn, [row["id"] for row in rows], used=True)
             return [
                 Memory(
                     id=row["id"],
@@ -533,6 +536,7 @@ class CognitiveMemory:
                     limit,
                     memory_type.value,
                 )
+            await self._record_access(conn, [row["id"] for row in rows])
             return [self._row_to_memory(row) for row in rows]
 
     # =========================================================================
@@ -659,6 +663,22 @@ class CognitiveMemory:
                 embedding_profile,
             )
             return list(created or [])
+
+    @staticmethod
+    async def _record_access(conn, memory_ids, *, used: bool = False) -> None:
+        """Bounded best-effort telemetry; failure cannot abort a caller transaction."""
+        ids = list(dict.fromkeys(memory_ids))
+        if not ids:
+            return
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE memories SET access_count=COALESCE(access_count,0)+1"
+                    + (", last_accessed=CURRENT_TIMESTAMP" if used else "")
+                    + " WHERE id=ANY($1::uuid[])", ids, timeout=2)
+        except Exception as exc:
+            logger.warning("Memory %s telemetry failed (%s)",
+                           "use" if used else "exposure", type(exc).__name__)
 
     async def touch_memories(self, memory_ids: Iterable[UUID]) -> int:
         """Increment access_count/last_accessed for the given memory ids."""
@@ -1257,6 +1277,7 @@ class CognitiveMemory:
                     emotional_valence=row["emotional_valence"],
                 )
             )
+        await self._record_access(conn, [m.id for m in memories])
         return memories
 
     async def _find_partial_activations(self, conn: asyncpg.Connection, query: str) -> list[PartialActivation]:

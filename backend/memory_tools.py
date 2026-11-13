@@ -8,6 +8,7 @@ recall, search, and explore its memories.
 """
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
@@ -29,6 +30,30 @@ from cognitive_memory_api import (
     GoalSource as ApiGoalSource,
     MemoryType as ApiMemoryType,
 )
+
+
+def _record_exposure(conn, ids):
+    """Bound legacy telemetry and recover its savepoint without losing a read."""
+    if not ids:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SAVEPOINT sill_exposure")
+            try:
+                cur.execute("SELECT setting::int FROM pg_settings WHERE name='statement_timeout'")
+                previous = cur.fetchone()[0]
+                cur.execute("SELECT set_config('statement_timeout',%s,true)",
+                            (str(min(previous or 2000, 2000)),))
+                cur.execute("UPDATE memories SET access_count=COALESCE(access_count,0)+1 "
+                            "WHERE id=ANY(%s::uuid[])", (list(dict.fromkeys(ids)),))
+                cur.execute("SELECT set_config('statement_timeout',%s,true)", (str(previous),))
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sill_exposure")
+                raise
+            finally:
+                cur.execute("RELEASE SAVEPOINT sill_exposure")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Memory exposure telemetry failed (%s)", type(exc).__name__)
 
 
 # ============================================================================
@@ -365,7 +390,7 @@ class MemoryToolHandler:
             if memory_types or min_importance > 0:
                 cur.execute("""
                     SELECT id, importance FROM memories 
-                    WHERE id = ANY(%s)
+                    WHERE id = ANY(%s::uuid[])
                 """, ([r['memory_id'] for r in results],))
                 
                 importance_map = {str(row['id']): row['importance'] for row in cur.fetchall()}
@@ -381,14 +406,7 @@ class MemoryToolHandler:
                     filtered.append(r)
                 results = filtered[:limit]
             
-            # Update access counts
-            if results:
-                cur.execute("""
-                    UPDATE memories 
-                    SET access_count = access_count + 1, last_accessed = CURRENT_TIMESTAMP
-                    WHERE id = ANY(%s)
-                """, ([r['memory_id'] for r in results],))
-                self.conn.commit()
+            _record_exposure(self.conn, [r['memory_id'] for r in results])
         
         return {
             "memories": [dict(r) for r in results],
@@ -427,6 +445,7 @@ class MemoryToolHandler:
             """, params)
             
             results = cur.fetchall()
+            _record_exposure(self.conn, [r['memory_id'] for r in results])
         
         return {
             "memories": [dict(r) for r in results],
@@ -749,7 +768,6 @@ class ApiMemoryToolHandler:
             parsed_types = [ApiMemoryType(str(t)) for t in memory_types]
 
         result = self.client.recall(query, limit=limit, memory_types=parsed_types, min_importance=min_importance, include_partial=False)
-        self.client.touch_memories([m.id for m in result.memories])
         memories = [
             {
                 "memory_id": str(m.id),
@@ -777,9 +795,6 @@ class ApiMemoryToolHandler:
             mt = ApiMemoryType(str(memory_types[0]))
 
         rows = self.client.recall_recent(limit=limit, memory_type=mt)
-        if by_access:
-            # Touch to keep access_count semantics similar.
-            self.client.touch_memories([m.id for m in rows])
         results = [
             {
                 "memory_id": str(m.id),
@@ -950,7 +965,6 @@ class ContextEnricher:
             }
             for m in result.memories
         ]
-        self.client.touch_memories([m.id for m in result.memories])
         
         # Format memories into context
         if memories:
