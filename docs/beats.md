@@ -10,16 +10,16 @@ running it unattended.
 
 ## What a beat is
 
-A beat is one bounded unit of work: `backend/beat_worker.py` spawns a
-single `claude --print -p "<standing prompt>"` subprocess for the next
-voice due in the rotation, waits for it to exit (or time out), checks
-whether it actually produced anything, records a transcript, and — only on
-verified success — advances the rotation to the next voice. Then it sleeps
-until the next interval and does it again, forever.
+A beat is one bounded unit of work. `backend/beat_worker.py` starts the
+configured Claude Code or Codex CLI for the next voice, waits for it to
+finish, checks for new output, and records the attempt. After a verified
+success the worker advances the rotation. In scheduled mode it waits until
+the next interval before starting again.
 
-"Verified success" is exit 0 **and** (the voice declared no `output_glob`,
-or its `output_glob` gained a new file). Exit 0 alone is not enough — see
-Permissions below for why.
+Success requires exit 0 and, if the voice declares an `output_glob`, a
+new matching file. Claude's structured result must report no error and
+Codex must report a completed turn. Older Claude wrappers that return plain
+text still use the exit code and output check.
 
 There is no interactive user on the other end. A beat's standing prompt
 has to tell it to decide and act on its own, because anything that would
@@ -55,11 +55,14 @@ object with one top-level `voices` array. Each entry:
 
 | Field          | Required | Meaning |
 |-----------------|----------|---------|
-| `name`          | yes      | Identifies the voice in logs and transcript filenames. |
+| `name`          | yes      | Identifies the voice in logs and attempt receipts. |
 | `prompt`        | yes      | Path (relative to the project root) to the voice's standing prompt. |
-| `transcripts`   | yes      | Directory (relative to the project root) where this voice's per-beat transcripts are written. Created automatically if missing. |
-| `output_glob`   | no       | A glob (relative to the project root) checked before and after the beat. If set, the beat only counts as successful if this glob gained a new file — see Permissions below. Omit it and the beat is judged on exit code alone. |
+| `transcripts`   | yes      | Directory (relative to the project root) where the worker writes this voice's attempt receipts and summaries. Created automatically if missing. |
+| `output_glob`   | no       | A glob (relative to the project root) checked before and after the beat. If set, the beat only counts as successful if this glob gained a new file — see Permissions below. Omit it to use the launcher outcome without a file check. |
 | `kickoff`       | no       | One line appended after the standing prompt to start the beat. Defaults to `"Begin."`. |
+| `launcher`      | no       | `"claude"` (default) or `"codex"`. |
+| `cli`           | no       | Executable path or command name for this voice. Claude defaults to `SILL_BEAT_CLI` or `claude`. Codex defaults to `codex` on `PATH`. Use an absolute path when running under a scheduler. |
+| `model`         | no       | Model argument to pass to the launcher. Omit it or use `null` to use the CLI's configured default. |
 
 ### Worked example
 
@@ -101,18 +104,37 @@ directories they reference don't ship pre-created:
 mkdir -p notes journal logs/analyst logs/reflector
 ```
 
+To use Codex for the reflector, replace its entry with the following and
+set `cli` to the absolute path returned by `command -v codex` on your host.
+This voice uses Codex's configured default model.
+
+```json
+{
+  "name": "reflector",
+  "prompt": "prompts/reflector.md",
+  "transcripts": "logs/reflector",
+  "output_glob": "journal/reflector-*.md",
+  "launcher": "codex",
+  "cli": "/path/to/codex"
+}
+```
+
+The worker uses the selected host's normal user and project settings,
+permission policy, and hook trust. A failed launcher or model request holds
+the rotation on that voice.
+
 ## Env-var reference
 
 | Var | Default | Meaning |
 |---|---|---|
 | `SILL_BEAT_CONFIG` | `beats.json` at the project root | Voice definitions (see above). |
 | `SILL_BEAT_INTERVAL_SECONDS` | `7200` (2h) | Time between beats. Each voice fires roughly every *N* × interval, *N* = number of voices. |
-| `SILL_BEAT_TIMEOUT_SECONDS` | `1800` (30min) | Elapsed-time cap on one beat's subprocess. On timeout the worker kills the agent CLI's process group, logs the attempt as skipped, and retries the same voice on the next run. |
+| `SILL_BEAT_TIMEOUT_SECONDS` | `1800` (30min) | Elapsed-time cap on one beat's subprocess. On timeout the worker kills the agent CLI's process group, records the attempt as `timeout`, and retries the same voice on the next run. |
 | `SILL_BEAT_STATE_PATH` | `$XDG_STATE_HOME/sill/beat-rotation.json`, else `~/.local/state/sill/beat-rotation.json` | Where the rotation index persists. **Never `/tmp`** — the upstream lesson this guards against is a reboot silently clearing `/tmp` and resetting rotation with no record it happened. |
 | `SILL_BEAT_LOG_PATH` | `$SILL_LOG_DIR/beat-worker.log` | The worker's own log (separate from any one voice's transcripts). |
-| `SILL_BEAT_CLI` | `claude` | The agent CLI executable to spawn. Point it at a full path if it isn't on the PATH your scheduler uses. |
+| `SILL_BEAT_CLI` | `claude` | Default Claude Code executable for voices without their own `cli`. Point it at a full path if it is outside the scheduler's `PATH`. |
 | `SILL_BEAT_WATCHDOG_SOCKET` | unset | If set, ping this Unix socket before every spawn and log a warning on failure. Log-only — never blocks or repairs anything. Unset skips the probe entirely. |
-| `SILL_BEAT_POST_HOOK` | unset | A shell command run after every *successful* beat (e.g. housekeeping). Log-only, keyed on exit code, never fails the beat that triggered it. |
+| `SILL_BEAT_POST_HOOK` | unset | A shell command run after a verified beat has advanced rotation. Its outcome is logged separately. |
 | `SILL_DETACHED_BEAT` | unset (worker sets it to `1` on every child) | The authoritative headless flag Sill's own hooks gate on — `spontaneous-recall` and `check-corrections` read this to know not to inject recall or advance any interactive-session clock. You don't set this yourself; the worker always does. |
 | `SILL_BEAT_JOURNAL_DIRS` | unset (worker derives and sets it on every child) | Scope for `stored-slot-guard.py`, `tool-type-witness.py`, and `state-language-check.py`'s beat-aware fallback — the directory part of every voice's `output_glob` plus every voice's `transcripts` dir, colon-joined. **You don't set this either.** `spawn_beat()` computes it fresh from your loaded `beats.json` on every spawn; the worker's startup log prints the derived value (`Guard scope (SILL_BEAT_JOURNAL_DIRS for each child): ...`) so you can see exactly what it resolved to. |
 
@@ -165,7 +187,7 @@ then, a few seconds to a few minutes later, one line telling you whether
 the first beat was a **verified success**:
 
 ```
-2026-08-04 16:01:12,319 - INFO - [analyst] Beat complete in 0.2s — transcript 20260804-160112.txt
+2026-08-04 16:01:12,319 - INFO - [analyst] Beat complete in 0.2s — transcript 12345678-1234-4123-8123-123456789abc.txt
 ```
 
 or the **silent-failure warning** the Permissions section below exists to
@@ -194,45 +216,45 @@ The worker starts the agent CLI in its own process group. On timeout,
 Ctrl-C or SIGTERM it kills that group and reaps the agent CLI. Processes
 that move to another group fall outside this cleanup.
 
-## Reading a transcript
+## Reading an attempt receipt and transcript
 
-Each beat writes one file under its voice's `transcripts` directory,
-named `<YYYYMMDD-HHMMSS>.txt`. A real one looks like this:
+The worker writes `<attempt-id>.json` in the voice's `transcripts`
+folder before spawning the CLI. Each attempt has its own UUID, even when
+two attempts start within the same second. When a final message is
+available, the worker writes the summary to `<attempt-id>.txt` alongside
+the receipt. The summary contains the final message and launcher
+diagnostics. Look up `host_session_id` in the host's own session records
+for tool calls and other execution details.
 
-```
-# Analyst beat
-# Spawned: 2026-08-04T16:01:12-07:00 — worker-written wall-clock receipt at child spawn; the child cannot fabricate this line
-# Timestamp: 2026-08-04T16:01:12.319462
-# Duration: 0.2s
-# Exit code: 0
-# Model: unknown (best-effort mtime match on session transcript)
-============================================================
+The JSON receipt records the voice, requested launcher and model, observed
+host session and model, launch and completion timestamps with UTC offsets,
+monotonic elapsed duration, exit code, and new project-relative files
+matching `output_glob`. `session_id` is Sill's `beat:<attempt-id>`
+identifier. Claude receives the UUID as its requested native session ID.
+Codex reports its native ID in a `thread.started` event.
 
-Wrote a note and stored a memory.
-```
+Claude model attribution uses the matching CLI result or the assigned
+session file with that UUID under `$CLAUDE_CONFIG_DIR/projects`
+(default `~/.claude/projects`). Codex model attribution uses a matching
+rollout file under `$CODEX_HOME/sessions` (default `~/.codex/sessions`).
+`effective_model` and `model_source` are `null` when the model cannot be
+attributed from that evidence. The requested model is recorded separately.
 
-**The spawn-clock header.** `# Spawned: ...` is written by the *worker*,
-not the child — it's a wall-clock receipt of when the subprocess was
-launched, stamped by a process the child has no way to influence. A
-child's own claims about timing, made in its own reply text, can't be
-checked against anything else; this line can, because nothing the child
-does after it starts can retroactively change what the parent already
-wrote before handing it control.
+Receipts start as `running`. A completed attempt records `succeeded`,
+`skipped` for a transient CLI failure, `failed`, `timeout`, `interrupted`,
+`launch_error`, `no_record` for a successful CLI run that produced no new
+matching file, or `state_error` when rotation could not be saved. A launch
+failure before child creation has a null `spawned_at`. A forced timeout
+or interruption has a null `returncode`. A parent killed outright can
+leave a `running` receipt. If the initial receipt cannot be
+written, the worker logs the error and holds the voice without launching it.
 
-`# Model` is the one field that *is* only best-effort: it's read by
-matching the newest session file under `~/.claude/projects/<encoded
-project root>/` written since spawn time, so it can misattribute if
-another interactive session is writing under the same project
-concurrently. Everything else in the header is exact.
-
-**The scope caveat.** This file holds the subprocess's **final message
-only** — not its full context window, not the individual tool calls it
-made along the way. A term's absence here is not evidence the beat never
-touched it; the transcript can't see what happened inside the beat, only
-what it said at the end. The full tool-call record, if you need it, is the
-session transcript under `~/.claude/projects/<encoded project
-root>/*.jsonl` — match it by modification time against the beat's spawn
-clock.
+For a successful scheduled or one-shot beat, the worker first saves a
+receipt with `state_advanced: null`, then writes `next_index` and
+`last_successful_attempt_id` together in the rotation file, and finally
+sets `state_advanced: true`. If the last write fails, the worker logs the
+attempt ID and resumes at the saved index. The rotation file's attempt ID
+identifies the committed transition.
 
 ---
 
@@ -286,18 +308,15 @@ Watch for it:
 tail -f "${SILL_LOG_DIR:-/tmp}/beat-worker.log"
 ```
 
-A voice with no `output_glob` has no such check — it's judged on exit code
-alone, so an unpermissioned beat for that voice would show as a false
-success. Give every voice an `output_glob` in `beats.json` if you want
+For a voice with no `output_glob`, a successful CLI outcome can count even
+if a tool was denied and no file was written. Give every voice an `output_glob` in `beats.json` if you want
 this guard at all.
 
 ### The remedy
 
-`beat_worker.py` spawns the child with a fixed command
-(`claude --print -p "<prompt>"`, `cwd` set to the project root) and no
-extra flags — so **`.claude/settings.local.json` in the project root is
-the channel**, not a CLI flag you pass to the worker. Grant, at minimum,
-the shell command that runs `sill notice`, plus Write/Edit:
+For Claude Code, the worker runs from the project root and applies the
+configured tool permissions. Use **`.claude/settings.local.json`** in the
+project root to allow Write/Edit and the `sill notice` command:
 
 ```bash
 mkdir -p .claude
@@ -353,7 +372,7 @@ moving on to Scheduling.
 
 ## Rotation starvation: one stuck voice blocks every voice
 
-`advance_if()` (`backend/beat_worker.py`) only ever moves the rotation
+The worker only moves the rotation
 past the voice that *just ran*, and only on verified success. That's the
 right call for that one voice — a failing voice should keep retrying next
 interval rather than have the worker silently give up on it. But the
@@ -382,8 +401,8 @@ happening to affect just one voice rather than all of them.
 
 **How to notice.** Every per-voice outcome line in the worker's log —
 success, timeout, transient-infrastructure skip, or the silent-failure
-warning — starts with that voice's bracketed name followed by `Beat`
-(verified against every such call site in `spawn_beat()`). Over a window
+warning — includes the voice name. To sample ordinary outcome lines,
+look for the bracketed name followed by `Beat`. Over a window
 long enough to have expected each configured voice at least once
 (roughly *N* voices × `SILL_BEAT_INTERVAL_SECONDS`), collect the distinct
 names that actually appear:
@@ -401,7 +420,7 @@ the same stuck voice, unmoving, beat after beat, while the missing
 voice's `output_glob`/`transcripts` directory stays untouched.
 
 **How to fix.** Treat it as a single-voice failure and debug that one
-voice the normal way: read its transcripts, check its `output_glob`
+voice the normal way: read its receipts and transcripts, check its `output_glob`
 against what it's actually writing, re-run "Running one beat by hand"
 above until *that specific voice* logs `Beat complete`. There is
 currently no supported way to skip past a stuck voice and free the

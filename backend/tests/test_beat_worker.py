@@ -10,6 +10,12 @@ import pytest
 import beat_worker as bw
 
 
+@pytest.fixture(autouse=True)
+def synthetic_host_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+
 VOICES_JSON = json.dumps({
     "voices": [
         {
@@ -269,7 +275,8 @@ def test_spawn_beat_exports_journal_dirs_derived_from_full_voice_config(tmp_path
 
     captured_env = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
         captured_env.update(kwargs.get("env") or {})
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="did something", stderr="")
@@ -316,7 +323,8 @@ def test_spawn_beat_does_not_restrict_the_child_to_project_settings(tmp_path, mo
                      kickoff="Begin.")
     captured_cmd = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
         captured_cmd.extend(cmd)
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
@@ -329,7 +337,7 @@ def test_spawn_beat_does_not_restrict_the_child_to_project_settings(tmp_path, mo
         "spawn_beat restricted the child's settings sources; user scope is "
         f"where the MCP server is registered — argv was {captured_cmd[:3]}…"
     )
-    assert captured_cmd[:2] == [bw.CLI, "--print"]
+    assert captured_cmd[1] == "--print"
 
 
 def test_spawn_beat_forwards_the_parent_environment_to_the_child(tmp_path, monkeypatch):
@@ -356,7 +364,8 @@ def test_spawn_beat_forwards_the_parent_environment_to_the_child(tmp_path, monke
                      kickoff="Begin.")
     captured_env = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
         captured_env.update(kwargs.get("env") or {})
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
@@ -395,7 +404,8 @@ def test_spawn_beat_returns_false_when_exit_0_produces_no_output_file(tmp_path, 
                   kickoff="Begin."),
     ]
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
         # Exit 0 with plausible-looking output, but — unlike the fixture
         # above — no file written under notes/. This is exactly the shape
         # of a tool-permission-denied headless run: the agent CLI notices
@@ -440,7 +450,8 @@ def test_spawn_beat_sets_no_journal_dirs_var_when_derivation_is_empty(tmp_path, 
 
     captured_env = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
         captured_env.update(kwargs.get("env") or {})
         return subprocess.CompletedProcess(cmd, 0, stdout="did something", stderr="")
 
@@ -491,10 +502,13 @@ def test_run_beat_loop_drives_one_full_iteration(tmp_path, monkeypatch):
     # so what matters is only that the call is reached at all.
     monkeypatch.setattr(bw, "INTERVAL_SECONDS", 300)
 
-    def fake_spawn_beat(voice, voices, *, lock_fd):
-        return True, 0.01, str(tmp_path / f"{voice.name}-transcript.md")
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
+        (tmp_path / "notes").mkdir()
+        (tmp_path / "notes" / "analyst-one.md").write_text("beat output")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Done", stderr="")
 
-    monkeypatch.setattr(bw, "_spawn_beat_locked", fake_spawn_beat)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
 
     def fake_sleep(seconds):
         raise _StopAfterOneIteration(seconds)
@@ -529,7 +543,11 @@ def test_run_beat_loop_does_not_advance_rotation_on_a_failed_beat(tmp_path, monk
     monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(state_path))
     monkeypatch.setattr(bw, "POST_HOOK", None)
     monkeypatch.setattr(bw, "INTERVAL_SECONDS", 300)
-    monkeypatch.setattr(bw, "_spawn_beat_locked", lambda voice, voices, *, lock_fd: (False, 0.01, ""))
+    def fake_run(cmd, *, on_spawn, **kwargs):
+        on_spawn()
+        return subprocess.CompletedProcess(cmd, 2, stdout="Beat failed", stderr="")
+
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
 
     def fake_sleep(seconds):
         raise _StopAfterOneIteration(seconds)

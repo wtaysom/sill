@@ -178,6 +178,8 @@ def _beat_env(root, cli, *, timeout):
            if not key.startswith(("SILL_BEAT_", "SILL_LOG_DIR"))}
     env.update({
         "HOME": str(root),
+        "CLAUDE_CONFIG_DIR": str(root / "claude"),
+        "CODEX_HOME": str(root / "codex"),
         "PYTHON_DOTENV_DISABLED": "1",
         "PYTHONPATH": str(BACKEND_ROOT),
         "SILL_PROJECT_ROOT": str(root),
@@ -291,6 +293,10 @@ exit 1
             owner.kill()
             assert owner.wait(timeout=5) == -signal.SIGKILL
             assert _pid_exists(cli_pid)
+            receipt_path, = (root / "logs" / "probe").glob("*.json")
+            receipt = json.loads(receipt_path.read_text())
+            assert receipt["status"] == "running"
+            assert receipt["completed_at"] is None
             contender = _worker_result(root, env, once=True)
             assert contender.returncode == 75, contender.stderr
             assert pids.read_text().splitlines() == [str(cli_pid)]
@@ -327,6 +333,10 @@ wait
         time.sleep(1.5)
         assert not (root / "delayed-marker").exists()
         assert state.read_bytes() == old
+        receipt_path, = (root / "logs" / "probe").glob("*.json")
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt["status"] == "timeout"
+        assert receipt["spawned_at"] and receipt["completed_at"]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
@@ -413,6 +423,11 @@ raise SystemExit(status)
         assert released
         assert not _pid_exists(child_pid)
         assert not state.exists()
+        receipt_path, = (root / "logs" / "probe").glob("*.json")
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt["status"] == "interrupted"
+        assert receipt["spawned_at"] and receipt["completed_at"]
+        assert receipt["state_advanced"] is False
     finally:
         if pid_file.exists():
             try:
