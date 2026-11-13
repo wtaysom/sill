@@ -368,6 +368,18 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
         gp: GoalPriority | None = GoalPriority(pri) if pri else None
         return await client.get_goals(priority=gp)
 
+    if name == "link_commitment":
+        memory_id = UUID(_require(args, "memory_id", name))
+        goal_id = UUID(_require(args, "goal_id", name))
+        await client.link_commitment(memory_id, goal_id)
+        return {"memory_id": str(memory_id), "goal_id": str(goal_id)}
+
+    if name == "change_goal_priority":
+        goal_id = UUID(_require(args, "goal_id", name))
+        priority = GoalPriority(_require(args, "priority", name))
+        await client.change_goal_priority(goal_id, priority, args.get("reason"))
+        return {"goal_id": str(goal_id), "priority": priority.value}
+
     if name == "batch":
         ops = _require(args, "operations", name) or []
         continue_on_error = bool(args.get("continue_on_error", False))
@@ -839,6 +851,23 @@ def _tools() -> list[Any]:
                 "properties": {"priority": {"type": ["string", "null"], "enum": [g.value for g in GoalPriority] + [None]}},
                 "additionalProperties": False,
             },
+        ),
+        _tool(
+            "link_commitment",
+            "Link a memory to its one explicit home goal. Reopen a closed goal before adding a new link; same-home retries are harmless.",
+            {"type": "object", "properties": {
+                "memory_id": {"type": "string", "format": "uuid"},
+                "goal_id": {"type": "string", "format": "uuid"}},
+             "required": ["memory_id", "goal_id"], "additionalProperties": False},
+        ),
+        _tool(
+            "change_goal_priority",
+            "Change goal priority. Closing releases its live home commitments; reopening restores only its own unreplaced releases.",
+            {"type": "object", "properties": {
+                "goal_id": {"type": "string", "format": "uuid"},
+                "priority": {"type": "string", "enum": [g.value for g in GoalPriority]},
+                "reason": {"type": ["string", "null"]}},
+             "required": ["goal_id", "priority"], "additionalProperties": False},
         ),
         _tool(
             "batch",

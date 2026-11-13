@@ -25,6 +25,8 @@ from pathlib import Path
 
 
 import provenance
+from uuid import UUID
+
 from session_identity import mint_context
 
 
@@ -230,7 +232,9 @@ def notice(content: str, memory_type: str = "semantic",
            source_kind: str | None = None,
            source_label: str | None = None,
            production: dict | str | None = None,
-           minted_in: dict | None = None) -> str | None:
+           minted_in: dict | None = None,
+           goal: str | UUID | None = None,
+           supersedes: str | UUID | None = None) -> str | None:
     """Store something important. Returns memory ID or None on failure.
 
     Atomically mints the act and its concepts; retries leave the existing act unchanged.
@@ -251,6 +255,8 @@ def notice(content: str, memory_type: str = "semantic",
         raise ValueError(f"force must be one of {sorted(VALID_FORCES)} or None, got {force!r}")
     if memory_type not in {"semantic", "episodic", "procedural", "strategic"}:
         raise ValueError(f"invalid memory type: {memory_type!r}")
+    goal = str(UUID(str(goal))) if goal is not None else None
+    supersedes = str(UUID(str(supersedes))) if supersedes is not None else None
     stamp = minted_in if minted_in is not None else mint_context("cli:notice")
     production = provenance.production_from_value(production, session=stamp.get("session"),
                      as_=stamp.get("as"), when=stamp.get("when"))
@@ -262,21 +268,43 @@ def notice(content: str, memory_type: str = "semantic",
     force_arg = f"'{force}'" if force is not None else "NULL"
     concepts_arg = ("ARRAY[" + ",".join(f"'{_escape(c)}'" for c in concepts) + "]::text[]"
                     if concepts is not None else "NULL")
-    # One statement owns attribution, subtype, graph and concepts. A failed or
-    # missing migration is an error; never fall back to create-then-retag.
-    rows = _query_db(f"""
-        SELECT memory_id::text,outcome,restates::text FROM public.mint_memory(
+    # One statement owns attribution, subtype, graph, concepts and home. A failed
+    # link rolls back the mint (and predecessor archival for supersession).
+    if supersedes is not None:
+        metadata = {"speaker": speaker, "force": force, "production": production, "minted_in": stamp}
+        if concepts is not None:
+            metadata["concepts"] = [{"name": c} for c in concepts]
+        metadata_arg = "'" + _escape(json.dumps(metadata)) + "'::jsonb"
+        if source:
+            metadata_arg += f" || jsonb_build_object('source_attribution', {source_arg})"
+        mint_sql = f"""SELECT public.supersede_memory(
+            '{supersedes}'::uuid,'{_escape(content)}',NULL,
+            {metadata_arg}) AS memory_id,
+            'inserted'::text AS outcome,NULL::uuid AS restates"""
+    else:
+        mint_sql = f"""SELECT * FROM public.mint_memory(
             '{memory_type}'::memory_type, '{_escape(content)}', {float(importance)}, {source_arg},
             p_speaker => {speaker_arg}, p_force => {force_arg}, p_concepts => {concepts_arg},
             p_production => {production_arg}, p_minted_in => {stamp_arg}
-        );
-    """, timeout=60)
+        )"""
+    if goal is not None:
+        sql = f"""WITH minted AS MATERIALIZED ({mint_sql}),
+            linked AS (
+                INSERT INTO goal_memory_links(memory_id,goal_id,link_type)
+                SELECT memory_id,'{goal}'::uuid,'home' FROM minted WHERE outcome='inserted'
+                RETURNING memory_id
+            )
+            SELECT m.memory_id::text,m.outcome,m.restates::text
+            FROM minted m LEFT JOIN linked l ON l.memory_id=m.memory_id"""
+    else:
+        sql = f"SELECT memory_id::text,outcome,restates::text FROM ({mint_sql}) minted"
+    rows = _query_db(sql, timeout=60)
     if not rows or not rows[0]:
         return None
     memory_id, outcome, restates = rows[0]
     logging.getLogger(__name__).info("memory mint id=%s outcome=%s restates=%s", memory_id, outcome, restates)
     if outcome == "reused":
-        print("Reused existing memory; its attribution and concepts are unchanged.", file=sys.stderr)
+        print("Reused existing memory; its attribution, concepts and home are unchanged. Use link_commitment explicitly to add a home.", file=sys.stderr)
     elif restates:
         print(f"Restates memory {restates}.", file=sys.stderr)
     return memory_id
@@ -325,6 +353,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Override the inferred kind (file/url). e.g. beat, twitter, book.")
     p_notice.add_argument("--source-label", default=None,
                           help="Human label for the source, e.g. 'journal-042'.")
+    p_notice.add_argument("--goal", type=UUID, metavar="UUID",
+                          help="Home goal for a new commitment. Reused records require explicit link_commitment.")
+    p_notice.add_argument("--supersedes", type=UUID, metavar="UUID",
+                          help="Replace this live memory atomically; the successor keeps its predecessor's type.")
     p_notice.add_argument("--receipt-to", default=None, metavar="FILE",
                           help="Journal file whose literal placeholder line "
                                "('Stored: MINT-PENDING — no receipt yet') the "
@@ -368,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                      force=args.force, speaker=args.speaker,
                      source=args.source, source_kind=args.source_kind,
                      source_label=args.source_label,
+                     goal=args.goal, supersedes=args.supersedes,
                      production=json.loads(args.made_json) if args.made_json is not None else args.made)
         if mid:
             receipt = format_receipt(mid, concepts, args.speaker, args.force)

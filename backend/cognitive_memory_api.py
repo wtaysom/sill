@@ -1086,7 +1086,7 @@ class CognitiveMemory:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
                 """
-                SELECT create_goal(
+                SELECT public.create_goal(
                     $1,
                     $2,
                     $3::goal_source,
@@ -1101,6 +1101,21 @@ class CognitiveMemory:
                 (priority.value if isinstance(priority, GoalPriority) else str(priority)),
                 parent_id,
                 due_at,
+            )
+
+    async def link_commitment(self, memory_id: UUID, goal_id: UUID) -> None:
+        """Link a record to its one explicit home; closed homes must reopen first."""
+        async with self._pool.acquire() as conn:
+            await conn.execute("SELECT public.link_commitment($1::uuid,$2::uuid)", memory_id, goal_id)
+
+    async def change_goal_priority(
+        self, goal_id: UUID, priority: GoalPriority, reason: str | None = None,
+    ) -> None:
+        """Change goal state, releasing or restoring its owned commitments."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "SELECT public.change_goal_priority($1::uuid,$2::goal_priority,$3::text)",
+                goal_id, priority.value, reason,
             )
 
     async def queue_user_message(
