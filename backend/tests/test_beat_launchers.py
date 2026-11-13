@@ -303,6 +303,16 @@ def test_claude_is_error_and_codex_turn_failed_hold_rotation(project, monkeypatc
     assert not (project / "rotation.json").exists()
 
 
+def test_legacy_claude_wrapper_keeps_typeless_json_with_nonstring_result(project, monkeypatch):
+    voices = configure(project)
+    stdout = '{"result":{"records":[1]},"is_error":false}'
+    stub_cli(monkeypatch, stdout)
+
+    success, _, transcript = bw.spawn_beat(voices[0], voices)
+    assert success
+    assert Path(transcript).read_text().endswith(stdout)
+
+
 @pytest.mark.parametrize("payload", [
     {"type": "result", "result": "Failed"},
     {"type": "result", "result": "Failed", "is_error": "true"},

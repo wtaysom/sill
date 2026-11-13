@@ -115,7 +115,7 @@ def _claude_result(
     stdout = result.stdout or ""
     payload = _json_object(stdout)
     structured = payload.get("type") == "result" or (
-        "type" not in payload and "result" in payload and "is_error" in payload
+        "type" not in payload and isinstance(payload.get("result"), str) and "is_error" in payload
     )
     text = payload.get("result") if structured else stdout
     outcome = payload.get("is_error")
