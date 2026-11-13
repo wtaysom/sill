@@ -212,6 +212,19 @@ to confirm, not a given.
 | Hook wiring | `<project>/.claude/settings.local.json` (merges idempotently on every `--hooks-for` re-run); also `~/.claude/settings.json` under `--scope home` | `<project>/.codex/hooks.json` under `install.sh` (written once; **skipped** if it already exists, by design — first wiring only); also `~/.codex/hooks.json` under `--scope home`. Re-rendering an existing file is `upgrade.sh --hooks-for`'s job, not `install.sh`'s — it diffs against the current template and requires `--force-hooks` to overwrite (fixed the gap this row used to describe as unconditional; see `docs/hooks.md`'s "Adding hooks to a project") | `install.sh` step 8, from `plugin/codex.hooks.json.template`; `upgrade.sh --hooks-for` for re-rendering |
 | Hook command trust | none — commands run as configured | **SHA-256-pinned** per command in `config.toml`'s `[hooks.state]` — see the warning below | n/a — operational, not code |
 
+To register a specific instance directly, run `sill connect claude-code`
+or `sill connect codex` with `--env-file /absolute/path/to/backend/.env`.
+Use `sill connect claude-desktop` for Claude Desktop on macOS. Add
+`--dry-run` to check the merge before writing. The client launches the
+installed `sill-mcp` using the absolute env-file path. Set database
+coordinates or a DSN in that file. Its settings are read literally without
+shell expansion.
+
+A previous installer may have registered the bare `sill-mcp` command.
+Check which instance it was using before replacing that entry with
+`--adopt-legacy`. Review any entry with custom arguments, environment
+variables, or transport settings yourself.
+
 Confirm the tool-name mapping yourself against the live source rather
 than trusting this table indefinitely:
 

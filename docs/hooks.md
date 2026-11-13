@@ -42,6 +42,12 @@ Codex and Claude Code config locations when you run
 default template; each section below says so and gives what to wire
 alongside it if it needs a partner.
 
+Codex enables hooks by default. To disable them, set `hooks = false` under
+`[features]` in `config.toml`. Codex also honors the older `codex_hooks`
+alias. `sill connect codex` registers the MCP server and preserves these
+settings. Use the installer’s hook options when you want Sill callbacks.
+[Codex hooks documentation](https://learn.chatgpt.com/docs/hooks#turn-hooks-off)
+
 **Database defaults.** Every DB-touching hook defaults to the same
 values `backend/docker-compose.yml` and `backend/.env.example` use —
 `SILL_DB_CONTAINER=sill_db`, `SILL_DB_USER`/`POSTGRES_USER=sill`,

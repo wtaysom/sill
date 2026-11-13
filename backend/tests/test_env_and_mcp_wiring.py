@@ -45,6 +45,7 @@ import os
 import stat
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -425,3 +426,193 @@ def test_the_mint_path_does_not_depend_on_the_worker_being_imported():
     text = (BACKEND_ROOT / "sill.py").read_text(encoding="utf-8")
     assert "_load_backend_env" in text
     assert "import worker" not in text and "from worker" not in text
+
+
+# --- explicit MCP instance selection -----------------------------------------
+
+
+def run_instance_server(tmp_path, monkeypatch, capsys, env_body=None, extra=()):
+    """Run the MCP entry point with a real SDK initialize and no live database."""
+    from inspect import signature
+    from io import StringIO
+
+    from mcp import types
+    from mcp.server import stdio
+    import anyio
+    import sill_mcp_server as server
+
+    home = tmp_path / "gui home"
+    home.mkdir()
+    (home / ".env").write_text("SILL_DB_DSN=postgresql://wrong@cwd.invalid/db\n")
+    monkeypatch.chdir(home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SILL_DB_DSN", "postgresql://wrong@ambient.invalid/db")
+    monkeypatch.setenv("POSTGRES_HOST", "ambient.invalid")
+    monkeypatch.setenv("POSTGRES_PORT", "59999")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "ambient secret")
+    monkeypatch.setenv("PGPORT", "invalid ambient port")
+    monkeypatch.setenv("PGHOST", "stale-pg-host.invalid")
+    monkeypatch.setenv("PGUSER", "stale-pg-user")
+    monkeypatch.setenv("PGDATABASE", "stale-pg-db")
+
+    # asyncpg's connection parameter parser remains real. Substitute only the
+    # DB-backed client constructor, then let the actual SDK handle initialize.
+    from asyncpg.connect_utils import _parse_connect_arguments
+
+    seen = []
+
+    class FixtureClient:
+        async def close(self):
+            pass
+
+    async def capture_connection(dsn):
+        parameters = signature(_parse_connect_arguments).parameters
+        options = dict.fromkeys(parameters)
+        options.update(dsn=dsn, command_timeout=1, statement_cache_size=0,
+                       max_cached_statement_lifetime=0, max_cacheable_statement_size=0)
+        addresses, connection, _ = _parse_connect_arguments(**options)
+        seen.append((addresses, connection.user, connection.password, connection.database))
+        return FixtureClient()
+
+    monkeypatch.setattr(server.CognitiveMemory, "create", capture_connection)
+    stdin = StringIO(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":'
+        '{"protocolVersion":"2024-11-05","capabilities":{},'
+        '"clientInfo":{"name":"fixture","version":"1"}}}\n'
+    )
+    transport = stdio.stdio_server
+    monkeypatch.setattr(stdio, "stdio_server",
+                        lambda: stdio_server_with_stdout(transport, anyio, stdin))
+    env_file = tmp_path / "instance settings.env"
+    if env_body is not None:
+        env_file.write_text(env_body, encoding="utf-8")
+    status = server.main(["--env-file", str(env_file), *extra])
+    captured = capsys.readouterr()
+    if status == 0:
+        messages = captured.out.splitlines()
+        assert len(messages) == 1
+        response = types.JSONRPCResponse.model_validate_json(messages[0])
+        assert response.id == 1
+        assert response.result["serverInfo"]["name"] == "sill"
+    else:
+        assert captured.out == ""
+    return status, seen, captured.err, env_file
+
+
+@asynccontextmanager
+async def stdio_server_with_stdout(transport, anyio, stdin):
+    # A captured Python text stream has no .buffer, so pass it to the real
+    # stdio transport explicitly rather than replacing the MCP protocol.
+    async with transport(stdin=anyio.wrap_file(stdin),
+                         stdout=anyio.wrap_file(sys.stdout)) as streams:
+        yield streams
+
+
+def test_explicit_instance_ignores_stale_dsn_and_cwd_dotenv(tmp_path, monkeypatch, capsys):
+    status, seen, stderr, _ = run_instance_server(
+        tmp_path, monkeypatch, capsys, "POSTGRES_PORT=15432\nPOSTGRES_USER=fixture\n",
+    )
+    assert status == 0, stderr
+    assert seen == [([("localhost", 15432)], "fixture", "sill_password", "sill")]
+    assert stderr == ""
+    assert os.environ["PGPORT"] == "invalid ambient port"
+
+
+def test_explicit_instance_defaults_to_localhost(tmp_path, monkeypatch, capsys):
+    status, seen, stderr, _ = run_instance_server(tmp_path, monkeypatch, capsys, "")
+    assert status == 0, stderr
+    assert seen == [([("localhost", 5432)], "sill", "sill_password", "sill")]
+
+
+def test_unreadable_instance_fails_before_connecting(tmp_path, monkeypatch, capsys):
+    status, seen, stderr, env_file = run_instance_server(
+        tmp_path, monkeypatch, capsys, extra=("--dsn", "postgresql://override@localhost/db"),
+    )
+    assert status != 0
+    assert not seen
+    assert str(env_file) in stderr
+    assert "read" in stderr.lower()
+    assert "ambient secret" not in stderr and "override@" not in stderr
+
+
+def test_explicit_instance_quotes_dsn_fields(tmp_path, monkeypatch, capsys):
+    body = """
+POSTGRES_HOST=::1
+POSTGRES_USER="fixture user@a"
+POSTGRES_PASSWORD=' a:/?#@ +% ${POSTGRES_PASSWORD} $(touch marker) '
+POSTGRES_DB="db/with spaces"
+"""
+    status, seen, stderr, _ = run_instance_server(tmp_path, monkeypatch, capsys, body)
+    assert status == 0, stderr
+    assert seen == [
+        ([("::1", 5432)], "fixture user@a", " a:/?#@ +% ${POSTGRES_PASSWORD} $(touch marker) ",
+         "db/with spaces")
+    ]
+    assert not (tmp_path / "gui home" / "marker").exists()
+
+
+@pytest.mark.parametrize(("override", "user", "port"), [
+    ((), "from-file", 16432),
+    (("--dsn", "postgresql://from-flag:pass@localhost:17432/fixture"), "from-flag", 17432),
+])
+def test_file_dsn_precedes_file_postgres_fields_and_explicit_dsn_precedes_both(
+    tmp_path, monkeypatch, capsys, override, user, port,
+):
+    body = "SILL_DB_DSN=postgresql://from-file:pass@localhost:16432/fixture\nPOSTGRES_PORT=18432\n"
+    status, seen, stderr, _ = run_instance_server(tmp_path, monkeypatch, capsys, body, override)
+    assert status == 0, stderr
+    assert seen == [([("localhost", port)], user, "pass", "fixture")]
+
+
+@pytest.mark.parametrize("body", [
+    'POSTGRES_PASSWORD="bad secret\n',
+    'POSTGRES_USER=\n',
+    'POSTGRES_PORT=99999\n',
+    'POSTGRES_USER=sill\nPOSTGRES_USER=other\n',
+    'POSTGRES_USER\n',
+    'SILL_DB_DSN=\n',
+    'SILL_DB_DSN=postgresql://\n',
+    'SILL_DB_DSN=postgresql:///missing-target\n',
+    'SILL_DB_DSN=postgresql://user:bad%2secret@localhost/database\n',
+    'SILL_DB_DSN=postgresql://localhost:65536/database\n',
+    'SILL_DB_DSN=postgresql:///database?host=localhost&port=0\n',
+])
+def test_explicit_instance_rejects_invalid_settings_without_revealing_values(
+    tmp_path, monkeypatch, capsys, body,
+):
+    status, seen, stderr, env_file = run_instance_server(tmp_path, monkeypatch, capsys, body)
+    assert status != 0
+    assert not seen
+    assert str(env_file) in stderr
+    assert "bad secret" not in stderr
+    assert "bad%2secret" not in stderr
+
+
+@pytest.mark.parametrize(("dsn", "addresses"), [
+    ("postgresql://user:pass@%2Ftmp%2Ffixture%20socket:15432/db",
+     ["/tmp/fixture socket/.s.PGSQL.15432"]),
+    ("postgresql://user:pass@/db?host=/tmp/fixture%20socket&port=15432",
+     ["/tmp/fixture socket/.s.PGSQL.15432"]),
+    ("postgresql://user:pass@one.invalid:15432,two.invalid:15433/db",
+     [("one.invalid", 15432), ("two.invalid", 15433)]),
+])
+def test_explicit_dsn_preserves_socket_and_multihost_targets(
+    tmp_path, monkeypatch, capsys, dsn, addresses,
+):
+    status, seen, stderr, _ = run_instance_server(
+        tmp_path, monkeypatch, capsys, f"SILL_DB_DSN={dsn}\n",
+    )
+    assert status == 0, stderr
+    assert seen == [(addresses, "user", "pass", "db")]
+
+
+@pytest.mark.parametrize("arg", ["--help", "--version"])
+def test_instance_help_and_version_ignore_unreadable_file(tmp_path, arg):
+    result = subprocess.run(
+        [sys.executable, "-m", "sill_mcp_server", "--env-file", str(tmp_path / "absent"), arg],
+        capture_output=True, text=True, timeout=20, cwd=BACKEND_ROOT,
+        env={**os.environ, "HOME": str(tmp_path), "SILL_DB_DSN": "invalid"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "sill-mcp" in result.stdout
+    assert not result.stderr

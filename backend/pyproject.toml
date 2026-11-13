@@ -24,6 +24,8 @@ dependencies = [
   # acceptance rehearsal — see docs/RELEASE-REHEARSAL.md.
   "mcp>=1.0.0,<2",
   "python-dotenv>=1.0.0",
+  "tomlkit>=0.13.2",
+  "tomli>=2.0.1; python_version < '3.11'",
   "requests>=2.31.0",
   "httpx>=0.25.0",
   "pydantic>=2.4.2",
@@ -51,6 +53,8 @@ py-modules = [
   "sill",
   "sill_cli",
   "sill_mcp_server",
+  "instance_config",
+  "client_config",
   "worker",
   "rabbit_bridge",
   "beat_worker",
