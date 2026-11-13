@@ -114,3 +114,65 @@ def test_indirect_hook_mint_invalid_selector_is_redacted_and_never_falls_back(mo
     assert sill._query_db('SELECT 1') == []
     err=capsys.readouterr().err
     assert 'unavailable' in err and 'secret' not in err
+
+
+def test_selected_precompact_preserves_both_contradiction_texts(monkeypatch):
+    """Object JSON has duplicate content keys; positional JSON must retain both."""
+    import _store
+    monkeypatch.setenv('SILL_INSTANCE_ENV_FILE', '/synthetic/selected.env')
+    original = ['Cedar seedlings need shade.', 'Cedar seedlings need full sun.']
+    def wire(sql, **kwargs):
+        assert 'SELECT m1.content, m2.content' in sql
+        if kwargs.get('row_arrays'):
+            return json.dumps(original) + '\n'
+        # PostgreSQL row_to_json keeps duplicate column names on the wire;
+        # a Python dict decoder cannot preserve both of these fields.
+        return '{"content":' + json.dumps(original[0]) + ',"content":' + json.dumps(original[1]) + '}\n'
+    monkeypatch.setattr(_store.core, '_run_sql', wire)
+    assert load('precompact-snapshot').get_open_contradictions() == [
+        {'a': original[0], 'b': original[1]}]
+
+
+@pytest.mark.parametrize('name', ['goodnight-checkpoint', 'precompact-snapshot'])
+def test_selected_optional_hooks_preserve_positional_rows_and_nulls(name, monkeypatch):
+    import _store
+    monkeypatch.setenv('SILL_INSTANCE_ENV_FILE', '/synthetic/selected.env')
+    rows = [['first|field\n臺灣', None, 7], ['second field', '', 0]]
+    def wire(sql, **kwargs):
+        if kwargs.get('row_arrays'):
+            return '\n'.join(json.dumps(row) for row in rows)
+        return '\n'.join(json.dumps(dict(zip(('content', 'nullable', 'count'), row))) for row in rows)
+    monkeypatch.setattr(_store.core, '_run_sql', wire)
+    module = load(name)
+    assert module.query_postgres('SELECT content, nullable, count FROM fixture') == [
+        ['first|field\n臺灣', '', '7'], ['second field', '', '0']]
+
+
+@pytest.mark.parametrize('name', ['goodnight-checkpoint', 'precompact-snapshot'])
+def test_selected_optional_update_and_empty_rows_remain_quiet(name, monkeypatch, capsys):
+    import _store
+    monkeypatch.setenv('SILL_INSTANCE_ENV_FILE', '/synthetic/selected.env')
+    statements = []
+    def wire(sql, **kwargs):
+        statements.append(sql)
+        return ''
+    monkeypatch.setattr(_store.core, '_run_sql', wire)
+    module = load(name)
+    update = "UPDATE drives SET current_focus = 'synthetic' WHERE name = 'fixture'"
+    assert module.query_postgres(update) == []
+    assert module.query_postgres('SELECT content FROM fixture WHERE false') == []
+    assert statements[0] == update
+    captured = capsys.readouterr()
+    assert not captured.out and not captured.err
+
+
+@pytest.mark.parametrize('name', ['goodnight-checkpoint', 'precompact-snapshot'])
+@pytest.mark.parametrize('response', ['not JSON', '{"content":"wrong object shape"}'])
+def test_selected_optional_malformed_rows_are_redacted_and_unchecked(name, response, monkeypatch, capsys):
+    import _store
+    monkeypatch.setenv('SILL_INSTANCE_ENV_FILE', '/synthetic/selected.env')
+    monkeypatch.setattr(_store.core, '_run_sql', lambda *args, **kwargs: response)
+    assert load(name).query_postgres('SELECT content FROM fixture') == []
+    captured = capsys.readouterr()
+    assert captured.err == '[sill] Selected store unavailable; checkpoint query unchecked.\n'
+    assert not captured.out and response not in captured.err

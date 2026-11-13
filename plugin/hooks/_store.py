@@ -1,4 +1,5 @@
 """Installed-hook entry point to the shared transport and instance selector."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -27,6 +28,26 @@ def query(sql, *, timeout=5, deadline=None, json_output=False):
 
 def execute(sql, *, timeout=5, deadline=None):
     return core._run_sql(sql, timeout=timeout, deadline=deadline)
+
+
+def selected_legacy_rows(sql, *, unavailable_message, timeout=5):
+    """Adapt selected SQL to the optional hooks' positional, empty-null rows.
+
+    Column names need not be unique. Keep every position through the existing
+    selected row-array transport instead of decoding object keys first.
+    """
+    try:
+        if sql.lstrip().upper().startswith('UPDATE '):
+            execute(sql, timeout=timeout)
+            return []
+        output = core._run_sql(sql, timeout=timeout, row_arrays=True)
+        rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+        if any(not isinstance(row, list) for row in rows):
+            raise ValueError('invalid positional row shape')
+        return [['' if value is None else str(value) for value in row] for row in rows]
+    except Exception:
+        print(unavailable_message, file=sys.stderr)
+        return []
 
 
 def selected_connection(connect):
