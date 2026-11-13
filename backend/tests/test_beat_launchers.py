@@ -70,7 +70,11 @@ def codex_rollout(root, thread, *events, day="13"):
 
 
 def stub_cli(monkeypatch, stdout, *, returncode=0, stderr="", before_exit=None):
-    def run(argv, *, on_spawn, **kwargs):
+    runner = bw._run_beat_subprocess
+
+    def run(argv, *, on_spawn=None, **kwargs):
+        if on_spawn is None:
+            return runner(argv, **kwargs)
         on_spawn()
         if before_exit:
             before_exit(argv, kwargs)

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal, TypeGuard
 
 
+CHECK_NAMES = ("receipt", "clock", "links", "quotes")
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 TERMINAL_STATUSES = (
     "succeeded", "skipped", "failed", "timeout", "interrupted",
@@ -49,12 +50,36 @@ class AuditResult:
     findings: list[Finding]
     reason: str | None = None
 
-    def to_json(self) -> str:
+    def to_payload(self) -> dict:
         payload = asdict(self)
         for finding in payload["findings"]:
             if finding["resolved_target"] is None:
                 del finding["resolved_target"]
-        return json.dumps(payload)
+        return payload
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_payload())
+
+    @classmethod
+    def from_payload(cls, payload: object) -> AuditResult:
+        if not isinstance(payload, dict) or payload.keys() != {"status", "findings", "reason"}:
+            raise ValueError("Invalid audit result fields")
+        status, items, reason = payload["status"], payload["findings"], payload["reason"]
+        if (status not in ("checked", "unchecked", "error") or not isinstance(items, list)
+                or (reason is not None and not isinstance(reason, str))
+                or (status != "checked" and not reason)):
+            raise ValueError("Invalid audit result values")
+        findings = []
+        required = {"file", "line", "code", "detail", "origin"}
+        for item in items:
+            if (not isinstance(item, dict) or not required <= item.keys() <= required | {"resolved_target"}
+                    or not all(isinstance(item[key], str) for key in ("file", "code", "detail"))
+                    or type(item["line"]) is not int or item["line"] < 1
+                    or item["origin"] not in ("new", "preexisting", "unknown")
+                    or ("resolved_target" in item and not isinstance(item["resolved_target"], str))):
+                raise ValueError("Invalid audit finding")
+            findings.append(Finding(**item))
+        return cls(status, findings, reason)
 
     @property
     def exit_code(self) -> int:
@@ -70,6 +95,63 @@ class AuditConfig:
     link_roots: list[Path]
     quote_sources: dict[str, list[Path]]
     receipt_only: bool = False
+
+    def to_payload(self) -> dict:
+        return {
+            "root": str(self.root),
+            "scan_roots": [str(path) for path in self.scan_roots],
+            "link_roots": [str(path) for path in self.link_roots],
+            "quote_sources": {target: [str(path) for path in paths] for target, paths in self.quote_sources.items()},
+            "receipt_only": self.receipt_only,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> AuditConfig:
+        if not isinstance(payload, dict) or payload.keys() != {
+            "root", "scan_roots", "link_roots", "quote_sources", "receipt_only",
+        }:
+            raise ValueError("Invalid audit configuration fields")
+        root, scan_roots, link_roots = payload["root"], payload["scan_roots"], payload["link_roots"]
+        quote_sources, receipt_only = payload["quote_sources"], payload["receipt_only"]
+        if (not _is_path_list([root]) or not Path(root).is_absolute()
+                or not _is_path_list(scan_roots) or not _is_path_list(link_roots)
+                or not isinstance(quote_sources, dict)
+                or not all(isinstance(target, str) and _is_path_list(paths)
+                           for target, paths in quote_sources.items())
+                or not isinstance(receipt_only, bool) or (receipt_only and scan_roots)):
+            raise ValueError("Invalid audit configuration values")
+        return cls(
+            Path(root), list(map(Path, scan_roots)), list(map(Path, link_roots)),
+            {target: list(map(Path, paths)) for target, paths in quote_sources.items()}, receipt_only,
+        )
+
+
+@dataclass(frozen=True)
+class AuditBaseline:
+    markdown: dict[Path, str] | None
+    links: AuditResult | None
+
+    def to_payload(self) -> dict:
+        return {
+            "markdown": None if self.markdown is None else {str(path): text for path, text in self.markdown.items()},
+            "links": None if self.links is None else self.links.to_payload(),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> AuditBaseline:
+        if not isinstance(payload, dict) or payload.keys() != {"markdown", "links"}:
+            raise ValueError("Invalid audit baseline fields")
+        markdown, links = payload["markdown"], payload["links"]
+        if markdown is not None and (
+            not isinstance(markdown, dict)
+            or not all(_is_path_list([path]) and Path(path).is_absolute() and isinstance(text, str)
+                       for path, text in markdown.items())
+        ):
+            raise ValueError("Invalid audit baseline Markdown")
+        return cls(
+            None if markdown is None else {Path(path): text for path, text in markdown.items()},
+            None if links is None else AuditResult.from_payload(links),
+        )
 
 
 def _read_receipt(path: Path) -> Mapping[str, object] | None:
@@ -248,6 +330,101 @@ def classify_findings(
     return findings
 
 
+def _check(operation: Callable[[], AuditResult]) -> AuditResult:
+    try:
+        return operation()
+    except Exception as exc:
+        return AuditResult("error", [], f"Audit check failed ({type(exc).__name__})")
+
+
+def capture_baseline(config: AuditConfig) -> AuditBaseline:
+    """Capture the configured Markdown and observe link existence before the beat."""
+    from . import link_check
+
+    if config.receipt_only:
+        # The completed receipt will identify which paths were actually new.
+        return AuditBaseline(None, None)
+    try:
+        markdown = snapshot_markdown(config.root, config.scan_roots)
+    except (OSError, ValueError):
+        return AuditBaseline(None, None)
+    links = _check(lambda: link_check.scan(config.root, markdown, config.link_roots)) if config.link_roots else None
+    return AuditBaseline(markdown, links)
+
+
+def _mark_unchecked(result: AuditResult, reason: str) -> AuditResult:
+    if result.status == "error":
+        return result
+    if result.reason:
+        reason = f"{result.reason}. {reason}"
+    return replace(result, status="unchecked", reason=reason)
+
+
+def run_checks(config: AuditConfig, baseline: AuditBaseline, receipt: dict) -> dict[str, AuditResult]:
+    """Run independent read-only checks against the finished attempt's evidence."""
+    from . import dateline_audit, link_check, quote_check, receipt_audit
+
+    after, reason = audit_snapshot(config, receipt)
+    if reason:
+        return {name: AuditResult("unchecked", [], reason) for name in CHECK_NAMES}
+
+    window = window_from_receipt(receipt)
+    # audit_snapshot has validated these receipt-only paths and the window.
+    before = {} if config.receipt_only else baseline.markdown
+
+    def links() -> AuditResult:
+        current = link_check.scan(config.root, after, config.link_roots)
+        earlier = baseline.links
+        if config.receipt_only:
+            earlier = link_check.scan(config.root, {}, config.link_roots)
+        result = link_check.compare(current, earlier)
+        if config.link_roots and (earlier is None or earlier.status == "error"
+                                  or any(f.code == link_check.BROKEN and f.origin == "unknown"
+                                         for f in result.findings)):
+            return _mark_unchecked(result, "Link baseline evidence is unavailable")
+        return result
+
+    def quotes() -> AuditResult:
+        result = quote_check.audit(before, after, config.quote_sources)
+        if before is None and config.quote_sources:
+            return _mark_unchecked(result, "Markdown baseline is unavailable")
+        return result
+
+    return {
+        "receipt": _check(lambda: receipt_audit.audit(before, after, window)),
+        "clock": _check(lambda: dateline_audit.audit(before, after, window)),
+        "links": _check(links),
+        "quotes": _check(quotes),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Serve a single worker audit request over a private input file and stdout."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--request", required=True, type=Path)
+    args = parser.parse_args(argv)
+    request = _read_receipt(args.request)
+    try:
+        if request is None:
+            raise ValueError
+        config = AuditConfig.from_payload(request.get("config"))
+        mode = request.get("mode")
+        if mode == "before" and request.keys() == {"mode", "config"}:
+            payload = capture_baseline(config).to_payload()
+        elif mode == "after" and request.keys() == {"mode", "config", "baseline", "receipt"}:
+            baseline = AuditBaseline.from_payload(request["baseline"])
+            receipt = request["receipt"]
+            if not isinstance(receipt, dict):
+                raise ValueError
+            payload = {name: result.to_payload() for name, result in run_checks(config, baseline, receipt).items()}
+        else:
+            raise ValueError
+    except ValueError:
+        parser.error("Invalid audit request")
+    print(json.dumps(payload))
+    return 0
+
+
 def run_audit_cli(
     audit: Callable[..., AuditResult], description: str, argv: list[str] | None = None,
 ) -> int:
@@ -292,3 +469,7 @@ def run_audit_cli(
         for finding in result.findings:
             print(f"{finding.file}:{finding.line}: {finding.code} ({finding.origin}): {finding.detail}")
     return result.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

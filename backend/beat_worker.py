@@ -37,6 +37,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -44,10 +45,10 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal, TypeVar
 from uuid import uuid4
 
-from scripts import beat_launchers
+from scripts import beat_audit, beat_launchers
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ PROJECT_ROOT = Path(os.environ.get("SILL_PROJECT_ROOT", ".")).resolve()
 INTERVAL_SECONDS = int(os.environ.get("SILL_BEAT_INTERVAL_SECONDS", "7200"))  # 2h
 TIMEOUT_SECONDS = int(os.environ.get("SILL_BEAT_TIMEOUT_SECONDS", "1800"))  # 30min
 CLI = "claude"
+AUDIT_BUDGET_SECONDS = 120
 WATCHDOG_SOCKET = os.environ.get("SILL_BEAT_WATCHDOG_SOCKET") or None
 POST_HOOK = os.environ.get("SILL_BEAT_POST_HOOK") or None
 LOG_PATH = Path(
@@ -444,6 +446,7 @@ class AttemptReceipt:
     state_advanced: bool | None = None
     transcript: str | None = None
     new_outputs: list[str] = field(default_factory=list)
+    audits: dict[str, dict] = field(default_factory=dict)
 
 
 def _clock() -> str:
@@ -537,10 +540,10 @@ def _defer_stop_signals() -> Iterator[None]:
 
 
 def _run_beat_subprocess(
-    argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float, lock_fd: int,
+    argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float, lock_fd: int | None = None,
     on_spawn: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run and capture a detached CLI. Stop its process group on interruption."""
+    """Run and capture a child. Stop its process group on interruption or timeout."""
     # A descendant that leaves the group can keep writing after the CLI
     # exits. Regular files let us collect output without waiting for EOF
     # from every inherited descriptor as we would with pipes.
@@ -552,7 +555,8 @@ def _run_beat_subprocess(
         try:
             with _defer_stop_signals():
                 process = subprocess.Popen(
-                    argv, cwd=cwd, env=env, start_new_session=True, pass_fds=(lock_fd,),
+                    argv, cwd=cwd, env=env, start_new_session=True,
+                    pass_fds=() if lock_fd is None else (lock_fd,),
                     stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                 )
                 if on_spawn is not None:
@@ -569,6 +573,110 @@ def _run_beat_subprocess(
                     pass
                 process.wait()
             raise
+
+
+_AuditResponse = TypeVar("_AuditResponse")
+
+
+class _AuditRequestError(Exception):
+    """A helper request could not be run or its result could not be trusted."""
+
+
+@dataclass
+class _AttemptAudits:
+    config: beat_audit.AuditConfig | None = None
+    config_error: str | None = None
+    baseline: beat_audit.AuditBaseline = field(default_factory=lambda: beat_audit.AuditBaseline(None, None))
+    remaining: float = field(default_factory=lambda: AUDIT_BUDGET_SECONDS)
+
+    def _request(
+        self, mode: str, decode: Callable[[object], _AuditResponse], **fields: object,
+    ) -> _AuditResponse:
+        start = time.monotonic()
+        try:
+            if self.remaining <= 0:
+                raise _AuditRequestError("Attempt audit budget exhausted")
+            request = {"mode": mode, "config": self.config.to_payload(), **fields}
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="sill-beat-audit-") as file:
+                json.dump(request, file)
+                file.flush()
+                timeout = self.remaining - (time.monotonic() - start)
+                if timeout <= 0:
+                    raise _AuditRequestError("Attempt audit budget exhausted")
+                result = _run_beat_subprocess(
+                    [sys.executable, "-m", "scripts.beat_audit", "--request", file.name],
+                    cwd=Path(__file__).resolve().parent, env=os.environ.copy(), timeout=timeout,
+                )
+            if result.returncode:
+                raise _AuditRequestError(f"Audit helper failed (exit {result.returncode})")
+            try:
+                return decode(json.loads(result.stdout))
+            except (ValueError, RecursionError) as exc:
+                raise _AuditRequestError("Audit helper returned invalid JSON results") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise _AuditRequestError("Audit helper timed out") from exc
+        except (OSError, ValueError, NotImplementedError) as exc:
+            raise _AuditRequestError(f"Audit helper could not run ({type(exc).__name__})") from exc
+        finally:
+            self.remaining -= time.monotonic() - start
+
+    def capture(self, config_path: Path, voice: str) -> None:
+        try:
+            self.config = beat_audit.load_audit_config(config_path, PROJECT_ROOT)
+        except FileNotFoundError as exc:
+            if os.environ.get("SILL_BEAT_CONFIG"):
+                self.config_error = f"Audit configuration is unavailable: {exc}"
+            else:
+                self.config = beat_audit.AuditConfig(PROJECT_ROOT, [], [], {}, receipt_only=True)
+        except (OSError, ValueError, RecursionError) as exc:
+            self.config_error = f"Audit configuration is unavailable: {exc}"
+        if self.config is None or self.config.receipt_only or not self.config.scan_roots:
+            return
+
+        try:
+            self.baseline = self._request("before", beat_audit.AuditBaseline.from_payload)
+        except _AuditRequestError as exc:
+            logger.warning("[%s] [audit baseline] error — %s", voice, exc)
+        else:
+            if self.baseline.markdown is None:
+                logger.warning("[%s] [audit baseline] unchecked — configured Markdown could not be read", voice)
+            if self.baseline.links is not None and self.baseline.links.status == "error":
+                logger.warning("[%s] [audit baseline] error — %s", voice, self.baseline.links.reason)
+
+    def finish(self, receipt: AttemptReceipt) -> dict[str, beat_audit.AuditResult]:
+        if self.config is None:
+            return _audit_status("unchecked", self.config_error or "Audit configuration is unavailable")
+        if self.config.receipt_only and not receipt.new_outputs:
+            return _audit_status("unchecked", "No Markdown files listed in new_outputs")
+        try:
+            return self._request(
+                "after", _decode_audit_results, baseline=self.baseline.to_payload(), receipt=asdict(receipt),
+            )
+        except _AuditRequestError as exc:
+            return _audit_status("error", str(exc))
+
+
+def _decode_audit_results(payload: object) -> dict[str, beat_audit.AuditResult]:
+    if not isinstance(payload, dict) or payload.keys() != set(beat_audit.CHECK_NAMES):
+        raise ValueError("Expected one result for each audit")
+    return {name: beat_audit.AuditResult.from_payload(payload[name]) for name in beat_audit.CHECK_NAMES}
+
+
+def _audit_status(status: Literal["unchecked", "error"], reason: str) -> dict[str, beat_audit.AuditResult]:
+    return {name: beat_audit.AuditResult(status, [], reason) for name in beat_audit.CHECK_NAMES}
+
+
+def _attach_audits(
+    path: Path, receipt: AttemptReceipt, results: dict[str, beat_audit.AuditResult],
+) -> None:
+    with _defer_stop_signals():
+        receipt.audits = {name: result.to_payload() for name, result in results.items()}
+        _save_receipt(path, receipt)
+    for name, result in results.items():
+        new = sum(finding.origin == "new" for finding in result.findings)
+        log = logger.info if result.status == "checked" else logger.warning
+        log("[%s] [audit %s] %s — %d finding(s), %d new%s", receipt.voice, name,
+            result.status, len(result.findings), new, f"; {result.reason}" if result.reason else "")
 
 
 def spawn_beat(voice: Voice, voices: list[Voice]) -> tuple[bool, float, str]:
@@ -592,6 +700,7 @@ def spawn_beat(voice: Voice, voices: list[Voice]) -> tuple[bool, float, str]:
 
 def _run_attempt(
     voice: Voice, voices: list[Voice], receipt: AttemptReceipt, receipt_path: Path, lock_fd: int,
+    audits: _AttemptAudits, config_path: Path,
 ) -> None:
     before = None
     start = None
@@ -605,12 +714,13 @@ def _run_attempt(
         prompt_path = PROJECT_ROOT / voice.prompt
         standing_prompt = prompt_path.read_text(encoding="utf-8")
         prompt = f"{standing_prompt}\n\n---\n\n{voice.kickoff}\n"
-        before = snapshot_outputs(PROJECT_ROOT, voice.output_glob) if voice.output_glob else None
         env = _child_env(voice, voices, receipt)
         cli = voice.cli or ((env.get("SILL_BEAT_CLI") or CLI) if voice.launcher == "claude" else "codex")
         argv = beat_launchers.command(voice.launcher, cli, voice.model, receipt.attempt_id, PROJECT_ROOT, prompt)
         if WATCHDOG_SOCKET:
             _wedge_probe(WATCHDOG_SOCKET)
+        audits.capture(config_path, voice.name)
+        before = snapshot_outputs(PROJECT_ROOT, voice.output_glob) if voice.output_glob else None
         start = time.monotonic()
         result = _run_beat_subprocess(
             argv, cwd=PROJECT_ROOT, env=env, timeout=TIMEOUT_SECONDS, lock_fd=lock_fd, on_spawn=mark_spawned,
@@ -679,6 +789,8 @@ def _finish_attempt(
         return _save_receipt(path, receipt) and receipt.status == "succeeded"
 
     if not _save_receipt(path, receipt):
+        receipt.status = "state_error"
+        receipt.state_advanced = False
         return False
     state_path, index = rotation
     try:
@@ -698,6 +810,7 @@ def _finish_attempt(
 
 def _spawn_beat_locked(
     voice: Voice, voices: list[Voice], *, lock_fd: int, rotation: tuple[Path, int] | None = None,
+    config_path: Path | None = None,
 ) -> tuple[bool, float, str]:
     attempt_id = str(uuid4())
     receipt = AttemptReceipt(
@@ -712,24 +825,39 @@ def _spawn_beat_locked(
         logger.error("[%s] Could not create receipt directory %s: %s", voice.name, receipt_path.parent, exc)
         return False, 0.0, ""
     persisted = finalized = False
+    audit_started = False
+    audits = _AttemptAudits()
     try:
         with _defer_stop_signals():
             persisted = _save_receipt(receipt_path, receipt)
         if not persisted:
             return False, 0.0, ""
-        _run_attempt(voice, voices, receipt, receipt_path, lock_fd)
+        _run_attempt(voice, voices, receipt, receipt_path, lock_fd, audits, config_path or _config_path())
         # A stop signal during the terminal writes must not interrupt the
         # transition between the receipt and its rotation witness.
         with _defer_stop_signals():
             success = _finish_attempt(receipt, receipt_path, rotation, len(voices))
             finalized = True
+
+        if receipt.spawned_at is not None:
+            audit_started = True
+            results = audits.finish(receipt)
+            _attach_audits(receipt_path, receipt, results)
     except KeyboardInterrupt:
-        if persisted and not finalized:
-            receipt.status = "interrupted"
-            receipt.completed_at = receipt.completed_at or _clock()
-            receipt.duration_seconds = receipt.duration_seconds or 0.0
-            receipt.state_advanced = False
-            _save_receipt(receipt_path, receipt)
+        if persisted:
+            if not finalized:
+                receipt.status = "interrupted"
+                receipt.completed_at = receipt.completed_at or _clock()
+                receipt.duration_seconds = receipt.duration_seconds or 0.0
+                receipt.state_advanced = False
+            if receipt.spawned_at is not None and not receipt.audits:
+                results = (
+                    _audit_status("error", "Audit was interrupted") if audit_started
+                    else _audit_status("unchecked", "Attempt was interrupted before diagnostics")
+                )
+                _attach_audits(receipt_path, receipt, results)
+            elif not finalized:
+                _save_receipt(receipt_path, receipt)
         raise
 
     duration = receipt.duration_seconds or 0.0
@@ -779,7 +907,7 @@ def run_beat_loop(*, once: bool = False) -> int:
                 voice = voices[index]
 
                 success, _duration, _transcript = _spawn_beat_locked(
-                    voice, voices, lock_fd=lock_fd, rotation=(state_path, index),
+                    voice, voices, lock_fd=lock_fd, rotation=(state_path, index), config_path=config_path,
                 )
                 if success and POST_HOOK:
                     _run_post_hook(POST_HOOK)

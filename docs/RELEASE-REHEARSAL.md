@@ -20,6 +20,21 @@ Publication is pending. The v0.2.0 rehearsal below remains a historical record.
   tools in those clients.
 - Data-bearing fixtures from the actual `v0.1.0` and `v0.2.0` tags are
   ready for the candidate upgrade and restore checks.
+- On macOS with Python 3.12, the installed `sill-worker --mode beat --once`
+  ran against a throwaway project, rotation file, and shell CLI stub. A
+  hanging stub exited through the worker timeout with code 1. Its process
+  group produced no delayed marker, the rotation file retained its exact
+  bytes, and the receipt recorded the new Markdown and audit results.
+  A concurrent invocation returned 75 and started no second stub.
+  An unavailable selected instance produced an `unchecked` receipt audit
+  and retained an independent `MINT-PENDING` finding. A malformed audit
+  scope produced four `unchecked` results while a successful stub exited
+  0 and committed rotation.
+- Worker tests injected an audit helper crash, timeout, and invalid
+  response after the rotation write. Each produced visible `error` results
+  and kept the committed rotation. The audits ran before the success-only
+  post-hook. Beat scheduling remains opt-in. The foreground worker and
+  its one-shot command are available for manual supervision.
 
 ## Remaining checks
 
@@ -40,9 +55,10 @@ Publication is pending. The v0.2.0 rehearsal below remains a historical record.
   Codex requires a manual app run. Hosted ChatGPT awaits sign-in and a
   tool call through the tunnel. Verify the UUID, speaker and declared
   production after reopening a session.
-- Exercise one bounded beat per Claude and Codex launcher, process cleanup
-  on timeout, worker ownership refusal, automatic recall, guard callbacks
-  and audit behavior when evidence is unavailable or a check fails.
+- Exercise one bounded beat per actual Claude and Codex launcher and
+  observe automatic recall and guard callbacks on their supported paths.
+  The one-shot timeout, ownership refusal and degraded audit checks above
+  used shell stubs and synthetic evidence.
 
 ---
 

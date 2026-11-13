@@ -135,7 +135,7 @@ the rotation on that voice.
 | `SILL_BEAT_LOG_PATH` | `$SILL_LOG_DIR/beat-worker.log` | The worker's own log (separate from any one voice's transcripts). |
 | `SILL_BEAT_CLI` | `claude` | Default Claude Code executable for voices without their own `cli`. Point it at a full path if it is outside the scheduler's `PATH`. |
 | `SILL_BEAT_WATCHDOG_SOCKET` | unset | If set, ping this Unix socket before every spawn and log a warning on failure. Log-only — never blocks or repairs anything. Unset skips the probe entirely. |
-| `SILL_BEAT_POST_HOOK` | unset | A shell command run after a verified beat has advanced rotation. Its outcome is logged separately. |
+| `SILL_BEAT_POST_HOOK` | unset | A command run after a verified beat advances rotation and the worker finishes its audits. Its outcome is logged separately. |
 | `SILL_DETACHED_BEAT` | unset (worker sets it to `1` on every child) | The authoritative headless flag Sill's own hooks gate on — `spontaneous-recall` and `check-corrections` read this to know not to inject recall or advance any interactive-session clock. You don't set this yourself; the worker always does. |
 | `SILL_BEAT_JOURNAL_DIRS` | unset (worker derives and sets it on every child) | Scope for `stored-slot-guard.py`, `tool-type-witness.py`, and `state-language-check.py`'s beat-aware fallback — the directory part of every voice's `output_glob` plus every voice's `transcripts` dir, colon-joined. **You don't set this either.** `spawn_beat()` computes it fresh from your loaded `beats.json` on every spawn; the worker's startup log prints the derived value (`Guard scope (SILL_BEAT_JOURNAL_DIRS for each child): ...`) so you can see exactly what it resolved to. |
 
@@ -259,7 +259,12 @@ identifies the committed transition.
 
 ## Audit scope and results
 
-The optional `audits` object in `beats.json` configures Markdown checks.
+The optional `audits` object in `beats.json` configures four read-only
+checks. The completed attempt receipt records their results under
+`audits` as `receipt` for stored memory receipts, `clock` for leading
+datelines, `links` for local targets, and `quotes` for quotations with
+mapped sources. The worker log summarizes each check's status and finding
+counts.
 
 | Field | Meaning |
 |---|---|
@@ -270,25 +275,46 @@ The optional `audits` object in `beats.json` configures Markdown checks.
 Relative paths are resolved from the project root. `link_roots` and
 `quote_sources` can name external locations explicitly. A scan follows
 the resolved boundaries of its configured roots. When `scan_roots` is
-omitted, receipt-based checks use the attempt's newly created regular
-Markdown files listed in `new_outputs`. Paths that traverse symbolic
-links leave the receipt-only scope `unchecked`. An explicit empty list
-selects no files. Empty or unreadable scope and missing prerequisites
-also make the affected check `unchecked`.
+omitted, checks use the attempt's newly created regular Markdown files
+listed in `new_outputs`. Paths that traverse symbolic links leave the
+receipt-only scope `unchecked`. An explicit empty list selects no files.
+With no `audits` configuration, only the receipt and clock checks have
+the prerequisites to run. Empty or unreadable scope and missing
+prerequisites make the affected check `unchecked`. If
+`SILL_INSTANCE_ENV_FILE` selects an instance, the receipt check uses that
+instance exclusively. A missing or unavailable selected store leaves
+lookup `unchecked` and can still report a `MINT-PENDING` slot.
 
 The receipt window uses `spawned_at` and `completed_at` from a completed
 schema-version-1 attempt. Both timestamps need UTC offsets and the end
 must be at or after the start. A missing or invalid window leaves any
 check that requires it `unchecked`.
 
-Check commands use `--json` to emit a result with `status`, `findings`,
-and `reason`. Each finding includes `file`, `line`, `code`, `detail`, and
-`origin`. Checks with a baseline compare the captured Markdown text and
-count matching defects per check and file. Adding lines above a defect
-preserves its `preexisting` origin. Additional occurrences are `new`.
-Without a baseline, origin is `unknown`.
+The worker captures configured Markdown and observes link existence
+before launching the agent. It checks the same scope after the attempt,
+including when the launcher fails or times out. This can detect a moved
+target in an untouched note. Adding lines above a defect preserves its
+`preexisting` origin. Additional occurrences are `new`. Unavailable
+baseline evidence leaves origin `unknown`. These comparisons describe
+changes observed during the attempt. Concurrent writers to the
+configured roots prevent attribution to the agent.
 
-| Exit code | Result |
+The two audit phases share a 120-second budget that excludes the agent
+CLI run. A helper timeout, crash or invalid response is logged as
+`error`. A failed baseline leaves later comparisons without baseline
+evidence. If the budget is exhausted, checks that cannot run are
+`error`. On Ctrl-C or SIGTERM the worker stops its active child group
+and records unfinished diagnostics without starting another audit.
+Audit findings are diagnostic. The worker commits rotation before its
+post-attempt audit and runs the success-only post-hook afterward.
+The checks read notes, sources and memory rows without changing them.
+
+Standalone check commands use `--json` to emit a result with `status`,
+`findings`, and `reason`. Each finding includes `file`, `line`, `code`,
+`detail`, and `origin`. A broken link can include `resolved_target` when
+the checker establishes its identity.
+
+| Standalone exit code | Result |
 |---|---|
 | `0` | `checked` with no new findings |
 | `1` | `checked` with new findings |
