@@ -56,6 +56,7 @@ CLEAN_CUE_RE = re.compile(r"^\[(\d+:\d{2}:\d{2}(?:[.,]\d{1,3})?)\][ \t]*(.*)$", 
 PAREN_CUE = r"\(\s*(?:(?i:about|around|at|ca\.?|~)\s*)?"
 PAREN_RE = re.compile(PAREN_CUE + r"$")
 SENTENCE_RE = re.compile(
+    r"(?<!(?i:\b(?:e\.g|i\.e)))"
     rf"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
     rf"(?!(?:\[[^\]\n]*\]\s*)+{PAREN_CUE}{STAMP})"
 )
@@ -144,6 +145,8 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
     start = 0
     fence = ""
     quoted = False
+    list_indent = 0
+    list_quoted = False
     for number, line in enumerate(text.splitlines(), 1):
         quote_prefix = BLOCKQUOTE_RE.match(line)
         if quote_prefix:
@@ -154,17 +157,26 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
             if marker and marker[1].startswith(fence) and not marker[2].strip():
                 fence = ""
             continue
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
         heading = HEADING_RE.match(line)
         if lines and (marker or not line.strip() or item or heading or quoted != bool(quote_prefix)):
             yield start, lines
             lines = []
+        if item:
+            list_indent = len(item[0].expandtabs(4))
+            list_quoted = bool(quote_prefix)
+        elif line.strip() and (list_quoted != bool(quote_prefix) or (not lines and indent < list_indent)):
+            # A blank line ends a paragraph, but the next indented paragraph
+            # can still belong to the same list item. Dedent ends the item.
+            list_indent = 0
         if marker and (marker[1].startswith("~") or "`" not in marker[2]):
             fence = marker[1]
         elif heading:
             yield number, [line]
         elif line.strip():
             if not lines:
-                if line.expandtabs(4).startswith("    "):
+                if indent >= list_indent + 4:
                     continue  # Indented code cannot interrupt an open paragraph.
                 start = number
                 quoted = bool(quote_prefix)

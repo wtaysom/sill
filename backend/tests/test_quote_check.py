@@ -348,3 +348,26 @@ def test_quote_ellipsis_requires_matched_words_near_the_cited_time(tmp_path):
     result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
     assert result.status == "checked"
     assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+@pytest.mark.parametrize("abbreviation", ["e.g.", "i.e."])
+def test_quote_keeps_a_same_sentence_timestamp_before_an_abbreviation(tmp_path, abbreviation):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    note = f'At 00:00:10 the speaker explains, {abbreviation} that “the sky is clear” [Talk](src).'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+def test_quote_checks_later_list_paragraph_but_skips_code_indented_inside_item(tmp_path):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    note = (
+        '1. Context for the citation.\n\n'
+        '    “The sky is cloudy” [Talk](src)\n\n'
+        '       “An indented code example” [Talk](src)\n\n'
+        'Back to ordinary prose.\n\n'
+        '    “Another indented code example” [Talk](src)\n'
+    )
+    result = quote_check.audit({}, {NOTE: note}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(3, "text_mismatch", "new")]
