@@ -627,6 +627,9 @@ class CognitiveMemory:
         - New rows receive the legacy raw-batch subtype defaults; reused rows stay unchanged.
         - Graph nodes are created to keep AGE state consistent.
         - Embedding dimension must match the DB typmod.
+        - After prompt activation, embedding_profile must be the active immutable
+          fingerprint and vectors must use its document prefix/normalization.
+          Legacy omitted fingerprints remain accepted only in raw mode.
         """
         if len(contents) != len(embeddings):
             raise ValueError("contents and embeddings must have same length")

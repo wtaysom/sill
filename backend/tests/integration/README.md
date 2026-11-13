@@ -39,8 +39,9 @@ The bootstrap can also leave a specifically named new database for inspection;
 it refuses to replace an existing database. The server/container remains under
 the caller's control.
 
-The fixture only substitutes the network-facing `public.get_embedding(text)`
-body. Supersession, subtype, concept, graph and trigger paths run unchanged.
+The ordinary fixture substitutes the network-facing `public.get_embedding(text)`
+body and, after migration 014, its `(text,text)` overload. Profile transition tests
+use their own deterministic local HTTP server and retain the real SQL HTTP paths. Supersession, subtype, concept, graph and trigger paths run unchanged.
 The namespace manifest records the actual public and AGE entry points before and
 after migration; parity tests compare their bodies as well as callable signatures
 and execute both legacy and new overloads under `ag_catalog,public`.

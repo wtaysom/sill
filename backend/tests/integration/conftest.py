@@ -35,6 +35,16 @@ def embedding_stub():
     RETURNS vector LANGUAGE sql AS $$
       SELECT array_fill(0.01::real, ARRAY[public.embedding_dimension()])::vector
     $$;
+    DO $fixture$ BEGIN
+      IF to_regprocedure('public.get_embedding(text,text)') IS NOT NULL THEN
+        EXECUTE $stub$
+          CREATE OR REPLACE FUNCTION public.get_embedding(text_content text,kind text)
+          RETURNS vector LANGUAGE sql AS $body$
+            SELECT array_fill(0.01::real, ARRAY[public.embedding_dimension()])::vector
+          $body$
+        $stub$;
+      END IF;
+    END $fixture$;
     """
 
 
@@ -69,6 +79,9 @@ def migrated_dsn(fixture_dsn):
                     cur.execute(path.read_text())
                     cur.execute("INSERT INTO public.schema_migrations(migration_id,source) VALUES(%s,'pytest')",
                                 (path.name[:3],))
+            # Async integration clients also use migrated_dsn directly. Keep
+            # BOTH overloads on the deterministic boundary after any migration.
+            cur.execute(embedding_stub())
     finally:
         conn.close()
     return fixture_dsn
