@@ -191,8 +191,8 @@ def test_mint_slot_argv_parses_through_the_full_cli_chain(tmp_path, monkeypatch)
     assert cmd[0] == response_patterns.SILL_CLI
 
     def fake_query_db(sql, timeout=60):
-        if "create_memory" in sql:
-            return [["11111111-2222-3333-4444-555555555555"]]
+        if "mint_memory" in sql:
+            return [["11111111-2222-3333-4444-555555555555", "inserted", None]]
         return [["ok"]]
 
     with mock.patch.object(sill, "_query_db", side_effect=fake_query_db):

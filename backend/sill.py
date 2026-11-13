@@ -16,11 +16,18 @@ this module carries the mint path only.
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+import provenance
+from uuid import UUID
+
+from session_identity import mint_context
 
 
 def _load_backend_env() -> None:
@@ -160,7 +167,7 @@ def _source_json(source: str,
     """Build the source_attribution jsonb literal for a memory's origin.
 
     `source` is the address a later reader can actually open — a repo-relative
-    path, or a URI. Without it create_memory() stamps kind='unattributed', and
+    path, or a URI. Without it mint_memory() stamps kind='unattributed', and
     the memory becomes unre-readable: nothing in it says which file to reopen.
     """
     kind = source_kind or ("url" if source.startswith(("http://", "https://")) else "file")
@@ -223,10 +230,14 @@ def notice(content: str, memory_type: str = "semantic",
            speaker: str | None = None,
            source: str | None = None,
            source_kind: str | None = None,
-           source_label: str | None = None) -> str | None:
+           source_label: str | None = None,
+           production: dict | str | None = None,
+           minted_in: dict | None = None,
+           goal: str | UUID | None = None,
+           supersedes: str | UUID | None = None) -> str | None:
     """Store something important. Returns memory ID or None on failure.
 
-    Handles dedup (create_memory does this), concept linking, and logging.
+    Atomically mints the act and its concepts; retries leave the existing act unchanged.
 
     Speech-act tags (migration 001):
       force   — illocutionary force: assertive/directive/commissive/expressive/declaration.
@@ -242,58 +253,70 @@ def notice(content: str, memory_type: str = "semantic",
     """
     if force is not None and force not in VALID_FORCES:
         raise ValueError(f"force must be one of {sorted(VALID_FORCES)} or None, got {force!r}")
-    escaped_content = _escape(content)
+    if memory_type not in {"semantic", "episodic", "procedural", "strategic"}:
+        raise ValueError(f"invalid memory type: {memory_type!r}")
+    goal = str(UUID(str(goal))) if goal is not None else None
+    supersedes = str(UUID(str(supersedes))) if supersedes is not None else None
+    stamp = minted_in if minted_in is not None else mint_context("cli:notice")
+    production = provenance.production_from_value(production, session=stamp.get("session"),
+                     as_=stamp.get("as"), when=stamp.get("when"))
+    production_arg = "NULL" if production is None else "'" + _escape(json.dumps(production)) + "'::jsonb"
+    stamp_arg = "'" + _escape(json.dumps(stamp)) + "'::jsonb"
     source_arg = (f"'{_source_json(source, source_kind, source_label)}'::jsonb"
                   if source else "NULL")
-    # Use the same SQL path as the MCP remember tool: create_memory has dedup
-    # built in.
-    rows = _query_db(f"""
-        SELECT create_memory(
-            '{memory_type}'::memory_type,
-            '{escaped_content}',
-            {importance},
-            {source_arg}
-        )::text;
-    """, timeout=60)
-
-    memory_id = rows[0][0] if rows and rows[0] else None
-    if memory_id is None:
-        # A client-side timeout can outlive a server-side commit — a mint
-        # that times out at the client can still have committed; re-query
-        # before declaring failure, and adopt the row so the patches below
-        # still run instead of orphaning a row that already exists.
-        probe = _query_db(f"""
-            SELECT id::text FROM memories
-            WHERE created_at > NOW() - INTERVAL '5 minutes'
-              AND left(content, 200) = left('{escaped_content}', 200)
-            ORDER BY created_at DESC LIMIT 1;
-        """, timeout=10)
-        memory_id = probe[0][0] if probe and probe[0] else None
-
-    if not memory_id:
+    speaker_arg = f"'{_escape(speaker)}'" if speaker is not None else "NULL"
+    force_arg = f"'{force}'" if force is not None else "NULL"
+    concepts_arg = ("ARRAY[" + ",".join(f"'{_escape(c)}'" for c in concepts) + "]::text[]"
+                    if concepts is not None else "NULL")
+    # One statement owns attribution, subtype, graph, concepts and home. A failed
+    # link rolls back the mint (and predecessor archival for supersession).
+    if supersedes is not None:
+        metadata = {"speaker": speaker, "force": force, "production": production, "minted_in": stamp}
+        if concepts is not None:
+            metadata["concepts"] = [{"name": c} for c in concepts]
+        metadata_arg = "'" + _escape(json.dumps(metadata)) + "'::jsonb"
+        if source:
+            metadata_arg += f" || jsonb_build_object('source_attribution', {source_arg})"
+        mint_sql = f"""SELECT public.supersede_memory(
+            '{supersedes}'::uuid,'{_escape(content)}',NULL,
+            {metadata_arg}) AS memory_id,
+            'inserted'::text AS outcome,NULL::uuid AS restates"""
+    else:
+        mint_sql = f"""SELECT * FROM public.mint_memory(
+            '{memory_type}'::memory_type, '{_escape(content)}', {float(importance)}, {source_arg},
+            p_speaker => {speaker_arg}, p_force => {force_arg}, p_concepts => {concepts_arg},
+            p_production => {production_arg}, p_minted_in => {stamp_arg}
+        )"""
+    if goal is not None:
+        home_lock_sql = ""
+        if supersedes is not None:
+            # A real dependency, not just textual CTE order: the volatile
+            # supersession target is evaluated only for the row produced by
+            # this materialized lock/validation step. Closure uses goal→memory
+            # order too. Ordinary mint reuse must not acquire/change a home.
+            home_lock_sql = f"""home_lock AS MATERIALIZED (
+                SELECT public._lock_open_commitment_home('{goal}'::uuid) AS goal_id
+            ),"""
+            mint_sql += " FROM home_lock WHERE home_lock.goal_id IS NOT NULL"
+        sql = f"""WITH {home_lock_sql} minted AS MATERIALIZED ({mint_sql}),
+            linked AS (
+                INSERT INTO goal_memory_links(memory_id,goal_id,link_type)
+                SELECT memory_id,'{goal}'::uuid,'home' FROM minted WHERE outcome='inserted'
+                RETURNING memory_id
+            )
+            SELECT m.memory_id::text,m.outcome,m.restates::text
+            FROM minted m LEFT JOIN linked l ON l.memory_id=m.memory_id"""
+    else:
+        sql = f"SELECT memory_id::text,outcome,restates::text FROM ({mint_sql}) minted"
+    rows = _query_db(sql, timeout=60)
+    if not rows or not rows[0]:
         return None
-
-    # Speech-act tags: create_memory doesn't set these, so patch them post-insert
-    # (only sets what was given; leaves the other NULL).
-    if (force or speaker) and memory_id:
-        sets = []
-        if force:
-            sets.append(f"force = '{force}'")
-        if speaker:
-            sets.append(f"speaker = '{_escape(speaker)}'")
-        _query_db(f"UPDATE memories SET {', '.join(sets)} WHERE id = '{memory_id}'::uuid;")
-
-    # Link concepts if provided
-    if concepts and memory_id:
-        for concept in concepts:
-            escaped_concept = _escape(concept)
-            _query_db(f"""
-                SELECT link_memory_to_concept(
-                    '{memory_id}'::uuid,
-                    '{escaped_concept}'
-                );
-            """)
-
+    memory_id, outcome, restates = rows[0]
+    logging.getLogger(__name__).info("memory mint id=%s outcome=%s restates=%s", memory_id, outcome, restates)
+    if outcome == "reused":
+        print("Reused existing memory; its attribution, concepts and home are unchanged. Use link_commitment explicitly to add a home.", file=sys.stderr)
+    elif restates:
+        print(f"Restates memory {restates}.", file=sys.stderr)
     return memory_id
 
 
@@ -329,6 +352,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_notice.add_argument("--speaker", required=True,
                           help="Whose act this records (the perspective axis). Required: "
                                "unattributed mints are the store's main hygiene hole.")
+    made = p_notice.add_mutually_exclusive_group()
+    made.add_argument("--made", help="Declared contributors: who [as Voice]: work [@ address] [basis]; compact self requires a supplied session")
+    made.add_argument("--made-json", help="Full typed production JSON object; JSON null leaves production undeclared")
     p_notice.add_argument("--source", default=None,
                           help="Where this came from, as an address a later reader can OPEN: "
                                "the beat file, journal, doc, or URI. Without it the memory is "
@@ -337,6 +363,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Override the inferred kind (file/url). e.g. beat, twitter, book.")
     p_notice.add_argument("--source-label", default=None,
                           help="Human label for the source, e.g. 'journal-042'.")
+    p_notice.add_argument("--goal", type=UUID, metavar="UUID",
+                          help="Home goal for a new commitment. Reused records require explicit link_commitment.")
+    p_notice.add_argument("--supersedes", type=UUID, metavar="UUID",
+                          help="Replace this live memory atomically; the successor keeps its predecessor's type.")
     p_notice.add_argument("--receipt-to", default=None, metavar="FILE",
                           help="Journal file whose literal placeholder line "
                                "('Stored: MINT-PENDING — no receipt yet') the "
@@ -379,7 +409,9 @@ def main(argv: list[str] | None = None) -> int:
                      concepts=concepts, importance=args.importance,
                      force=args.force, speaker=args.speaker,
                      source=args.source, source_kind=args.source_kind,
-                     source_label=args.source_label)
+                     source_label=args.source_label,
+                     goal=args.goal, supersedes=args.supersedes,
+                     production=json.loads(args.made_json) if args.made_json is not None else args.made)
         if mid:
             receipt = format_receipt(mid, concepts, args.speaker, args.force)
             print(receipt)

@@ -138,6 +138,21 @@ def test_each_swept_file_names_the_live_registry(rel, needle):
     assert needle in body, f"{rel} no longer tells the reader where the registry is"
 
 
+@pytest.mark.parametrize("section,registry", [
+    ("Claude Desktop", "~/Library/Application Support/Claude/claude_desktop_config.json"),
+    ("Claude Code", "~/.claude.json"),
+    ("Codex CLI", "${CODEX_HOME:-$HOME/.codex}/config.toml"),
+    ("Desktop local Codex", "${CODEX_HOME:-$HOME/.codex}/config.toml"),
+])
+def test_local_client_routes_name_their_canonical_registry(section, registry):
+    path = REPO_ROOT / "docs" / "desktop-clients.md"
+    assert path.is_file(), "the per-client runbook is missing"
+    body = path.read_text(encoding="utf-8")
+    match = re.search(rf"^## {re.escape(section)}\n(.*?)(?=^## |\Z)", body, re.M | re.S)
+    assert match, f"the runbook has no route for {section}"
+    assert f"`{registry}`" in match[1], f"{section} must point to {registry}"
+
+
 def test_uninstall_help_lists_three_aligned_manual_removal_paths():
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "uninstall.sh"), "--help"],

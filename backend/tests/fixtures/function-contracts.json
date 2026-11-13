@@ -1,0 +1,290 @@
+{
+  "description": "Observed public baseline+001\u2013007 and fresh/upgraded baseline+001\u2013009. Namespaces are measured, not inferred from house migrations. get_embedding body alone is stubbed in fixtures; its identity remains unchanged.",
+  "production_search_path": [
+    "ag_catalog",
+    "public"
+  ],
+  "function_names": [
+    "create_memory",
+    "create_memory_with_embedding",
+    "get_embedding",
+    "safe_get_embedding",
+    "supersede_memory",
+    "record_memory_reuse",
+    "memories_production_guard"
+  ],
+  "v02": [
+    {
+      "namespace": "ag_catalog",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "record_memory_reuse",
+      "arguments": "p_memory_id uuid, p_detector_version text, p_evidence_kind text, p_evidence_text text, p_session_id text, p_metadata jsonb",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "safe_get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text",
+      "result": "uuid",
+      "settings": null
+    }
+  ],
+  "v03_m1": [
+    {
+      "namespace": "ag_catalog",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "ag_catalog",
+      "name": "record_memory_reuse",
+      "arguments": "p_memory_id uuid, p_detector_version text, p_evidence_kind text, p_evidence_text text, p_session_id text, p_metadata jsonb",
+      "result": "void",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "memories_production_guard",
+      "arguments": "",
+      "result": "trigger",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "safe_get_embedding",
+      "arguments": "text_content text",
+      "result": "vector",
+      "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text, p_metadata jsonb",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    }
+  ],
+  "atomic_function_names": [
+    "_mint_memory",
+    "mint_memory",
+    "mint_memory_with_embedding",
+    "mint_memories",
+    "create_memory",
+    "create_memory_with_embedding",
+    "create_episodic_memory",
+    "create_semantic_memory",
+    "create_procedural_memory",
+    "create_strategic_memory",
+    "batch_create_memories",
+    "batch_create_memories_with_embeddings",
+    "supersede_memory"
+  ],
+  "v03_m2": [
+    {
+      "namespace": "ag_catalog",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "_mint_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision, p_embedding vector, p_embedding_profile text, p_supplied_embedding boolean",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "batch_create_memories",
+      "arguments": "p_items jsonb",
+      "result": "uuid[]",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "batch_create_memories_with_embeddings",
+      "arguments": "p_type memory_type, p_contents text[], p_embeddings jsonb, p_importance double precision, p_embedding_profile text",
+      "result": "uuid[]",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_episodic_memory",
+      "arguments": "p_content text, p_action_taken jsonb, p_context jsonb, p_result jsonb, p_emotional_valence double precision, p_event_time timestamp with time zone, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision, p_embedding_profile text",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_procedural_memory",
+      "arguments": "p_content text, p_steps jsonb, p_prerequisites jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_semantic_memory",
+      "arguments": "p_content text, p_confidence double precision, p_category text[], p_related_concepts text[], p_source_references jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "create_strategic_memory",
+      "arguments": "p_content text, p_pattern_description text, p_confidence_score double precision, p_supporting_evidence jsonb, p_context_applicability jsonb, p_importance double precision, p_source_attribution jsonb, p_trust_level double precision",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memories",
+      "arguments": "p_items jsonb",
+      "result": "TABLE(idx integer, memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memory",
+      "arguments": "p_type memory_type, p_content text, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "mint_memory_with_embedding",
+      "arguments": "p_type memory_type, p_content text, p_embedding vector, p_importance double precision, p_source_attribution jsonb, p_speaker text, p_force text, p_minted_in jsonb, p_production jsonb, p_type_metadata jsonb, p_concepts text[], p_trust_level double precision, p_embedding_profile text",
+      "result": "TABLE(memory_id uuid, outcome text, restates uuid)",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    },
+    {
+      "namespace": "public",
+      "name": "supersede_memory",
+      "arguments": "p_old_id uuid, p_new_content text, p_reason text, p_metadata jsonb",
+      "result": "uuid",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
+    }
+  ]
+}

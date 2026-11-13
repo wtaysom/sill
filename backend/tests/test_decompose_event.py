@@ -14,13 +14,13 @@ SPEC = {"event": "test event", "speaker": "Ada", "acts": [
 def test_bundle_wrapped_in_one_transaction():
     sql = de.build_sql(SPEC)
     assert sql.startswith("BEGIN;") and sql.rstrip().endswith("COMMIT;")
-    assert sql.count("create_memory") == 2
+    assert sql.count("public.mint_memory") == 2
 
 
-def test_acts_inherit_spec_speaker_and_patch_force():
+def test_acts_inherit_spec_speaker_and_mint_force():
     sql = de.build_sql(SPEC)
-    assert sql.count("speaker = $sa$Ada$sa$") == 2
-    assert "force = 'assertive'" in sql and "force = 'directive'" in sql
+    assert sql.count("p_speaker => $sa$Ada$sa$") == 2
+    assert "p_force => 'assertive'" in sql and "p_force => 'directive'" in sql
 
 
 def test_dollar_quote_guard_rejects_collision():

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sill-memory"
-version = "0.2.1"
+version = "0.3.0"
 description = "Sill — Postgres-backed persistent memory for AI agents (MCP + workers)."
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -49,6 +49,7 @@ sill-worker = "worker:main"
 [tool.setuptools]
 py-modules = [
   "memory_tools",
+  "embedding_profiles",
   "cognitive_memory_api",
   "prompt_resources",
   "sill",
@@ -56,6 +57,8 @@ py-modules = [
   "sill_mcp_server",
   "instance_config",
   "client_config",
+  "provenance",
+  "session_identity",
   "worker",
   "rabbit_bridge",
   "beat_worker",

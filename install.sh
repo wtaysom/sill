@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
 # install.sh — one-shot Sill installer.
 #
-# Steps:
-#   1.  Preflight: docker / python3 / pipx (or pip+venv) on PATH; docker daemon up.
-#   2.  Install the backend package and console scripts (sill, sill-mcp, sill-worker).
-#   3.  Build Docker images, bring up db + embeddings + rabbitmq + maintenance_worker.
-#   4.  Wait for db + embeddings to become healthy (120s timeout).
-#   5.  Import the methodology seed (unless --no-seed).
-#   6.  Symlink the plugin into ~/.claude/plugins/local/sill-plugin.
-#   7.  Idempotently register the 'sill' MCP server with Claude Code
-#       (`claude mcp add --scope user`, falling back to a direct merge into
-#       ~/.claude.json) and with ~/.codex/config.toml if Codex is installed.
-#   8.  Hook wiring, per --scope (default project):
-#         project — --hooks-for <path> writes idempotent hook configs into
-#                   that project's .claude/settings.local.json and
-#                   .codex/hooks.json. Nothing happens without --hooks-for.
-#         home    — registers hooks user-scope (~/.claude/settings.json,
-#                   ~/.codex/hooks.json) and installs an ambient
-#                   instructions file (~/.claude/CLAUDE.md) so every
-#                   session in every directory carries the Sill
-#                   background. --hooks-for still works alongside it,
-#                   additively, for a project that also wants its own
-#                   project-scoped entries.
-#   9.  Print a "run ./verify.sh" hint.
-#  10.  Final next-steps banner.
+# Installs the backend, starts and checks the local runtime, imports the
+# optional seed, and connects the selected MCP clients. Run it again to
+# reuse the same Compose project and backend/.env.
 #
 # Flags:
 #   --scope home|project   Where hooks are wired (default: project). This is
-#                          a real tradeoff, not a style choice — see step 8
+#                          a real tradeoff, not a style choice — see step 9
 #                          above and docs/extending.md:
 #                            project — narrower blast radius, no
 #                              cross-project mixing, but only the project(s)
@@ -36,7 +16,13 @@
 #                              the recall hook's latency, and any project's
 #                              work can reach the one store; in exchange you
 #                              never re-wire hooks per project again.
-#   --no-seed              Skip step 5.
+#   --embedding-profile raw|embeddinggemma-search-v1
+#                          Fresh store profile (default: raw; reruns preserve it).
+#   --no-seed              Skip the methodology seed.
+#   --client TARGET        Select claude-code, codex, or claude-desktop.
+#                          Repeat to select more than one. If omitted,
+#                          connect the detected Claude Code and Codex CLIs.
+#   --adopt-legacy         Replace an ambiguous bare sill-mcp registration.
 #   --hooks-for <project>  Write per-project hook configs into <project>/.claude
 #                          and <project>/.codex. Applies with --scope project
 #                          (the default); additive, not exclusive, with
@@ -47,17 +33,28 @@
 set -euo pipefail
 
 # --- argparse -----------------------------------------------------------------
+EMBEDDING_PROFILE=raw
 NO_SEED=0
 DRY_RUN=0
 HOOKS_FOR=""
 SCOPE="project"
+ADOPT_LEGACY=0
+CLIENTS=()
 
 usage() {
-  sed -n '2,44p' "$0"
+  sed -n '2,/^$/p' "$0"
 }
 
 while (( $# )); do
   case "$1" in
+    --embedding-profile)
+      [[ $# -ge 2 ]] || { echo "install.sh: --embedding-profile requires a value" >&2; exit 2; }
+      case "$2" in
+        raw|embeddinggemma-search-v1) EMBEDDING_PROFILE="$2" ;;
+        *) echo "install.sh: invalid --embedding-profile (use raw or embeddinggemma-search-v1)" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
     --no-seed)
       NO_SEED=1
       shift
@@ -70,6 +67,19 @@ while (( $# )); do
       [[ $# -ge 2 ]] || { echo "install.sh: --hooks-for requires a path" >&2; exit 2; }
       HOOKS_FOR="$2"
       shift 2
+      ;;
+    --client)
+      [[ $# -ge 2 ]] || { echo "install.sh: --client requires a target" >&2; exit 2; }
+      case "$2" in
+        claude-code|codex|claude-desktop) ;;
+        *) echo "install.sh: unknown client: $2 (use claude-code, codex, or claude-desktop)" >&2; exit 2 ;;
+      esac
+      CLIENTS[${#CLIENTS[@]}]="$2"
+      shift 2
+      ;;
+    --adopt-legacy)
+      ADOPT_LEGACY=1
+      shift
       ;;
     --scope)
       [[ $# -ge 2 ]] || { echo "install.sh: --scope requires a value (home or project)" >&2; exit 2; }
@@ -95,322 +105,108 @@ while (( $# )); do
   esac
 done
 
-# --- helpers ------------------------------------------------------------------
-# BASH_SOURCE, not $0: this resolves correctly whether the script is run
-# directly (the normal case) or sourced (backend/tests/test_install_scope.py
-# sources it to unit-test individual step functions without running the
-# full 10-step pipeline — see that file's docstring and the main guard at
-# the bottom of this file).
-SILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE_FILE="$SILL_DIR/backend/docker-compose.yml"
+# shellcheck source=scripts/install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
 
 say() { printf '\n=== %s ===\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 
-run() {
-  if (( DRY_RUN )); then
-    printf 'DRY: %s\n' "$*"
-  else
-    eval "$@"
-  fi
-}
-
-need_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "install.sh: missing prerequisite: $1" >&2
-    return 1
-  fi
-}
-
-# --- step 1: preflight --------------------------------------------------------
 step_preflight() {
   say "Step 1/10: preflight"
-  local missing=0
-  need_cmd docker || missing=1
-  need_cmd python3 || missing=1
-
-  if command -v pipx >/dev/null 2>&1; then
-    note "pipx available (will use pipx install -e)"
-  else
-    note "pipx not on PATH; will fall back to a venv at ~/.local/share/sill-venv"
-  fi
-
-  if (( missing )); then
-    echo "install.sh: install the missing prerequisites above and re-run." >&2
-    exit 1
-  fi
-
-  if (( DRY_RUN )); then
-    note "DRY: would run 'docker info' to confirm the daemon is up"
-  else
-    if ! docker info >/dev/null 2>&1; then
-      echo "install.sh: docker is installed but the daemon isn't responding. Start Docker Desktop / OrbStack and re-run." >&2
-      exit 1
+  local command
+  for command in docker python3; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+      echo "install.sh: missing prerequisite: $command" >&2
+      return 1
     fi
-    note "docker daemon responding"
+  done
+  if (( ${#CLIENTS[@]} == 0 )); then
+    if command -v claude >/dev/null 2>&1; then CLIENTS[0]=claude-code; fi
+    if command -v codex >/dev/null 2>&1; then CLIENTS[${#CLIENTS[@]}]=codex; fi
   fi
+  sill_select_embeddings
 }
 
-# --- step 2: install backend --------------------------------------------------
 step_install_backend() {
   say "Step 2/10: install backend (sill / sill-mcp / sill-worker)"
-  if command -v pipx >/dev/null 2>&1; then
-    run "pipx install --force -e \"$SILL_DIR/backend\""
-  else
-    local venv="$HOME/.local/share/sill-venv"
-    local localbin="$HOME/.local/bin"
-    run "python3 -m venv \"$venv\""
-    run "\"$venv/bin/pip\" install --upgrade pip"
-    run "\"$venv/bin/pip\" install -e \"$SILL_DIR/backend\""
-    run "mkdir -p \"$localbin\""
-    for bin in sill sill-mcp sill-worker; do
-      run "ln -sfn \"$venv/bin/$bin\" \"$localbin/$bin\""
-    done
-    note "Symlinked sill/sill-mcp/sill-worker into $localbin (ensure it's on your PATH)"
-  fi
+  sill_install_backend
 }
 
-# --- step 3: bring up docker stack --------------------------------------------
-step_docker_up() {
-  say "Step 3/10: build images + start db, embeddings, rabbitmq, maintenance_worker"
-  # docker compose loads `.env` from cwd, not from the directory containing
-  # the compose file — so run from backend/ so the .env there (with any
-  # SILL_DB_CONTAINER / POSTGRES_PORT overrides) is honored.
-  run "(cd \"$SILL_DIR/backend\" && docker compose -f \"$COMPOSE_FILE\" build)"
-  run "(cd \"$SILL_DIR/backend\" && docker compose -f \"$COMPOSE_FILE\" up -d db embeddings rabbitmq maintenance_worker)"
-}
-
-# --- step 4: wait for healthchecks -------------------------------------------
-step_wait_healthy() {
-  # 600s timeout because first boot downloads ~300MB safetensors when
-  # the upstream HF repo has no ONNX files (Candle backend fallback).
-  # Subsequent boots reuse the embeddings_cache volume and are quick.
-  local timeout_s="${SILL_INSTALL_WAIT_HEALTHY_S:-600}"
-  say "Step 4/10: wait for db + embeddings healthchecks (${timeout_s}s)"
+step_prepare_instance() {
   if (( DRY_RUN )); then
-    note "DRY: would poll 'docker compose ps' for 'healthy' on db and embeddings"
-    return 0
+    note "DRY: embedding profile $EMBEDDING_PROFILE (existing active profiles preserved)"
+    note "DRY: would select the Compose instance and create a private $SILL_ENV_FILE if absent"
+    return
   fi
-  local deadline=$(( SECONDS + timeout_s ))
-  local services="db embeddings"
-  while (( SECONDS < deadline )); do
-    local all_healthy=1
-    for svc in $services; do
-      local status
-      status="$(cd "$SILL_DIR/backend" && docker compose -f "$COMPOSE_FILE" ps --format json "$svc" 2>/dev/null | python3 -c '
-import json, sys
-raw = sys.stdin.read().strip()
-if not raw:
-    print("missing"); sys.exit()
-for line in raw.splitlines():
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    print(obj.get("Health") or obj.get("State") or "unknown")
-    break
-' 2>/dev/null || true)"
-      if [[ "$status" != "healthy" ]]; then
-        all_healthy=0
-        note "waiting: $svc is '$status'"
-      fi
-    done
-    if (( all_healthy )); then
-      note "db and embeddings both healthy"
-      return 0
-    fi
-    sleep 5
-  done
-  echo "install.sh: db/embeddings not healthy after ${timeout_s}s. Check 'docker compose -f $COMPOSE_FILE logs'." >&2
-  exit 1
+  local mode=install
+  if (( ${#CLIENTS[@]} )); then mode=persist; fi
+  sill_prepare_instance "$mode"
+  sill_create_env_file
+  if (( ${#CLIENTS[@]} )); then
+    register_clients --dry-run
+  fi
+  if [[ "$EMBEDDING_PROFILE" != raw ]]; then
+    sill_install_profile reserve
+  fi
 }
 
-# --- step 5: import seed ------------------------------------------------------
+step_docker_up() {
+  say "Step 3/10: build images and start db, embeddings, rabbitmq"
+  sill_run sill_compose build
+  sill_start_runtime
+}
+
+step_wait_healthy() {
+  say "Step 4/10: wait for the schema and start the maintenance worker"
+  local timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  if [[ "$EMBEDDING_PROFILE" == raw ]]; then
+    sill_run sill_finish_runtime "$timeout"
+  else
+    sill_run sill_wait_healthy "$timeout" db embeddings rabbitmq
+    sill_run sill_check_running_instance
+    sill_run sill_install_profile activate
+    sill_run sill_start_maintenance "$timeout"
+  fi
+}
+
 step_import_seed() {
   say "Step 5/10: import methodology seed"
   if (( NO_SEED )); then
     note "--no-seed: skipping"
-    return 0
-  fi
-  # Source backend/.env so any POSTGRES_PORT / POSTGRES_USER overrides
-  # reach `sill seed import`. The CLI does not auto-load .env (yet),
-  # so the install script does it for the one-shot import.
-  if [[ -f "$SILL_DIR/backend/.env" ]]; then
-    note "sourcing $SILL_DIR/backend/.env for db creds"
-    # shellcheck disable=SC1091
-    run "set -a && . \"$SILL_DIR/backend/.env\" && set +a && sill seed import \"$SILL_DIR/seed/methodology.jsonl\""
   else
-    run "sill seed import \"$SILL_DIR/seed/methodology.jsonl\""
+    sill_run sill_import_seed
   fi
 }
 
-# --- step 6: plugin symlink ---------------------------------------------------
 step_plugin_symlink() {
   say "Step 6/10: symlink plugin into ~/.claude/plugins/local"
-  run "mkdir -p \"$HOME/.claude/plugins/local\""
-  run "ln -sfn \"$SILL_DIR/plugin\" \"$HOME/.claude/plugins/local/sill-plugin\""
+  sill_run mkdir -p "$HOME/.claude/plugins/local"
+  sill_run ln -sfn "$SILL_DIR/plugin" "$HOME/.claude/plugins/local/sill-plugin"
 }
 
-# --- step 7: MCP wiring -------------------------------------------------------
-# Claude Code's user-scope MCP registry is ~/.claude.json, NOT ~/.claude/.mcp.json.
-# Through v0.1.0 this step wrote the latter, which Claude Code never reads: the
-# installer reported success, and `claude mcp list` then said "No MCP servers
-# configured" with no way to tell from either output that the entry had gone
-# somewhere inert. Found by the v0.2.0 clean-machine acceptance rehearsal
-# (docs/RELEASE-REHEARSAL.md). Preferred path is now the `claude` CLI itself, so
-# the file format stays Claude Code's business rather than this script's; the
-# direct merge below is the fallback for a machine where `claude` isn't on PATH.
-step_mcp_wiring() {
-  say "Step 7/10: idempotently wire 'sill' MCP server"
-  local claude_mcp="$HOME/.claude.json"
+register_clients() {
+  local cli mcp target
+  if (( ${#CLIENTS[@]} == 0 )); then
+    note "No agent CLI detected. Use --client to select a client explicitly."
+    return
+  fi
   if (( DRY_RUN )); then
-    if command -v claude >/dev/null 2>&1; then
-      note "DRY: would run 'claude mcp add --scope user sill -- sill-mcp'"
-    else
-      note "DRY: would merge mcpServers.sill = {command: 'sill-mcp'} into $claude_mcp"
-    fi
-  elif command -v claude >/dev/null 2>&1; then
-    # `claude mcp add` is idempotent by its own report ("already exists"), so a
-    # re-run is safe; it writes wherever this Claude Code version keeps user
-    # scope, which is the point of delegating to it.
-    if out="$(claude mcp add --scope user sill -- sill-mcp 2>&1)"; then
-      printf '  %s\n' "$out"
-    else
-      printf '  %s\n' "$out"
-      note "  'claude mcp add' failed; add it by hand: claude mcp add --scope user sill -- sill-mcp"
-    fi
-  else
-    note "claude CLI not on PATH; merging directly into $claude_mcp"
-    python3 - "$claude_mcp" <<'PY'
-import json, sys, pathlib
-path = pathlib.Path(sys.argv[1])
-data = {}
-if path.exists():
-    try:
-        data = json.loads(path.read_text() or "{}")
-    except json.JSONDecodeError:
-        # Don't clobber a hand-edited file we can't parse.
-        print(f"install.sh: {path} isn't valid JSON; leave it alone. Manually add:")
-        print('  "sill": {"type": "stdio", "command": "sill-mcp", "args": [], "env": {}}')
-        sys.exit(0)
-servers = data.setdefault("mcpServers", {})
-if "sill" in servers:
-    print(f"  mcpServers.sill already present in {path}; leaving as-is")
-else:
-    servers["sill"] = {"type": "stdio", "command": "sill-mcp", "args": [], "env": {}}
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    print(f"  added mcpServers.sill -> {path}")
-PY
+    for target in "${CLIENTS[@]}"; do
+      note "DRY: would connect $target to $SILL_ENV_FILE"
+    done
+    return
   fi
-
-  if command -v codex >/dev/null 2>&1; then
-    local codex_cfg="$HOME/.codex/config.toml"
-    if (( DRY_RUN )); then
-      note "DRY: would add [mcp_servers.sill] + [features].hooks=true to $codex_cfg"
-    else
-      mkdir -p "$HOME/.codex"
-      python3 - "$codex_cfg" <<'PY'
-import pathlib, sys, re
-path = pathlib.Path(sys.argv[1])
-text = path.read_text() if path.exists() else ""
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # 3.10, this project's floor — validation is a bonus
-    tomllib = None
-
-MANUAL = (
-    '  [mcp_servers.sill]\n'
-    '  command = "sill-mcp"\n'
-    '  # ...and hooks = true inside the existing [features] section'
-)
-
-# Don't merge into a file we can't parse: it's the operator's, it may hold
-# their whole Codex setup, and edits layered onto existing breakage only make
-# the breakage harder to attribute. Mirrors the ~/.claude.json fallback above.
-if tomllib is not None and text.strip():
-    try:
-        tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        print(f"install.sh: {path} isn't valid TOML ({exc}); leaving it alone. Add by hand:")
-        print(MANUAL)
-        sys.exit(0)
-
-def has_section(body: str, header: str) -> bool:
-    pat = rf"(?ms)^\s*\[{re.escape(header)}\]\s*$"
-    return re.search(pat, body) is not None
-
-def has_key_in_section(body: str, header: str, key: str) -> bool:
-    pat = rf"(?ms)^\s*\[{re.escape(header)}\]\s*$(?P<body>.*?)(?=^\s*\[|\Z)"
-    m = re.search(pat, body)
-    if not m:
-        return False
-    return re.search(rf"(?m)^\s*{re.escape(key)}\s*=", m.group("body")) is not None
-
-def insert_key_into_section(body: str, header: str, line: str) -> str:
-    """Put `line` directly beneath the existing [header] table header.
-
-    TOML forbids declaring a table twice, so a config that already carries a
-    [features] section cannot be extended by *appending* a second [features]
-    block — the result is a file Codex refuses to parse, which doesn't
-    degrade Codex, it stops it. Extend the section that is already there.
-    """
-    pat = rf"(?m)^([ \t]*\[{re.escape(header)}\][ \t]*)$"
-    return re.sub(pat, lambda m: m.group(1) + "\n" + line, body, count=1)
-
-additions: list[str] = []
-updated = text
-if not has_section(updated, "mcp_servers.sill"):
-    additions.append('[mcp_servers.sill]\ncommand = "sill-mcp"\n')
-if has_section(updated, "features"):
-    if not has_key_in_section(updated, "features", "hooks"):
-        updated = insert_key_into_section(updated, "features", "hooks = true")
-else:
-    additions.append("[features]\nhooks = true\n")
-
-if additions:
-    if updated and not updated.endswith("\n"):
-        updated += "\n"
-    updated += "\n" + "\n".join(additions)
-
-if updated == text:
-    print(f"  {path} already has sill MCP + features.hooks")
-    sys.exit(0)
-
-# Backstop for a section layout the regexes above read wrongly (a header with
-# a trailing comment, say). Warn and change nothing rather than hand Codex a
-# config it cannot read — but say so out loud, because a step that reports
-# success while wiring nothing is the exact failure this release fixed.
-if tomllib is not None:
-    try:
-        tomllib.loads(updated)
-    except tomllib.TOMLDecodeError as exc:
-        print(f"install.sh: NOT writing {path} — the merge would produce invalid TOML ({exc}).")
-        print("  Your config is unchanged and Codex is NOT wired. Add by hand:")
-        print(MANUAL)
-        sys.exit(0)
-
-path.write_text(updated)
-print(f"  updated {path}")
-PY
-    fi
-  else
-    note "codex CLI not detected; skipping ~/.codex/config.toml wiring"
-  fi
+  cli="$(sill_bin sill)" || return 1
+  mcp="$(sill_bin sill-mcp)" || return 1
+  if (( ADOPT_LEGACY )); then set -- "$@" --adopt-legacy; fi
+  for target in "${CLIENTS[@]}"; do
+    "$cli" connect "$target" --env-file "$SILL_ENV_FILE" --mcp-command "$mcp" "$@" || return 1
+  done
 }
 
-# Resolve the interpreter that has the backend deps (psycopg2, asyncpg, …)
-# installed, so hook commands run under it instead of a bare system python3 that
-# can't import them. Mirrors how step 2 installs the backend: pipx venv first,
-# then the ~/.local/share/sill-venv fallback, then a last-resort bare python3.
-sill_python() {
-  if command -v pipx >/dev/null 2>&1; then
-    local cand="${PIPX_HOME:-$HOME/.local/pipx}/venvs/sill-memory/bin/python"
-    [[ -x "$cand" ]] && { printf '%s' "$cand"; return; }
-  fi
-  local venv_py="$HOME/.local/share/sill-venv/bin/python"
-  [[ -x "$venv_py" ]] && { printf '%s' "$venv_py"; return; }
-  printf 'python3'
+step_mcp_wiring() {
+  say "Step 8/10: register Sill with the selected clients"
+  register_clients
 }
 
 # Render Codex hooks.json at $2 from template $1, skipping (with a note) if
@@ -420,71 +216,16 @@ sill_python() {
 # --scope project (per-project .codex/hooks.json) and --scope home
 # (~/.codex/hooks.json).
 _render_codex_hooks() {
-  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4"
-  if (( DRY_RUN )); then
-    note "DRY: would render $template -> $dst with SILL_PLUGIN_DIR=$plugin_dir SILL_PYTHON=$sill_py"
-    return 0
-  fi
-  mkdir -p "$(dirname "$dst")"
-  if [[ -f "$dst" ]]; then
-    note "  $dst already exists; leaving as-is (see ./upgrade.sh --hooks-for to refresh)"
-    return 0
-  fi
-  python3 - "$template" "$dst" "$plugin_dir" "$sill_py" <<'PY'
-import pathlib, sys
-src, dst, plugin, py = sys.argv[1:5]
-text = (pathlib.Path(src).read_text()
-        .replace("{{SILL_PLUGIN_DIR}}", plugin)
-        .replace("{{SILL_PYTHON}}", py))
-pathlib.Path(dst).write_text(text)
-print(f"  wrote {dst}")
-PY
+  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4" flags=()
+  if [[ -f "$dst" ]]; then note "$dst already exists; leaving as-is (see ./upgrade.sh --hooks-for to refresh)"; return; fi
+  if (( DRY_RUN )); then flags[0]=--dry-run; fi
+  python3 "$SILL_DIR/scripts/install_hooks.py" "$template" "$dst" "$plugin_dir" "$sill_py" "$SILL_ENV_FILE" --codex ${flags[@]+"${flags[@]}"}
 }
 
-# Idempotently merge the template's hooks block into a Claude Code hooks
-# JSON file. Both destinations this installer writes share the same
-# top-level {"hooks": {...}} shape: <project>/.claude/settings.local.json
-# (project scope) and ~/.claude/settings.json (home scope — Claude Code's
-# own "globally" location; see docs/extending.md's "Adding your own hooks"
-# section, and this repo's own live ~/.claude/settings.json, which already
-# carries unrelated hooks under the same key).
 _merge_claude_hooks() {
-  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4"
-  if (( DRY_RUN )); then
-    note "DRY: would idempotently merge hooks block into $dst"
-    return 0
-  fi
-  mkdir -p "$(dirname "$dst")"
-  python3 - "$template" "$dst" "$plugin_dir" "$sill_py" <<'PY'
-import json, pathlib, sys
-template_path, dst_path, plugin, py = sys.argv[1:5]
-template = json.loads(pathlib.Path(template_path).read_text()
-                      .replace("{{SILL_PLUGIN_DIR}}", plugin)
-                      .replace("{{SILL_PYTHON}}", py))
-dst = pathlib.Path(dst_path)
-data = {}
-if dst.exists():
-    try:
-        data = json.loads(dst.read_text() or "{}")
-    except json.JSONDecodeError:
-        print(f"install.sh: {dst} isn't valid JSON; leaving it alone.")
-        sys.exit(0)
-hooks = data.setdefault("hooks", {})
-changed = False
-for event, entries in template.get("hooks", {}).items():
-    existing = hooks.setdefault(event, [])
-    # naive dedup: compare exact JSON repr
-    existing_repr = {json.dumps(e, sort_keys=True) for e in existing}
-    for entry in entries:
-        if json.dumps(entry, sort_keys=True) not in existing_repr:
-            existing.append(entry)
-            changed = True
-if changed:
-    dst.write_text(json.dumps(data, indent=2) + "\n")
-    print(f"  merged sill hooks into {dst}")
-else:
-    print(f"  {dst} already has sill hooks; nothing to do")
-PY
+  local template="$1" dst="$2" plugin_dir="$3" sill_py="$4" flags=()
+  if (( DRY_RUN )); then flags[0]=--dry-run; fi
+  python3 "$SILL_DIR/scripts/install_hooks.py" "$template" "$dst" "$plugin_dir" "$sill_py" "$SILL_ENV_FILE" ${flags[@]+"${flags[@]}"}
 }
 
 # Idempotently append plugin/claude.home.md.template's ambient-instructions
@@ -523,7 +264,7 @@ PY
 
 # --- step 8: hook wiring, per --scope ------------------------------------------
 step_hook_wiring() {
-  say "Step 8/10: hook wiring (scope: $SCOPE)"
+  say "Step 9/10: hook wiring (scope: $SCOPE)"
   local plugin_dir="$SILL_DIR/plugin"
   local template="$SILL_DIR/plugin/codex.hooks.json.template"
   local sill_py
@@ -550,28 +291,29 @@ step_hook_wiring() {
   _merge_claude_hooks "$template" "$target/.claude/settings.local.json" "$plugin_dir" "$sill_py"
 }
 
-# --- step 9: verify hint ------------------------------------------------------
-step_verify_hint() {
-  say "Step 9/10: smoke check"
-  note "Run ./verify.sh to confirm the install."
+step_verify() {
+  say "Step 7/10: verify the runtime and MCP handshake"
+  if (( NO_SEED )); then
+    sill_run "$SILL_DIR/verify.sh" --no-seed
+  else
+    sill_run "$SILL_DIR/verify.sh"
+  fi
 }
 
 # --- step 10: banner ----------------------------------------------------------
 step_banner() {
   say "Step 10/10: next steps"
+  if (( DRY_RUN )); then return; fi
   cat <<'EOF'
     Sill is installed.
 
-    Next: turn this working install into somebody's Sill.
-      Read docs/onboarding/README.md — a phased runbook, walked with the
-      person present, ending at a christening: a charter in their own
-      words, a name, a first deliberate memory, a chosen cadence.
+    Restart each connected client, then approve the Sill tool calls if
+    prompted for permission. Follow docs/onboarding/README.md to remember
+    a test preference and recall its UUID in a fresh session.
 
     Optional follow-ups:
-      * Install the episodic-memory marketplace plugin in Claude Code for richer recall.
-      * Restart Claude Code (and/or codex) so the new MCP server is picked up.
-      * Configure SILL_EPISODIC_MEMORY_PATH in your shell if you want the
-        spontaneous-recall hook to inject conversation snippets.
+      * Set an identity and charter, backfill with consent, or schedule beats.
+      * Configure SILL_EPISODIC_MEMORY_PATH for conversation snippets in recall.
 
     To remove everything: ./uninstall.sh
     To wipe the db and re-seed: ./reset.sh
@@ -585,14 +327,16 @@ EOF
 # this file is executed directly (./install.sh or bash install.sh, the only
 # ways a real operator runs it) and false when sourced.
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+  trap sill_cleanup_instance EXIT
   step_preflight
   step_install_backend
+  step_prepare_instance
   step_docker_up
   step_wait_healthy
   step_import_seed
   step_plugin_symlink
+  step_verify
   step_mcp_wiring
   step_hook_wiring
-  step_verify_hint
   step_banner
 fi

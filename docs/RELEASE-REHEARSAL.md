@@ -1,3 +1,51 @@
+# v0.3.0 release candidate
+
+**Status on 2026-11-13.** Package and plugin metadata use `0.3.0`.
+Publication is pending. The v0.2.0 rehearsal below remains a historical record.
+
+## Evidence so far
+
+- After an editable reinstall in an isolated Python 3.12 environment,
+  `sill-mcp --version` reported `sill-mcp 0.3.0`. The installed
+  distribution and plugin metadata both reported `0.3.0`.
+- The pinned native arm64 TEI image served `unsloth/embeddinggemma-300m`
+  at revision `bfa3c846ac738e62aa61806ef9112d34acb1dc5a` with
+  768-dimensional, L2-normalized vectors on Apple Silicon. The amd64 TEI
+  image was exercised under emulation. A native Linux amd64 installation
+  and an Intel Mac installation are unverified.
+- On earlier builds reporting Sill 0.2.1, Claude Code 2.1.296 remembered
+  and recalled across CLI processes. Codex CLI 0.162.1 retrieved the same
+  memory UUID. Claude Desktop 5.11492.2 remembered and recalled in two
+  separate chats at `f3233a5`. These observations cover deliberate memory
+  tools in those clients.
+- Data-bearing fixtures from the actual `v0.1.0` and `v0.2.0` tags are
+  ready for the candidate upgrade and restore checks.
+
+## Remaining checks
+
+- Run the Python 3.10 and 3.12 CI matrix and live database integration
+  against the integrated candidate. Compare fresh and upgraded schemas
+  and exercise their public and AGE functions.
+- Rehearse cold-cache fresh installs and idempotent reruns on macOS arm64
+  and native Linux amd64. Exercise the explicit fresh embedding profile
+  with real services. Confirm the seed, model, active profile, and
+  absence of a beat schedule on rerun. Check the candidate version from
+  the installed command, MCP initialize and the running worker.
+- Run `./upgrade.sh --dry-run` and `./upgrade.sh` on each tagged fixture.
+  Restore each backup to a separate disposable database and check row
+  identity and the AGE graph. Confirm data and configuration survive a
+  second upgrade with zero pending migrations. Check re-embedding
+  interruption and rollback.
+- Repeat the memory round trip on the integrated candidate. Desktop local
+  Codex requires a manual app run. Hosted ChatGPT awaits sign-in and a
+  tool call through the tunnel. Verify the UUID, speaker and declared
+  production after reopening a session.
+- Exercise one bounded beat per Claude and Codex launcher, process cleanup
+  on timeout, worker ownership refusal, automatic recall, guard callbacks
+  and audit behavior when evidence is unavailable or a check fails.
+
+---
+
 # Clean-Machine Acceptance Rehearsal — v0.2.0
 
 **Date:** 2026-08-05
