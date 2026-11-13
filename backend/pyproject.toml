@@ -24,6 +24,7 @@ dependencies = [
   # acceptance rehearsal — see docs/RELEASE-REHEARSAL.md.
   "mcp>=1.0.0,<2",
   "python-dotenv>=1.0.0",
+  "simplejson>=3.19",
   "tomlkit>=0.13.2",
   "tomli>=2.0.1; python_version < '3.11'",
   "requests>=2.31.0",

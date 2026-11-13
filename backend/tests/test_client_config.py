@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,23 @@ def test_json_preserves_unrelated_servers_and_uses_unique_private_backups(
     assert parsed_config(client, config)["mcpServers"]["sill"]["command"] == str(new_command)
     next_backup, = set(config.parent.glob(config.name + ".bak-*")) - backups
     assert next_backup.read_bytes() == current
+
+
+@pytest.mark.parametrize("client", ["claude-code", "claude-desktop"])
+def test_json_registration_preserves_unrelated_numbers_exactly(registration, client):
+    connect, paths, _, _ = registration
+    config = paths[client]
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        '{"mcpServers":{"other":{"command":"other","settings":[9007199254740993.0,1e-999]}}}',
+        encoding="utf-8",
+    )
+
+    result = connect(client)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(config.read_text(encoding="utf-8"), parse_float=Decimal)
+    assert data["mcpServers"]["other"]["settings"] == [Decimal("9007199254740993"), Decimal("1e-999")]
+    assert "sill" in data["mcpServers"]
 
 
 @pytest.mark.parametrize(("client", "body"), [

@@ -431,7 +431,7 @@ def test_the_mint_path_does_not_depend_on_the_worker_being_imported():
 # --- explicit MCP instance selection -----------------------------------------
 
 
-def run_instance_server(tmp_path, monkeypatch, capsys, env_body=None, extra=()):
+def run_instance_server(tmp_path, monkeypatch, capsys, env_body=None, extra=(), attempts=None):
     """Run the MCP entry point with a real SDK initialize and no live database."""
     from inspect import signature
     from io import StringIO
@@ -466,6 +466,8 @@ def run_instance_server(tmp_path, monkeypatch, capsys, env_body=None, extra=()):
             pass
 
     async def capture_connection(dsn):
+        if attempts is not None:
+            attempts.append(dsn)
         parameters = signature(_parse_connect_arguments).parameters
         options = dict.fromkeys(parameters)
         options.update(dsn=dsn, command_timeout=1, statement_cache_size=0,
@@ -588,12 +590,37 @@ def test_explicit_instance_rejects_invalid_settings_without_revealing_values(
     assert "bad%2secret" not in stderr
 
 
+@pytest.mark.parametrize("dsn", [
+    "postgresql://user:secret@[::1]:%31%35%34%33%32/db",
+    "postgresql:///db?host=one.invalid,two.invalid&port=15432,15433,15434",
+    "postgresql://localhost/db?port=15432",
+    "postgresql://localhost/db?host=other.invalid",
+    "postgresql:///db?host=localhost:15432&port=15433",
+])
+def test_dsn_port_mismatches_are_rejected_before_asyncpg_startup(tmp_path, monkeypatch, capsys, dsn):
+    attempts = []
+    status, seen, stderr, env_file = run_instance_server(
+        tmp_path, monkeypatch, capsys, f"SILL_DB_DSN={dsn}\n", attempts=attempts,
+    )
+    assert status != 0
+    assert not attempts
+    assert not seen
+    assert str(env_file) in stderr
+    assert "SILL_DB_DSN" in stderr
+    assert "secret" not in stderr
+
+
 @pytest.mark.parametrize(("dsn", "addresses"), [
     ("postgresql://user:pass@%2Ftmp%2Ffixture%20socket:15432/db",
      ["/tmp/fixture socket/.s.PGSQL.15432"]),
     ("postgresql://user:pass@/db?host=/tmp/fixture%20socket&port=15432",
      ["/tmp/fixture socket/.s.PGSQL.15432"]),
     ("postgresql://user:pass@one.invalid:15432,two.invalid:15433/db",
+     [("one.invalid", 15432), ("two.invalid", 15433)]),
+    ("postgresql://user:pass@[::1]:15432/db", [("::1", 15432)]),
+    ("postgresql:///db?user=user&password=pass&host=one.invalid,two.invalid&port=15432",
+     [("one.invalid", 15432), ("two.invalid", 15432)]),
+    ("postgresql:///db?user=user&password=pass&host=one.invalid,two.invalid&port=15432,15433",
      [("one.invalid", 15432), ("two.invalid", 15433)]),
 ])
 def test_explicit_dsn_preserves_socket_and_multihost_targets(

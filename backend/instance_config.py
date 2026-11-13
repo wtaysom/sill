@@ -73,49 +73,70 @@ def _valid_port(port: str) -> bool:
     return bool(re.fullmatch(r"[0-9]{1,5}", port)) and 1 <= int(port) <= 65535
 
 
-def _validate_targets(target: str, query_ports: str) -> None:
-    for endpoint in target.split(","):
+def _validate_targets(target: str, query_ports: list[str], *, uri_authority: bool) -> None:
+    endpoints = target.split(",")
+    if query_ports:
+        if len(query_ports) not in {1, len(endpoints)}:
+            raise InstanceConfigError("DSN must specify one query port or one port per host")
+        if not all(_valid_port(port) for port in query_ports):
+            raise InstanceConfigError("DSN contains an invalid query port")
+
+    for endpoint in endpoints:
         if endpoint.startswith("/"):
             host, separator, port = endpoint, "", ""
         elif endpoint.startswith("["):
             host, end, suffix = endpoint[1:].partition("]")
             if not end or (suffix and not suffix.startswith(":")):
                 raise ValueError("invalid IPv6 target")
-            ipaddress.IPv6Address(unquote(host))
+            ipaddress.IPv6Address(unquote(host) if uri_authority else host)
             separator, port = suffix[:1], suffix[1:]
         else:
             host, separator, port = endpoint.partition(":")
-        host = unquote(host)
+        if uri_authority:
+            host = unquote(host)
         if not host.strip() or any(ord(char) < 32 for char in host):
             raise ValueError("missing host or socket")
-        if separator and not _valid_port(unquote(port)):
-            raise ValueError("invalid port")
-    if query_ports and not all(_valid_port(port) for port in query_ports.split(",")):
-        raise ValueError("invalid port list")
+        if separator:
+            if query_ports:
+                raise InstanceConfigError("DSN must specify ports in the query host list or in port=")
+            # Asyncpg only recognizes literal digits after a bracketed host.
+            if not _valid_port(port):
+                raise InstanceConfigError("DSN ports must be literal digits from 1 to 65535")
 
 
 def validate_dsn(dsn: str) -> str:
     """Check the URI form without surfacing any credential-bearing text."""
     try:
+        if (
+            not dsn.lower().startswith(("postgresql://", "postgres://"))
+            or "#" in dsn
+            or re.search(r"%(?![0-9a-fA-F]{2})", dsn)
+            or any(char.isspace() or ord(char) < 32 for char in dsn)
+        ):
+            raise ValueError("malformed URI")
         parsed = urlsplit(dsn)
+        if parsed.netloc.count("@") > 1:
+            raise ValueError("malformed authority")
         query = parse_qs(parsed.query, strict_parsing=True) if parsed.query else {}
         authority = parsed.netloc.split("@", 1)[-1]
-        if (
-            dsn.lower().startswith(("postgresql://", "postgres://"))
-            and "#" not in dsn
-            and parsed.netloc.count("@") <= 1
-            and not re.search(r"%(?![0-9a-fA-F]{2})", dsn)
-            and not any(char.isspace() or ord(char) < 32 for char in dsn)
-        ):
-            target = authority or query.get("host", [""])[-1]
-            _validate_targets(target, query.get("port", [""])[-1])
-            return dsn
+        query_hosts = query.get("host", [])
+        query_ports = query.get("port", [])
+        if len(query_hosts) > 1 or len(query_ports) > 1:
+            raise InstanceConfigError("DSN must specify host= and port= at most once each")
+        # Asyncpg ignores query host and port when the URI authority contains
+        # a host. Reject mixed forms before a setting can be silently ignored.
+        if authority and (query_hosts or query_ports):
+            raise InstanceConfigError("DSN must specify the host and port in the authority or the query")
+        target = authority or next(iter(query_hosts), "")
+        ports = query_ports[0].split(",") if query_ports else []
+        _validate_targets(target, ports, uri_authority=bool(authority))
+        return dsn
+    except InstanceConfigError:
+        raise
     except ValueError:
-        pass
-    raise InstanceConfigError(
-        "expected a PostgreSQL URI with an explicit host or socket, valid ports, "
-        "and URL-encoded credentials"
-    )
+        raise InstanceConfigError(
+            "expected a PostgreSQL URI with an explicit host or socket and URL-encoded credentials"
+        ) from None
 
 
 def _postgres_dsn(settings: dict[str, str]) -> str:

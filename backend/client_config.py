@@ -1,14 +1,15 @@
 """Register one local Sill instance while preserving the client registry."""
 
 import fcntl
-import json
 import os
 import stat
 import tempfile
 from collections.abc import MutableMapping
 from contextlib import contextmanager
+from decimal import DecimalException
 from pathlib import Path
 
+import simplejson
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import InlineTable
@@ -53,18 +54,15 @@ def _unique_json_keys(pairs: list[tuple]) -> dict:
     return result
 
 
-def _reject_json_constant(_value: str) -> None:
-    raise ValueError("non-finite JSON number")
-
-
 def _parse_config(body: str, codex: bool) -> tuple[MutableMapping, dict]:
     if codex:
         # The strict parser also catches any changes to the meaning of other
         # keys when tomlkit renders a document with mixed table styles. Keep
         # the literal spelling of floats so valid NaNs compare equal here.
         return tomlkit.parse(body), _toml_values(body)
-    parsed = json.loads(body, object_pairs_hook=_unique_json_keys,
-                        parse_constant=_reject_json_constant)
+    # Decimal preserves fractions and exponents beyond binary float precision.
+    parsed = simplejson.loads(body, object_pairs_hook=_unique_json_keys,
+                              use_decimal=True, allow_nan=False)
     if not isinstance(parsed, dict):
         raise ValueError("expected a JSON object")
     return parsed, parsed
@@ -183,7 +181,7 @@ def _render(path: Path, body: str, client: str, env_file: Path, command: Path,
             raise ValueError("expected a mapping of server objects")
         if any(not isinstance(entry, dict) for entry in entries.values()):
             raise ValueError("expected each server to be an object")
-    except (ValueError, TOMLKitError) as exc:
+    except (ValueError, DecimalException, TOMLKitError) as exc:
         format_name = "TOML" if codex else "JSON"
         raise ClientConfigError(f"{path}: malformed {format_name} or invalid {key} shape") from exc
 
@@ -208,7 +206,7 @@ def _render(path: Path, body: str, client: str, env_file: Path, command: Path,
     entries["sill"] = desired
     try:
         if not codex:
-            rendered = json.dumps(config, indent=2, allow_nan=False) + "\n"
+            rendered = simplejson.dumps(config, indent=2, use_decimal=True, allow_nan=False) + "\n"
             _, rendered_values = _parse_config(rendered, codex)
         elif existing is not None:
             # Update in place so comments and quoted or dotted keys survive.
@@ -231,7 +229,7 @@ def _render(path: Path, body: str, client: str, env_file: Path, command: Path,
         if rendered_values != parsed:
             raise ValueError("the merge changed unrelated settings")
         return rendered
-    except (ValueError, TOMLKitError) as exc:
+    except (ValueError, DecimalException, TOMLKitError) as exc:
         raise ClientConfigError(f"{path}: could not render a valid config while preserving existing settings") from exc
 
 
