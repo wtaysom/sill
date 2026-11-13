@@ -275,7 +275,11 @@ def test_spawn_beat_exports_journal_dirs_derived_from_full_voice_config(tmp_path
 
     captured_env = {}
 
-    def fake_run(cmd, *, on_spawn, **kwargs):
+    runner = bw._run_beat_subprocess
+
+    def fake_run(cmd, *, on_spawn=None, **kwargs):
+        if on_spawn is None:
+            return runner(cmd, **kwargs)
         on_spawn()
         captured_env.update(kwargs.get("env") or {})
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
@@ -323,7 +327,11 @@ def test_spawn_beat_does_not_restrict_the_child_to_project_settings(tmp_path, mo
                      kickoff="Begin.")
     captured_cmd = []
 
-    def fake_run(cmd, *, on_spawn, **kwargs):
+    runner = bw._run_beat_subprocess
+
+    def fake_run(cmd, *, on_spawn=None, **kwargs):
+        if on_spawn is None:
+            return runner(cmd, **kwargs)
         on_spawn()
         captured_cmd.extend(cmd)
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
@@ -364,7 +372,11 @@ def test_spawn_beat_forwards_the_parent_environment_to_the_child(tmp_path, monke
                      kickoff="Begin.")
     captured_env = {}
 
-    def fake_run(cmd, *, on_spawn, **kwargs):
+    runner = bw._run_beat_subprocess
+
+    def fake_run(cmd, *, on_spawn=None, **kwargs):
+        if on_spawn is None:
+            return runner(cmd, **kwargs)
         on_spawn()
         captured_env.update(kwargs.get("env") or {})
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
@@ -502,7 +514,11 @@ def test_run_beat_loop_drives_one_full_iteration(tmp_path, monkeypatch):
     # so what matters is only that the call is reached at all.
     monkeypatch.setattr(bw, "INTERVAL_SECONDS", 300)
 
-    def fake_run(cmd, *, on_spawn, **kwargs):
+    runner = bw._run_beat_subprocess
+
+    def fake_run(cmd, *, on_spawn=None, **kwargs):
+        if on_spawn is None:
+            return runner(cmd, **kwargs)
         on_spawn()
         (tmp_path / "notes").mkdir()
         (tmp_path / "notes" / "analyst-one.md").write_text("beat output")
