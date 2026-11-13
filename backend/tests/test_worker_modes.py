@@ -2,6 +2,7 @@
 
 import importlib
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,17 @@ def test_mcp_tool_description_drops_heartbeat_language():
 def test_cognitive_api_docstring_drops_heartbeat_language():
     text = COGNITIVE_API.read_text()
     assert "heartbeat explore" not in text.lower()
+
+
+def test_once_is_rejected_in_maintenance_mode(monkeypatch, capsys):
+    import worker
+
+    def unexpected_maintenance(mode):
+        pytest.fail(f"worker launched maintenance in mode {mode!r}")
+
+    monkeypatch.setattr(worker, "_amain", unexpected_maintenance)
+    monkeypatch.setattr(sys, "argv", ["sill-worker", "--mode", "maintenance", "--once"])
+    with pytest.raises(SystemExit) as exc:
+        worker.main()
+    assert exc.value.code == 2
+    assert "--once requires --mode beat" in capsys.readouterr().err

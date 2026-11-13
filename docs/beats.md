@@ -107,7 +107,7 @@ mkdir -p notes journal logs/analyst logs/reflector
 |---|---|---|
 | `SILL_BEAT_CONFIG` | `beats.json` at the project root | Voice definitions (see above). |
 | `SILL_BEAT_INTERVAL_SECONDS` | `7200` (2h) | Time between beats. Each voice fires roughly every *N* × interval, *N* = number of voices. |
-| `SILL_BEAT_TIMEOUT_SECONDS` | `1800` (30min) | Wall-clock cap on one beat's subprocess. A beat that hangs past this is killed and logged as skipped — rotation does not advance. |
+| `SILL_BEAT_TIMEOUT_SECONDS` | `1800` (30min) | Elapsed-time cap on one beat's subprocess. On timeout the worker kills the agent CLI's process group, logs the attempt as skipped, and retries the same voice on the next run. |
 | `SILL_BEAT_STATE_PATH` | `$XDG_STATE_HOME/sill/beat-rotation.json`, else `~/.local/state/sill/beat-rotation.json` | Where the rotation index persists. **Never `/tmp`** — the upstream lesson this guards against is a reboot silently clearing `/tmp` and resetting rotation with no record it happened. |
 | `SILL_BEAT_LOG_PATH` | `$SILL_LOG_DIR/beat-worker.log` | The worker's own log (separate from any one voice's transcripts). |
 | `SILL_BEAT_CLI` | `claude` | The agent CLI executable to spawn. Point it at a full path if it isn't on the PATH your scheduler uses. |
@@ -125,26 +125,26 @@ at the mercy of its working directory.
 
 ## Running one beat by hand
 
-**Do this before you schedule anything — see Permissions below for why.**
 From the project root, with `beats.json` and the directories it references
-already in place:
+already in place, run the voice currently due:
+
+```bash
+sill-worker --mode beat --once
+```
+
+The command runs one attempt and exits immediately afterward. Exit status
+`0` means the attempt passed the output check and advanced rotation.
+Exit status `1` means the attempt failed or was interrupted. Exit status
+`75` means another worker owns the rotation state and no agent CLI was
+started.
+
+To supervise the scheduled loop in the foreground, omit `--once`. The
+loop runs the first attempt immediately and uses the configured interval
+for subsequent attempts. Ctrl-C or SIGTERM stops the worker.
 
 ```bash
 SILL_BEAT_INTERVAL_SECONDS=1 sill-worker --mode beat
 ```
-
-`SILL_BEAT_INTERVAL_SECONDS=1` makes the loop fire again almost
-immediately after each beat instead of waiting two hours. Run this in the
-foreground and watch the log lines it prints; once you see the *first*
-beat's outcome (`Beat complete`, or the `produced no file` warning), press
-Ctrl-C — you don't need the loop to keep running, and interrupting an
-in-flight second or third beat is expected, not a failure. (Don't reach
-for GNU `timeout` to bound this instead: it isn't on stock macOS, and this
-repo ships a macOS LaunchAgent template alongside the systemd unit, so
-macOS has to work here without extra installs. If you do have GNU
-coreutils' `timeout` — or `gtimeout` from Homebrew — available and prefer
-it, `timeout 300 sill-worker --mode beat` after the same env var works
-identically.)
 
 Expected output starts with a startup banner naming every voice and the
 derived guard scope, for example:
@@ -178,6 +178,21 @@ prevent — read that section immediately if you see this:
 No `beats.json` at all fails loudly (a Python traceback naming the missing
 path) rather than silently — that's a config problem to fix, not the
 silent-failure mode this doc is about.
+
+## Worker ownership and cleanup
+
+Each resolved rotation state path has one worker owner. The scheduled
+loop holds a lock across attempts and interval sleep. A one-shot worker
+uses the same lock, as do `python -m beat_worker` and calls to
+`spawn_beat()`. Set a distinct `SILL_BEAT_STATE_PATH` for each independent
+installation. Leave the sibling `.lock` file in place across restarts. The
+kernel releases the lock when the last process holding its descriptor
+closes it. The agent CLI inherits the descriptor so it can retain
+ownership if the worker parent is killed.
+
+The worker starts the agent CLI in its own process group. On timeout,
+Ctrl-C or SIGTERM it kills that group and reaps the agent CLI. Processes
+that move to another group fall outside this cleanup.
 
 ## Reading a transcript
 
@@ -324,16 +339,15 @@ warning, if you hit it, shows up inside a beat's own **transcript**
 you're watching live — another reason the transcript is the first place to
 look, not just the worker's own log.
 
-**Verify with the by-hand run above, before installing any schedule:**
+**Verify with the by-hand run above before installing any schedule.**
 
 ```bash
-SILL_BEAT_INTERVAL_SECONDS=1 sill-worker --mode beat
+sill-worker --mode beat --once
 ```
 
-Look for `Beat complete` (verified success), not the `produced no file`
-warning, then Ctrl-C — see "Running one beat by hand" above for why no
-`timeout` wrapper is needed. Only once you've seen a real success line
-should you move on to Scheduling.
+Look for `Beat complete` and exit status `0`. If the worker logs the
+`produced no file` warning, check the permissions and try again before
+moving on to Scheduling.
 
 ---
 

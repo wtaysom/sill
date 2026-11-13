@@ -1,7 +1,6 @@
 """Beat worker: config, state, classification, and the output-verification
-guard. No real subprocess spawning (subprocess.run is monkeypatched where a
-test needs to look at what spawn_beat() would hand the child), no DB, no
-network."""
+guard. Tests stub the agent CLI runner to inspect spawn arguments without
+starting a subprocess, contacting a database, or using the network."""
 
 import json
 import subprocess
@@ -57,6 +56,25 @@ def test_state_roundtrip_and_corruption_tolerance(tmp_path):
     assert bw.read_state(tmp_path / "absent.json") == 0
 
 
+def test_rotation_write_failure_preserves_previous_json(tmp_path, monkeypatch):
+    path = tmp_path / "rotation.json"
+    old = b'{ "next_index": 1 }\n'
+    path.write_bytes(old)
+
+    def fail_replace(source, destination):
+        assert source.parent == path.parent
+        assert source != destination == path
+        assert json.loads(source.read_bytes()) == {"next_index": 0}
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr("os.replace", fail_replace)
+    with pytest.raises(OSError, match="replacement failed"):
+        bw.write_state(path, 0)
+
+    assert path.read_bytes() == old
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def test_state_path_is_never_tmp():
     """The upstream lesson: rotation state in /tmp was wiped by a reboot and
     silenced the beats for five days."""
@@ -110,8 +128,9 @@ def test_spawn_beat_survives_unreadable_prompt(tmp_path, monkeypatch, mode):
     a ValueError, not an OSError subclass, so a bare `except OSError` lets
     it straight through uncaught). Calling spawn_beat directly here still
     respects this file's "no subprocess spawning" design: a prompt-read
-    failure returns before the function ever reaches subprocess.run()."""
+    failure returns before the function reaches the agent CLI runner."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     prompt_path = tmp_path / "prompts" / "voice.md"
     prompt_path.parent.mkdir(parents=True)
     if mode == "malformed-bytes":
@@ -231,10 +250,10 @@ def test_spawn_beat_exports_journal_dirs_derived_from_full_voice_config(tmp_path
     SILL_BEAT_JOURNAL_DIRS to the child, derived from every voice in the
     config — not just the one voice running this particular beat — so the
     two opt-in guards and state-language-check.py's beat-aware fallback are
-    scoped with zero operator configuration. subprocess.run is monkeypatched
-    (never a real CLI spawn); it also completes the run so this exercises
+    scoped with zero operator configuration. The stub completes the run and exercises
     the full success path, not just an early return."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "analyst.md").write_text("Standing prompt.\n")
     (tmp_path / "notes").mkdir()
@@ -255,7 +274,7 @@ def test_spawn_beat_exports_journal_dirs_derived_from_full_voice_config(tmp_path
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="did something", stderr="")
 
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
 
     success, duration, transcript_path = bw.spawn_beat(voices[0], voices)
 
@@ -287,6 +306,7 @@ def test_spawn_beat_does_not_restrict_the_child_to_project_settings(tmp_path, mo
     memory while leaving exit codes, transcripts, and output files identical.
     Hence this pin."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "analyst.md").write_text("Standing prompt.\n")
     (tmp_path / "notes").mkdir()
@@ -301,7 +321,7 @@ def test_spawn_beat_does_not_restrict_the_child_to_project_settings(tmp_path, mo
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
     success, _duration, _transcript = bw.spawn_beat(voice, [voice])
 
     assert success is True
@@ -325,6 +345,7 @@ def test_spawn_beat_forwards_the_parent_environment_to_the_child(tmp_path, monke
     puts `backend/.env` into the worker's own environment before this dict is
     built — pinned in test_env_and_mcp_wiring.py."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "analyst.md").write_text("Standing prompt.\n")
     (tmp_path / "notes").mkdir()
@@ -340,7 +361,7 @@ def test_spawn_beat_forwards_the_parent_environment_to_the_child(tmp_path, monke
         (tmp_path / "notes" / "analyst-001.md").write_text("beat output")
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
     bw.spawn_beat(voice, [voice])
 
     assert captured_env.get("SILL_DB_CONTAINER") == "some_other_db"
@@ -360,6 +381,7 @@ def test_spawn_beat_returns_false_when_exit_0_produces_no_output_file(tmp_path, 
     produced_output() in isolation (already covered by
     test_produced_output_detects_a_new_file above)."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "analyst.md").write_text("Standing prompt.\n")
     (tmp_path / "notes").mkdir()
@@ -382,7 +404,7 @@ def test_spawn_beat_returns_false_when_exit_0_produces_no_output_file(tmp_path, 
         return subprocess.CompletedProcess(
             cmd, 0, stdout="I tried to write the note but the tool call was denied.", stderr="")
 
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
 
     success, duration, transcript_path = bw.spawn_beat(voices[0], voices)
 
@@ -409,6 +431,7 @@ def test_spawn_beat_sets_no_journal_dirs_var_when_derivation_is_empty(tmp_path, 
     be "set" from os.environ.get's point of view and change the guards'
     unset-means-no-scope contract."""
     monkeypatch.setattr(bw, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(tmp_path / "state.json"))
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "voice.md").write_text("Standing prompt.\n")
 
@@ -421,7 +444,7 @@ def test_spawn_beat_sets_no_journal_dirs_var_when_derivation_is_empty(tmp_path, 
         captured_env.update(kwargs.get("env") or {})
         return subprocess.CompletedProcess(cmd, 0, stdout="did something", stderr="")
 
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setattr(bw, "_run_beat_subprocess", fake_run)
 
     success, _duration, _transcript = bw.spawn_beat(voice, [voice])
 
@@ -468,10 +491,10 @@ def test_run_beat_loop_drives_one_full_iteration(tmp_path, monkeypatch):
     # so what matters is only that the call is reached at all.
     monkeypatch.setattr(bw, "INTERVAL_SECONDS", 300)
 
-    def fake_spawn_beat(voice, voices):
+    def fake_spawn_beat(voice, voices, *, lock_fd):
         return True, 0.01, str(tmp_path / f"{voice.name}-transcript.md")
 
-    monkeypatch.setattr(bw, "spawn_beat", fake_spawn_beat)
+    monkeypatch.setattr(bw, "_spawn_beat_locked", fake_spawn_beat)
 
     def fake_sleep(seconds):
         raise _StopAfterOneIteration(seconds)
@@ -506,7 +529,7 @@ def test_run_beat_loop_does_not_advance_rotation_on_a_failed_beat(tmp_path, monk
     monkeypatch.setenv("SILL_BEAT_STATE_PATH", str(state_path))
     monkeypatch.setattr(bw, "POST_HOOK", None)
     monkeypatch.setattr(bw, "INTERVAL_SECONDS", 300)
-    monkeypatch.setattr(bw, "spawn_beat", lambda voice, voices: (False, 0.01, ""))
+    monkeypatch.setattr(bw, "_spawn_beat_locked", lambda voice, voices, *, lock_fd: (False, 0.01, ""))
 
     def fake_sleep(seconds):
         raise _StopAfterOneIteration(seconds)
