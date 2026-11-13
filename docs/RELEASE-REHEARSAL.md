@@ -1,64 +1,86 @@
 # v0.3.0 release candidate
 
-**Status on 2026-11-13.** Package and plugin metadata use `0.3.0`.
-Publication is pending. The v0.2.0 rehearsal below remains a historical record.
+**Status on 2026-11-13.** Candidate `7facec3` reports `0.3.0` in package,
+plugin and MCP metadata. Publication is pending. The v0.2.0 rehearsal below
+remains unchanged as a historical record.
 
-## Evidence so far
+## Evidence and measured revisions
 
-- After an editable reinstall in an isolated Python 3.12 environment,
-  `sill-mcp --version` reported `sill-mcp 0.3.0`. The installed
-  distribution and plugin metadata both reported `0.3.0`.
-- The pinned native arm64 TEI image served `unsloth/embeddinggemma-300m`
-  at revision `bfa3c846ac738e62aa61806ef9112d34acb1dc5a` with
-  768-dimensional, L2-normalized vectors on Apple Silicon. The amd64 TEI
-  image was exercised under emulation. A native Linux amd64 installation
-  and an Intel Mac installation are unverified.
-- On earlier builds reporting Sill 0.2.1, Claude Code 2.1.296 remembered
-  and recalled across CLI processes. Codex CLI 0.162.1 retrieved the same
-  memory UUID. Claude Desktop 5.11492.2 remembered and recalled in two
-  separate chats at `f3233a5`. These observations cover deliberate memory
-  tools in those clients.
-- Data-bearing fixtures from the actual `v0.1.0` and `v0.2.0` tags are
-  ready for the candidate upgrade and restore checks.
-- On macOS with Python 3.12, the installed `sill-worker --mode beat --once`
-  ran against a throwaway project, rotation file, and shell CLI stub. A
-  hanging stub exited through the worker timeout with code 1. Its process
-  group produced no delayed marker, the rotation file retained its exact
-  bytes, and the receipt recorded the new Markdown and audit results.
-  A concurrent invocation returned 75 and started no second stub.
-  An unavailable selected instance produced an `unchecked` receipt audit
-  and retained an independent `MINT-PENDING` finding. A malformed audit
-  scope produced four `unchecked` results while a successful stub exited
-  0 and committed rotation.
-- Worker tests injected an audit helper crash, timeout, and invalid
-  response after the rotation write. Each produced visible `error` results
-  and kept the committed rotation. The audits ran before the success-only
-  post-hook. Beat scheduling remains opt-in. The foreground worker and
-  its one-shot command are available for manual supervision.
+CI exercised the PR merge `e278884` for head `7facec3`. Mac installation
+and database-preservation checks used `799721a`; native client and worker
+checks used `8380f2b`. The intervening installer, build and isolated-restore
+changes left the packaged runtime, hooks and templates unchanged. The
+changes from `799721a` to `7facec3` affect CI verification and tests only.
+These are component comparisons, not claims that every rehearsal used the
+same checkout.
 
-## Remaining checks
+| Check | Observed result |
+|---|---|
+| Python and packaging | All six jobs in [CI run 43447296240](https://github.com/wtaysom/sill/actions/runs/43447296240) passed. Python 3.12: 1,333 passed, 158 skipped; Python 3.10: 1,316 passed, 175 skipped. Both clean-wheel jobs passed. The 17 additional Python 3.10 skips are CI-verifier tests requiring `tomllib`. |
+| Database contracts | Seven schema cases and 173 transactional tests passed in that run, including embedding interruption/resume, activation and rollback preserving newer records. The embedding tests use deterministic HTTP fixtures. |
+| Mac fresh install | Native Apple Silicon with OrbStack, at `799721a`: a new Bookworm database image and empty model cache, first install in 1,002 seconds, repeat in 56 seconds. Some worker build layers were cached. PostgreSQL 16.16 / Debian 12 reported matching collation version 2.36. First inserted 22 seeds; repeat skipped all 22 and preserved the database, profile, seed rows and temporary client settings. |
+| Linux fresh install | Native amd64 CI: cold install in 154.5 seconds, repeat in 16.9 seconds, real service readiness, 22 seeds skipped on repeat, and separate-process MCP remember/recall of the same UUID. No beat schedule was installed. |
+| Embedding service | Both native platforms served the pinned `unsloth/embeddinggemma-300m` revision `bfa3c846ac738e62aa61806ef9112d34acb1dc5a`, with finite 768-dimensional, L2-normalized vectors and the selected search profile. Intel Mac installation remains unverified. |
+| Tagged upgrades | Actual `v0.1.0` and `v0.2.0` stores passed dry runs, full upgrades and zero-pending repeats at `8380f2b`. Records, vectors, AGE edges, historical goals and operator files survived. All 52 release functions and 548 common schema objects matched fresh installation; seven historical, data-created `SUPPORTS` objects account for the full-dump difference. |
+| Existing database preservation | Six further upgrade/repeat/installer operations at `799721a` retained each exact existing database container and image, storage, cluster, collation 2.31, data, model and operator files. Maintenance workers reported 0.3.0. |
+| Backup restore | Both original pre-upgrade archives passed the explicit [isolated AGE restore procedure](RESTORE.md), including fresh-session Cypher and complete table/sequence, historical schema, record, goal and ledger comparisons. The initial failed restore was retained; acceptance used new isolated targets. Eleven real AGE regression cases passed on each Python version. |
 
-- Run the Python 3.10 and 3.12 CI matrix and live database integration
-  against the integrated candidate. Compare fresh and upgraded schemas
-  and exercise their public and AGE functions.
-- Rehearse cold-cache fresh installs and idempotent reruns on macOS arm64
-  and native Linux amd64. Exercise the explicit fresh embedding profile
-  with real services. Confirm the seed, model, active profile, and
-  absence of a beat schedule on rerun. Check the candidate version from
-  the installed command, MCP initialize and the running worker.
-- Run `./upgrade.sh --dry-run` and `./upgrade.sh` on each tagged fixture.
-  Restore each backup with the [isolated restore runbook](RESTORE.md), including
-  its explicit AGE catalog step, and check row identity and the AGE graph.
-  Confirm data and configuration survive a second upgrade with zero pending migrations. Check re-embedding
-  interruption and rollback.
-- Repeat the memory round trip on the integrated candidate. Desktop local
-  Codex requires a manual app run. Hosted ChatGPT awaits sign-in and a
-  tool call through the tunnel. Verify the UUID, speaker and declared
-  production after reopening a session.
-- Exercise one bounded beat per actual Claude and Codex launcher and
-  observe automatic recall and guard callbacks on their supported paths.
-  The one-shot timeout, ownership refusal and degraded audit checks above
-  used shell stubs and synthetic evidence.
+An exact-source `7facec3` wheel was also installed in isolated local Python
+3.12 and constrained Python 3.10 under Rosetta. Both discovered 39 MCP tools;
+optional `stage` was absent by default. The wheel SHA-256 is
+`2fd8f9185c05510a7b0d4591f5f7160060a7c4eeeacd105e491af41131b20c5f`.
+Import and discovery checks do not establish native client behavior.
+
+The earlier embedding operator rehearsal at `918316a` exercised actual CLI
+prepare, interrupted staging, refusal of premature activation, resume,
+activation and interrupted rollback using a deterministic HTTP fixture.
+New and changed records survived rollback. Final CI repeats the relevant
+transactional cases; real pinned-service coverage comes from the separate
+installation rehearsals above.
+
+## Native clients and supervised workers
+
+At `8380f2b`, Claude Code 2.1.296 remembered and recalled in separate
+processes, and Codex CLI 0.162.1 retrieved the same UUID with matching speaker
+and full declared production. All four Codex prompt/guard/write/independent
+write callback cases passed after normal hook review and trust. Claude's
+four cases also passed across separate fixture runs. Its final independent
+overwrite read the exact existing synthetic note before writing in a new
+session. The recalled test value appeared in the callback context and model
+reply, but not in the prompt, note or Read result. Per-result exposure counts
+matched the hook output without refreshing explicit-use timestamps.
+
+The installed worker completed one bounded native turn through each CLI.
+Both produced the expected synthetic file and advanced rotation once.
+Separate two-second native timeout checks left rotation unchanged, refused
+a competing worker with exit 75, released the original locks and left no
+process-group members. Two additional phases used explicitly synthetic CLI
+output with the real worker auditors to verify findings and an unavailable
+quote source. These are not native model or callback observations. No beat
+schedule was installed.
+
+## Remaining checks and limits
+
+- Repeat the deliberate two-chat round trip in Claude Desktop with the final
+  0.3 runtime. The earlier Desktop 5.11492.2 result at `f3233a5` reported
+  Sill 0.2.1 and remains separate evidence.
+- Observe the local Codex desktop app round trip manually. CLI success does
+  not establish desktop behavior.
+- Complete hosted ChatGPT sign-in, private tunnel/plugin setup and an actual
+  hosted tool round trip. Local tunnel-client checks do not establish it.
+
+Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
+the existing database container to avoid silently changing its collation
+runtime. That also retains its OS/security state, ports and restart settings
+until a separately planned, backed-up migration. Direct Compose operations
+can bypass this preservation path. The frozen baseline's known generated
+`dedupe_key` initialization error remains recorded; successful validation
+is not a claim of an error-free initialization log.
+
+See [client capabilities and verification](desktop-clients.md#client-capabilities-and-verification)
+for each integration's scope. This candidate has not been tagged or published.
+
+Sili
 
 ---
 

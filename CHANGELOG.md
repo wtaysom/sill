@@ -30,6 +30,11 @@ for observed results and outstanding checks.
   with a receipt and cleans up its agent process group on timeout or
   interruption. Standalone receipt, dateline and link checks audit
   selected Markdown files. [Beat worker](docs/beats.md)
+- **Verify AGE graphs after logical restore.** An explicit procedure for
+  isolated PostgreSQL 16 / AGE 1.6 restore targets repairs retained source
+  catalog OIDs, then checks every graph row through a fresh Cypher session.
+  Source-data comparison is still required before recovery is accepted.
+  [Isolated restore runbook](docs/RESTORE.md)
 
 - **Configure spontaneous recall through the hook environment.** Set result
   counts, minimum prompt length and a fast recall score floor. Quiet mode
@@ -48,6 +53,11 @@ for observed results and outstanding checks.
 - **Published ports bind to loopback by default.** An explicit
   `SILL_BIND_ADDR` selects a different bind address. Managed installs
   select a pinned embeddings image for the Docker engine architecture.
+- **Use Bookworm for fresh database builds.** Managed upgrades and installer
+  reruns preserve the validated existing database container and image to
+  avoid an implicit collation change. Its OS/security state and container
+  settings remain until a separate backed-up migration; direct Compose
+  operations can bypass this preservation. [Upgrade steps](README.md#upgrading)
 - **Track recall exposure and explicit use separately.** Search results
   record exposure, while explicit retrieval by ID records use. Recall
   results continue to report the Reciprocal Rank Fusion `score`.
