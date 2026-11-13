@@ -72,7 +72,12 @@ def installed_resources(monkeypatch):
         resources['container'][0]: {'Id': 'container-id-owned',
             'Config': {'Labels': {fixture.OWNER_LABEL: NONCE}},
             'Mounts': [{'Type': 'volume', 'Name': 'anonymous-data-id',
-                        'Destination': '/var/lib/postgresql/data'}]},
+                        'Source': '/docker/volumes/anonymous-data-id/_data',
+                        'Destination': '/var/lib/postgresql/data', 'Driver': 'local',
+                        'Mode': 'z', 'RW': True, 'Propagation': ''},
+                       {'Type': 'bind', 'Source': '/fixture/init',
+                        'Destination': '/docker-entrypoint-initdb.d',
+                        'Mode': 'ro', 'RW': False, 'Propagation': 'rprivate'}]},
         resources['network'][0]: {'Id': 'network-id-owned', 'Labels': {fixture.OWNER_LABEL: NONCE}},
     }
     calls = []
@@ -131,5 +136,56 @@ def test_ambiguous_inspection_preserves_all_resources(monkeypatch):
         return original(*args)
     monkeypatch.setattr(fixture, 'docker', ambiguous)
     with pytest.raises(RuntimeError, match='ambiguous'):
+        fixture.cleanup_owned(resources, NONCE, initial)
+    assert not any('rm' in call for call in calls)
+
+
+@pytest.mark.parametrize('reverse_initial', [False, True])
+def test_mount_order_only_permutation_keeps_same_immutable_cleanup(monkeypatch, reverse_initial):
+    resources, data, calls = installed_resources(monkeypatch)
+    initial = fixture.inspect_owned(resources, NONCE)
+    name = resources['container'][0]
+    if reverse_initial:
+        initial[name]['mounts'].reverse()
+    else:
+        data[name]['Mounts'].reverse()
+    saved = json.dumps(initial, sort_keys=True)
+    current = json.dumps(data, sort_keys=True)
+    fixture.cleanup_owned(resources, NONCE, initial)
+    assert [call for call in calls if 'rm' in call] == [
+        ('container','rm','-f','-v','container-id-owned'), ('network','rm','network-id-owned')]
+    # The saved/raw inspection evidence must remain untouched.
+    assert json.dumps(initial, sort_keys=True) == saved
+    assert json.dumps(data, sort_keys=True) == current
+
+
+@pytest.mark.parametrize('index,field,value', [
+    (0, 'Type', 'bind'), (0, 'Name', 'different-volume'),
+    (0, 'Source', '/different/volume'), (0, 'Destination', '/different/data'),
+    (0, 'Driver', 'different-driver'), (0, 'Mode', 'ro'), (0, 'RW', False),
+    (0, 'Propagation', 'shared'), (0, 'FutureField', 'must-not-be-dropped'),
+    (1, 'Type', 'volume'), (1, 'Source', '/different/init'),
+    (1, 'Destination', '/different/entrypoint'), (1, 'Mode', 'rw'),
+    (1, 'RW', True), (1, 'Propagation', 'shared'),
+])
+def test_mount_field_change_still_refuses_cleanup(monkeypatch, index, field, value):
+    resources, data, calls = installed_resources(monkeypatch)
+    initial = fixture.inspect_owned(resources, NONCE)
+    data[resources['container'][0]]['Mounts'][index][field] = value
+    with pytest.raises(RuntimeError, match='identity changed'):
+        fixture.cleanup_owned(resources, NONCE, initial)
+    assert not any('rm' in call for call in calls)
+
+
+@pytest.mark.parametrize('change', ['remove', 'duplicate'])
+def test_mount_multiset_cardinality_change_still_refuses_cleanup(monkeypatch, change):
+    resources, data, calls = installed_resources(monkeypatch)
+    initial = fixture.inspect_owned(resources, NONCE)
+    mounts = data[resources['container'][0]]['Mounts']
+    if change == 'remove':
+        mounts.pop()
+    else:
+        mounts.append(dict(mounts[0]))
+    with pytest.raises(RuntimeError, match='identity changed'):
         fixture.cleanup_owned(resources, NONCE, initial)
     assert not any('rm' in call for call in calls)

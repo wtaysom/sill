@@ -162,9 +162,20 @@ def inspect_owned(resources, nonce):
     return owned
 
 
+def ownership_identity(owned):
+    """Ignore mount-array order only; retain complete objects and duplicates.
+
+    Docker may reorder Mounts between inspections of the same container. Copy
+    both projections for comparison without changing their raw audit evidence.
+    """
+    return {name: {**record, 'mounts': sorted(record['mounts'],
+                    key=lambda mount: json.dumps(mount, sort_keys=True))}
+            for name, record in owned.items()}
+
+
 def cleanup_owned(resources, nonce, initial):
     current = inspect_owned(resources, nonce)
-    if initial is not None and current != initial:
+    if initial is not None and ownership_identity(current) != ownership_identity(initial):
         raise RuntimeError('M7 resource identity changed; preserving resources for inspection')
     # Immutable container/network IDs prevent a same-name replacement from
     # being removed after inspection. Docker -v removes only this container's
