@@ -83,6 +83,22 @@ def _require(args: dict[str, Any], key: str, tool: str) -> Any:
     return args[key]
 
 
+from session_identity import mint_context
+
+
+def _stage_callable():
+    """One policy for discovery and direct dispatch; no optional providers by default."""
+    if os.environ.get("SILL_ENABLE_STAGE") != "1":
+        raise ValueError("stage is disabled; set SILL_ENABLE_STAGE=1 to opt into Chorus file writes and external models")
+    try:
+        from chorus.stage import run_beat
+    except ImportError as exc:
+        raise ValueError("stage requires optional Chorus and its provider dependencies; install them separately or unset SILL_ENABLE_STAGE") from exc
+    if not callable(run_beat):
+        raise ValueError("optional Chorus must provide callable chorus.stage.run_beat")
+    return run_beat
+
+
 async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any]) -> Any:
     if name == "hydrate":
         query = _require(args, "query", name)
@@ -130,7 +146,11 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             memory_types=parsed_types,
             min_importance=float(args.get("min_importance", 0.0)),
             include_partial=include_partial,
+            speaker=args.get("speaker"),
         )
+
+    if name == "speakers":
+        return await client.speakers(min_count=int(args.get("min_count", 1)), limit=int(args.get("limit", 100)))
 
     if name == "recall_by_id":
         memory_id = UUID(_require(args, "memory_id", name))
@@ -178,12 +198,15 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             emotional_valence=float(args.get("emotional_valence", 0.0)),
             context=args.get("context"),
             concepts=args.get("concepts"),
+            force=args.get("force"), speaker=args.get("speaker"),
+            production=args.get("production"), minted_in=args.get("minted_in") if args.get("minted_in") is not None else mint_context("mcp:remember"),
         )
 
     if name == "remember_batch":
         items = _require(args, "memories", name)
         if not isinstance(items, list):
             raise ValueError("memories must be an array")
+        stamp = mint_context("mcp:remember_batch")
         memories: list[MemoryInput] = []
         for item in items:
             if not isinstance(item, dict):
@@ -196,6 +219,8 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
                     emotional_valence=float(item.get("emotional_valence", 0.0)),
                     context=item.get("context"),
                     concepts=item.get("concepts"),
+                    force=item.get("force"), speaker=item.get("speaker"),
+                    production=item.get("production"), minted_in=item.get("minted_in") if item.get("minted_in") is not None else stamp,
                 )
             )
         return await client.remember_batch(memories)
@@ -403,7 +428,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
     # =========================================================================
 
     if name == "stage":
-        from chorus.stage import run_beat
+        run_beat = _stage_callable()
 
         transcript_path = _require(args, "transcript_path", name)
         beat = _require(args, "beat", name)
@@ -415,7 +440,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
 
 
 def _tools() -> list[Any]:
-    return [
+    tools = [
         _tool(
             "hydrate",
             "Hydrate a query with relevant memories + (optional) identity/worldview/drives/emotion.",
@@ -953,6 +978,31 @@ def _tools() -> list[Any]:
             },
         ),
     ]
+
+    # Stage is outside this wheel. Explicit opt-in and importable support are
+    # both required, including for callers who bypass tool discovery.
+    try:
+        _stage_callable()
+    except ValueError:
+        tools = [tool for tool in tools if tool.name != "stage"]
+    attribution = {
+        "force": {"type": ["string", "null"], "description": "Illocutionary force of this act."},
+        "speaker": {"type": ["string", "null"], "description": "Whose act this records; no author is inferred."},
+        "production": {"type": ["object", "string", "null"], "description": "Optional declared intellectual contributors. Full typed object, or who [as Voice]: work [@ address] [basis]. Compact self requires a supplied session. Null means undeclared."},
+        "minted_in": {"type": ["object", "null"], "description": "Explicit mint context; otherwise gathered from supplied runtime evidence, with unknown fields null."},
+    }
+    for tool in tools:
+        if tool.name == "remember":
+            tool.inputSchema["properties"].update(attribution)
+        elif tool.name == "remember_batch":
+            tool.inputSchema["properties"]["memories"]["items"]["properties"].update(attribution)
+        elif tool.name == "recall":
+            tool.inputSchema["properties"]["speaker"] = {
+                "type": ["string", "null"], "description": "Restrict candidates to this speaker before ranking. #Nobody selects NULL speaker; omit for all perspectives."}
+    tools.append(_tool("speakers", "Declared speakers and act counts; excludes reserved names and archived rows. Speaker is distinct from production.", {
+        "type": "object", "properties": {"min_count": {"type": "integer", "minimum": 1, "default": 1},
+        "limit": {"type": "integer", "minimum": 1, "default": 100}}, "additionalProperties": False}))
+    return tools
 
 
 async def _run_server(dsn: str) -> None:

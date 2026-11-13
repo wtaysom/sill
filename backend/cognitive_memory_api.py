@@ -26,7 +26,17 @@ import asyncpg
 
 from prompt_resources import compose_personhood_prompt
 
+import provenance
+from session_identity import mint_context
+
 logger = logging.getLogger(__name__)
+
+
+def _attribution(row):
+    """Decode nullable act fields on every public memory reader."""
+    return {key: _coerce_json(row.get(key)) if key in ("production", "minted_in") and row.get(key) is not None
+            else row.get(key) for key in ("force", "speaker", "production", "minted_in", "restates_id")}
+
 
 class MemoryType(str, Enum):
     EPISODIC = "episodic"
@@ -78,6 +88,11 @@ class Memory:
     source_attribution: dict[str, Any] | None = None  # primary provenance (DB-stored JSON)
     created_at: datetime | None = None
     emotional_valence: float | None = None
+    force: str | None = None
+    speaker: str | None = None
+    production: dict[str, Any] | None = None
+    minted_in: dict[str, Any] | None = None
+    restates_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,11 @@ class MemoryPreview:
     score: float | None = None  # hybrid_recall RRF score — see Memory.score
     created_at: datetime | None = None
     concepts: list[str] | None = None
+    force: str | None = None
+    speaker: str | None = None
+    production: dict[str, Any] | None = None
+    minted_in: dict[str, Any] | None = None
+    restates_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +159,10 @@ class MemoryInput:
     source_attribution: dict[str, Any] | None = None
     source_references: Any | None = None  # JSONB for semantic memories (dict or list[dict])
     trust_level: float | None = None
+    force: str | None = None
+    speaker: str | None = None
+    production: dict[str, Any] | None = None
+    minted_in: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -296,6 +320,7 @@ class CognitiveMemory:
         memory_types: list[MemoryType] | None = None,
         min_importance: float = 0.0,
         include_partial: bool = True,
+        speaker: str | None = None,
     ) -> RecallResult:
         async with self._pool.acquire() as conn:
             memories = await self._recall_memories(
@@ -304,9 +329,20 @@ class CognitiveMemory:
                 limit,
                 memory_types=memory_types,
                 min_importance=min_importance,
+                speaker=speaker,
             )
             partial = await self._find_partial_activations(conn, query) if include_partial else []
             return RecallResult(memories=memories, partial_activations=partial, query=query)
+
+    async def speakers(self, *, min_count: int = 1, limit: int = 100) -> list[tuple[str, int]]:
+        """Declared speakers, excluding unknown/reserved names and archived acts."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""SELECT speaker, COUNT(*) AS count FROM memories
+                WHERE archived_at IS NULL AND speaker IS NOT NULL
+                  AND speaker <> '' AND speaker NOT LIKE '#%'
+                GROUP BY speaker HAVING COUNT(*) >= $1 ORDER BY count DESC, speaker LIMIT $2""",
+                min_count, limit)
+            return [(row["speaker"], int(row["count"])) for row in rows]
 
     async def recall_by_id(self, memory_id: UUID) -> Memory | None:
         async with self._pool.acquire() as conn:
@@ -319,7 +355,7 @@ class CognitiveMemory:
                     m.importance,
                     m.trust_level,
                     m.source_attribution,
-                    m.created_at,
+                    m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                     em.emotional_valence
                 FROM memories m
                 LEFT JOIN episodic_memories em ON m.id = em.memory_id
@@ -331,6 +367,7 @@ class CognitiveMemory:
                 return None
             return Memory(
                 id=row["id"],
+                **_attribution(row),
                 type=MemoryType(row["type"]),
                 content=row["content"],
                 importance=float(row["importance"]),
@@ -373,7 +410,7 @@ class CognitiveMemory:
                     fr.memory_type,
                     fr.score,
                     m.importance,
-                    m.created_at,
+                    m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                     COALESCE(
                         (SELECT array_agg(c.name) FROM memory_concepts mc
                          JOIN concepts c ON c.id = mc.concept_id
@@ -399,6 +436,7 @@ class CognitiveMemory:
                 previews.append(
                     MemoryPreview(
                         id=row["memory_id"],
+                        **_attribution(row),
                         type=mt,
                         preview=row["preview"] + ("..." if len(row["preview"]) >= preview_length else ""),
                         importance=float(row["importance"]),
@@ -424,7 +462,7 @@ class CognitiveMemory:
                     m.importance,
                     m.trust_level,
                     m.source_attribution,
-                    m.created_at,
+                    m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                     em.emotional_valence
                 FROM memories m
                 LEFT JOIN episodic_memories em ON m.id = em.memory_id
@@ -435,6 +473,7 @@ class CognitiveMemory:
             return [
                 Memory(
                     id=row["id"],
+                    **_attribution(row),
                     type=MemoryType(row["type"]),
                     content=row["content"],
                     importance=float(row["importance"]),
@@ -463,7 +502,7 @@ class CognitiveMemory:
                         m.importance,
                         m.trust_level,
                         m.source_attribution,
-                        m.created_at,
+                        m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                         em.emotional_valence
                     FROM memories m
                     LEFT JOIN episodic_memories em ON m.id = em.memory_id
@@ -483,7 +522,7 @@ class CognitiveMemory:
                         m.importance,
                         m.trust_level,
                         m.source_attribution,
-                        m.created_at,
+                        m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                         em.emotional_valence
                     FROM memories m
                     LEFT JOIN episodic_memories em ON m.id = em.memory_id
@@ -512,7 +551,13 @@ class CognitiveMemory:
         source_attribution: dict[str, Any] | None = None,
         source_references: Any | None = None,
         trust_level: float | None = None,
+        force: str | None = None, speaker: str | None = None,
+        production: dict[str, Any] | str | None = None,
+        minted_in: dict[str, Any] | None = None,
     ) -> UUID:
+        stamp = minted_in if minted_in is not None else mint_context("api:remember")
+        production = provenance.production_from_value(production, session=stamp.get("session"),
+                    as_=stamp.get("as"), when=stamp.get("when"))
         async with self._pool.acquire() as conn:
             memory_id = await self._create_memory(
                 conn,
@@ -524,7 +569,7 @@ class CognitiveMemory:
                 source_attribution=source_attribution,
                 source_references=source_references,
                 trust_level=trust_level,
-                concepts=concepts,
+                concepts=concepts, force=force, speaker=speaker, production=production, minted_in=stamp,
             )
 
             return memory_id
@@ -547,10 +592,16 @@ class CognitiveMemory:
             return dict(_coerce_json(row["profile"]))
 
     async def remember_batch(self, memories: Iterable[MemoryInput]) -> list[UUID]:
+        stamp = mint_context("api:remember_batch")
         items = [{
             "type": m.type.value, "content": m.content, "importance": m.importance,
             "source_attribution": m.source_attribution, "trust_level": m.trust_level,
-            "concepts": m.concepts,
+            "concepts": m.concepts, "force": m.force, "speaker": m.speaker,
+            "minted_in": m.minted_in if m.minted_in is not None else stamp,
+            "production": provenance.production_from_value(m.production,
+                session=(m.minted_in if m.minted_in is not None else stamp).get("session"),
+                as_=(m.minted_in if m.minted_in is not None else stamp).get("as"),
+                when=(m.minted_in if m.minted_in is not None else stamp).get("when")),
             "type_metadata": self._type_metadata(m.type, m.content, m.emotional_valence,
                                                  m.context, m.source_references, batch=True),
         } for m in memories]
@@ -708,14 +759,14 @@ class CognitiveMemory:
                     EXCEPT SELECT concept_id FROM fuzzy_ids
                 ),
                 matched AS (
-                    SELECT m.id, m.type, m.content, m.importance, m.created_at,
+                    SELECT m.id, m.type, m.content, m.importance, m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                            mc.strength, 0 AS match_tier
                     FROM memories m
                     JOIN memory_concepts mc ON m.id = mc.memory_id
                     WHERE mc.concept_id IN (SELECT concept_id FROM fuzzy_ids)
                       AND m.status = 'active' AND m.archived_at IS NULL
                     UNION ALL
-                    SELECT m.id, m.type, m.content, m.importance, m.created_at,
+                    SELECT m.id, m.type, m.content, m.importance, m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                            mc.strength, 1 AS match_tier
                     FROM memories m
                     JOIN memory_concepts mc ON m.id = mc.memory_id
@@ -724,11 +775,11 @@ class CognitiveMemory:
                 ),
                 dedup AS (
                     SELECT DISTINCT ON (id)
-                        id, type, content, importance, created_at, strength, match_tier
+                        id, type, content, importance, created_at, force, speaker, production, minted_in, restates_id, strength, match_tier
                     FROM matched
                     ORDER BY id, match_tier ASC, strength DESC
                 )
-                SELECT d.id, d.type, d.content, d.importance, d.created_at,
+                SELECT d.id, d.type, d.content, d.importance, d.created_at, d.force, d.speaker, d.production, d.minted_in, d.restates_id,
                        em.emotional_valence
                 FROM dedup d
                 LEFT JOIN episodic_memories em ON d.id = em.memory_id
@@ -760,7 +811,7 @@ class CognitiveMemory:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM trace_trajectory($1::text, $2::int, $3::int)",
+                "SELECT r.*, m.force, m.speaker, m.production, m.minted_in, m.restates_id FROM trace_trajectory($1::text, $2::int, $3::int) WITH ORDINALITY r JOIN memories m ON m.id = r.memory_id ORDER BY r.ordinality",
                 concept,
                 limit,
                 gap_days,
@@ -768,6 +819,7 @@ class CognitiveMemory:
             return [
                 {
                     "id": str(row["memory_id"]),
+                    **_attribution(row),
                     "type": row["memory_type"],
                     "created_at": str(row["created_at"]),
                     "importance": float(row["importance"]),
@@ -825,13 +877,14 @@ class CognitiveMemory:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM follow_supersedes($1::uuid, $2::int)",
+                "SELECT r.*, m.force, m.speaker, m.production, m.minted_in, m.restates_id FROM follow_supersedes($1::uuid, $2::int) WITH ORDINALITY r JOIN memories m ON m.id = r.memory_id ORDER BY r.ordinality",
                 memory_id,
                 max_depth,
             )
             return [
                 {
                     "id": str(row["memory_id"]),
+                    **_attribution(row),
                     "direction": row["direction"],
                     "depth": row["depth"],
                     "type": row["memory_type"],
@@ -857,13 +910,14 @@ class CognitiveMemory:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM position_on($1::text, $2::int)",
+                "SELECT r.*, m.force, m.speaker, m.production, m.minted_in, m.restates_id FROM position_on($1::text, $2::int) WITH ORDINALITY r JOIN memories m ON m.id = r.memory_id ORDER BY r.ordinality",
                 topic,
                 limit,
             )
             return [
                 {
                     "id": str(row["memory_id"]),
+                    **_attribution(row),
                     "type": row["memory_type"],
                     "created_at": str(row["created_at"]),
                     "importance": float(row["importance"]),
@@ -886,7 +940,7 @@ class CognitiveMemory:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM relate_concepts($1::text, $2::text, $3::int)",
+                "SELECT r.*, m.force, m.speaker, m.production, m.minted_in, m.restates_id FROM relate_concepts($1::text, $2::text, $3::int) WITH ORDINALITY r JOIN memories m ON m.id = r.memory_id ORDER BY r.ordinality",
                 concept_a,
                 concept_b,
                 limit,
@@ -894,6 +948,7 @@ class CognitiveMemory:
             return [
                 {
                     "id": str(row["memory_id"]),
+                    **_attribution(row),
                     "type": row["memory_type"],
                     "created_at": str(row["created_at"]),
                     "importance": float(row["importance"]),
@@ -921,13 +976,14 @@ class CognitiveMemory:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM gather_pattern($1::text, $2::int)",
+                "SELECT r.*, m.force, m.speaker, m.production, m.minted_in, m.restates_id FROM gather_pattern($1::text, $2::int) WITH ORDINALITY r JOIN memories m ON m.id = r.memory_id ORDER BY r.ordinality",
                 pattern,
                 limit,
             )
             return [
                 {
                     "id": str(row["memory_id"]),
+                    **_attribution(row),
                     "type": row["memory_type"],
                     "created_at": str(row["created_at"]),
                     "importance": float(row["importance"]),
@@ -1114,14 +1170,17 @@ class CognitiveMemory:
         *, source_attribution: dict[str, Any] | None = None,
         source_references: Any | None = None, trust_level: float | None = None,
         concepts: list[str] | None = None,
+        force: str | None = None, speaker: str | None = None,
+        production: dict[str, Any] | None = None, minted_in: dict[str, Any] | None = None,
     ) -> UUID:
         row = await conn.fetchrow(
             """SELECT * FROM public.mint_memory(
                 $1::memory_type,$2::text,$3::float,$4::jsonb,
-                p_type_metadata=>$5::jsonb,p_concepts=>$6::text[],p_trust_level=>$7::float)
+                p_type_metadata=>$5::jsonb,p_concepts=>$6::text[],p_trust_level=>$7::float,
+                p_force=>$8::text,p_speaker=>$9::text,p_production=>$10::jsonb,p_minted_in=>$11::jsonb)
             """, type.value, content, importance, _to_jsonb_arg(source_attribution),
             _to_jsonb_arg(self._type_metadata(type, content, emotional_valence, context, source_references)),
-            concepts, trust_level,
+            concepts, trust_level, force, speaker, _to_jsonb_arg(production), _to_jsonb_arg(minted_in),
         )
         logger.info("memory mint id=%s outcome=%s restates=%s", row["memory_id"], row["outcome"], row["restates"])
         return row["memory_id"]
@@ -1133,6 +1192,7 @@ class CognitiveMemory:
         limit: int,
         memory_types: list[MemoryType] | None = None,
         min_importance: float = 0.0,
+        speaker: str | None = None,
     ) -> list[Memory]:
         rows = await conn.fetch(
             """
@@ -1145,9 +1205,9 @@ class CognitiveMemory:
                 m.importance,
                 m.trust_level,
                 m.source_attribution,
-                m.created_at,
+                m.created_at, m.force, m.speaker, m.production, m.minted_in, m.restates_id,
                 em.emotional_valence
-            FROM hybrid_recall($1::text, $2::int) fr
+            FROM public.hybrid_recall_perspective($1::text, $2::int, $4::text) fr
             JOIN memories m ON m.id = fr.memory_id
             LEFT JOIN episodic_memories em ON em.memory_id = fr.memory_id
             WHERE m.importance >= $3::float
@@ -1156,6 +1216,7 @@ class CognitiveMemory:
             query,
             limit,
             min_importance,
+            speaker,
         )
 
         memories: list[Memory] = []
@@ -1166,6 +1227,7 @@ class CognitiveMemory:
             memories.append(
                 Memory(
                     id=row["memory_id"],
+                    **_attribution(row),
                     type=mt,
                     content=row["content"],
                     importance=float(row["importance"]),
@@ -1198,6 +1260,7 @@ class CognitiveMemory:
     def _row_to_memory(self, row: asyncpg.Record) -> Memory:
         return Memory(
             id=row["id"],
+            **_attribution(row),
             type=MemoryType(row["type"]),
             content=row["content"],
             importance=float(row["importance"]),
@@ -1354,6 +1417,9 @@ class CognitiveMemorySync:
     def recall(self, query: str, **kwargs: Any) -> RecallResult:
         return self._loop.run_until_complete(self._async.recall(query, **kwargs))
 
+    def speakers(self, *, min_count: int = 1, limit: int = 100) -> list[tuple[str, int]]:
+        return self._loop.run_until_complete(self._async.speakers(min_count=min_count, limit=limit))
+
     def remember(self, content: str, **kwargs: Any) -> UUID:
         return self._loop.run_until_complete(self._async.remember(content, **kwargs))
 
@@ -1417,6 +1483,10 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                 elif kind:
                     src_kind = f", source: {kind}"
             parts.append(f"- {m.content}{score}{trust}{src_kind}")
+            if m.speaker is not None:
+                parts.append(f"  speaker: {m.speaker}")
+            parts.extend("  " + line for line in provenance.render(
+                m.production, model_for=lambda entry: provenance.resolve_model(entry, [m.minted_in])))
 
     if context.partial_activations:
         parts.append("\n## Vague Recollections (tip-of-tongue)")

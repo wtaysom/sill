@@ -140,3 +140,19 @@ def test_main_failure_returns_one(capsys):
         rc = sill.main(["notice", "a fact", "--speaker", "Ada"])
     assert rc == 1 and "Failed to store" in capsys.readouterr().out
     assert q.call_count == 1  # No unsafe legacy fallback or prefix-content adoption.
+
+
+@pytest.fixture(autouse=True)
+def synthetic_mint_context(monkeypatch):
+    monkeypatch.setattr("sill.mint_context", lambda via: {"session": None, "as": None, "when": "W", "via": via, "model": None})
+
+
+def test_notice_optional_production_and_json_null():
+    with mock.patch.object(sill, '_query_db', side_effect=_fake_query) as q:
+        assert sill.main(['notice','synthetic words','--speaker','Inez','--made-json','null']) == 0
+        assert 'p_production => NULL' in q.call_args.args[0]
+        assert 'p_minted_in =>' in q.call_args.args[0]
+    with mock.patch.object(sill, '_query_db') as q:
+        with pytest.raises(ValueError):
+            sill.notice('invalid declaration', production={'made':'invalid'})
+        q.assert_not_called()

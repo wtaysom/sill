@@ -24,6 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+import provenance
+from session_identity import mint_context
+
+
 def _load_backend_env() -> None:
     """Read `backend/.env` into the process environment, with Compose's
     precedence: an already-exported shell variable wins, the file fills in the
@@ -224,7 +228,9 @@ def notice(content: str, memory_type: str = "semantic",
            speaker: str | None = None,
            source: str | None = None,
            source_kind: str | None = None,
-           source_label: str | None = None) -> str | None:
+           source_label: str | None = None,
+           production: dict | str | None = None,
+           minted_in: dict | None = None) -> str | None:
     """Store something important. Returns memory ID or None on failure.
 
     Atomically mints the act and its concepts; retries leave the existing act unchanged.
@@ -245,6 +251,11 @@ def notice(content: str, memory_type: str = "semantic",
         raise ValueError(f"force must be one of {sorted(VALID_FORCES)} or None, got {force!r}")
     if memory_type not in {"semantic", "episodic", "procedural", "strategic"}:
         raise ValueError(f"invalid memory type: {memory_type!r}")
+    stamp = minted_in if minted_in is not None else mint_context("cli:notice")
+    production = provenance.production_from_value(production, session=stamp.get("session"),
+                     as_=stamp.get("as"), when=stamp.get("when"))
+    production_arg = "NULL" if production is None else "'" + _escape(json.dumps(production)) + "'::jsonb"
+    stamp_arg = "'" + _escape(json.dumps(stamp)) + "'::jsonb"
     source_arg = (f"'{_source_json(source, source_kind, source_label)}'::jsonb"
                   if source else "NULL")
     speaker_arg = f"'{_escape(speaker)}'" if speaker is not None else "NULL"
@@ -256,7 +267,8 @@ def notice(content: str, memory_type: str = "semantic",
     rows = _query_db(f"""
         SELECT memory_id::text,outcome,restates::text FROM public.mint_memory(
             '{memory_type}'::memory_type, '{_escape(content)}', {float(importance)}, {source_arg},
-            p_speaker => {speaker_arg}, p_force => {force_arg}, p_concepts => {concepts_arg}
+            p_speaker => {speaker_arg}, p_force => {force_arg}, p_concepts => {concepts_arg},
+            p_production => {production_arg}, p_minted_in => {stamp_arg}
         );
     """, timeout=60)
     if not rows or not rows[0]:
@@ -302,6 +314,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_notice.add_argument("--speaker", required=True,
                           help="Whose act this records (the perspective axis). Required: "
                                "unattributed mints are the store's main hygiene hole.")
+    made = p_notice.add_mutually_exclusive_group()
+    made.add_argument("--made", help="Declared contributors: who [as Voice]: work [@ address] [basis]; compact self requires a supplied session")
+    made.add_argument("--made-json", help="Full typed production JSON object; JSON null leaves production undeclared")
     p_notice.add_argument("--source", default=None,
                           help="Where this came from, as an address a later reader can OPEN: "
                                "the beat file, journal, doc, or URI. Without it the memory is "
@@ -352,7 +367,8 @@ def main(argv: list[str] | None = None) -> int:
                      concepts=concepts, importance=args.importance,
                      force=args.force, speaker=args.speaker,
                      source=args.source, source_kind=args.source_kind,
-                     source_label=args.source_label)
+                     source_label=args.source_label,
+                     production=json.loads(args.made_json) if args.made_json is not None else args.made)
         if mid:
             receipt = format_receipt(mid, concepts, args.speaker, args.force)
             print(receipt)

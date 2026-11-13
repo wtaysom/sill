@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 COPY pyproject.toml /app/
-COPY cognitive_memory_api.py memory_tools.py prompt_resources.py sill.py sill_cli.py sill_mcp_server.py instance_config.py client_config.py worker.py rabbit_bridge.py beat_worker.py /app/
+COPY cognitive_memory_api.py memory_tools.py prompt_resources.py sill.py sill_cli.py sill_mcp_server.py instance_config.py client_config.py provenance.py session_identity.py worker.py rabbit_bridge.py beat_worker.py /app/
 COPY scripts/ /app/scripts/
 
 RUN pip install --no-cache-dir .
