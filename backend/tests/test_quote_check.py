@@ -249,3 +249,102 @@ def test_quote_ignores_escaped_links_and_keeps_code_words_inside_a_real_quote(tm
     assert "no mapped citation" in result.reason.lower()
     assert findings(result) == [(1, "text_mismatch", "new")]
     assert result.findings[0].file == "quoted.md"
+
+
+@pytest.mark.parametrize("written,source", [
+    ("We tested … samples", "We tested each of the samples"),
+    ("We considered … options before choosing", "We considered other options before choosing"),
+])
+def test_quote_declared_ellipsis_cannot_drop_meaning_bearing_quantifiers(tmp_path, written, source):
+    article = evidence(tmp_path, "article.txt", source)
+    result = quote_check.audit({}, {NOTE: f'“{written}” [Talk](src)'}, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("note", [
+    '“The sky is clear.” Then at 00:00:10 something else happened. [Talk](src)',
+    'Earlier: 00:00:10. later, “The sky is clear” [Talk](src).',
+])
+def test_quote_does_not_borrow_time_across_sentence_boundaries(tmp_path, note):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert result.findings == []
+
+
+@pytest.mark.parametrize("citation", [
+    "(00:00:10) [Talk](src)",
+    "[Talk](src) (00:00:10)",
+    "([Talk](src), 00:00:10)",
+])
+def test_quote_keeps_parenthetical_cue_after_sentence_punctuation_inside_quotes(tmp_path, citation):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky is clear.\n")
+    result = quote_check.audit({}, {NOTE: f'“The sky is clear.” {citation}'}, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+@pytest.mark.parametrize("quote", ["The sky is clear", "The sky is … clear"])
+def test_quote_cannot_join_separate_caption_passages(tmp_path, quote):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:00:02] The sky is\n[00:10:00] clear\n")
+    notes = {NOTE: f'“{quote}” (00:05:00) [Talk](src)\n\n“{quote}” [Talk](src)'}
+    result = quote_check.audit({}, notes, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "text_mismatch", "new"), (3, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("indent", ["    ", "\t"])
+def test_quote_ignores_indented_code_but_checks_a_list_continuation(tmp_path, indent):
+    article = evidence(tmp_path, "article.txt", "There is nothing else to say.")
+    notes = {NOTE: (
+        f'{indent}“No such passage exists” [Talk](src)\n\n'
+        '1. Quoted passage:\n'
+        '    “This list quotes missing words” [Talk](src)\n'
+    )}
+    result = quote_check.audit({}, notes, {"src": [article]})
+    assert result.status == "checked"
+    assert findings(result) == [(4, "text_mismatch", "new")]
+
+
+@pytest.mark.parametrize("image", ["![Photo][cover]", "image![Photo][cover]"])
+def test_quote_does_not_use_an_image_reference_as_a_citation(tmp_path, image):
+    article = evidence(tmp_path, "article.txt", "The sky is clear.")
+    result = quote_check.audit({}, {NOTE: f'[cover]: src\n\n“The sky is clear” {image}'}, {"src": [article]})
+    assert result.status == "unchecked"
+    assert "no mapped citation" in result.reason.lower()
+    assert result.findings == []
+
+
+def test_quote_near_harmless_elision_survives_unreadable_alternative(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", "[00:05:00] The sky, you know, is clear.\n")
+    notes = {NOTE: '“The sky is clear” (00:05:00) [Talk](src)'}
+    result = quote_check.audit({}, notes, {"src": [captions, tmp_path / "missing.vtt"]})
+    assert result.status == "checked"
+    assert result.findings == []
+    assert "harmless elision" in result.reason.lower()
+
+
+def test_quote_exact_elsewhere_precedes_harmless_elision_with_complete_evidence(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", (
+        "[00:05:00] The sky, you know, is clear.\n[00:10:00] The sky is clear.\n"
+    ))
+    notes = {NOTE: '“The sky is clear” (00:05:00) [Talk](src)'}
+    result = quote_check.audit({}, notes, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]
+
+
+def test_quote_ellipsis_requires_matched_words_near_the_cited_time(tmp_path):
+    captions = evidence(tmp_path, "cue-log.txt", (
+        "[00:00:00] The sky is\n"
+        "[00:01:00] We paused\n"
+        "[00:02:00] We walked\n"
+        "[00:03:00] The cart rattled\n"
+        "[00:04:00] The door opened\n"
+        "[00:05:00] clear\n"
+    ))
+    note = '“The sky is … clear” (00:02:30) [Talk](src)'
+    result = quote_check.audit({}, {NOTE: note}, {"src": [captions]})
+    assert result.status == "checked"
+    assert findings(result) == [(1, "wrong_timestamp", "new")]

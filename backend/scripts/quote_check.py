@@ -3,13 +3,14 @@
 Check straight and curly double quotations outside Markdown code. An inline
 or reference citation uses its exact configured target. A quote needs at least
 three words unless its block has an unambiguous mapped citation. Plain text
-proves wording; timed quotes also need caption evidence.
+proves wording. Timed quotes need a matched caption word within 90 seconds
+of the citation, and a match cannot cross a caption gap greater than 90 seconds.
 """
 
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -28,8 +29,9 @@ FALLBACK_MIN_WORDS = 3
 FILLERS = frozenset("uh um uhm umm uhh mm mhm hmm erm".split())
 FILLER_PHRASES = frozenset({("you", "know"), ("i", "mean"), ("sort", "of"), ("kind", "of"), ("you", "see")})
 DROPPABLE = frozenset("like so well right okay ok oh yeah yes now the a an that it and".split())
-POLARITY = frozenset((
-    "not no never nothing none nobody nor neither without only all most some every any cannot cant dont "
+PROTECTED_WORDS = frozenset((
+    "not no never nothing none nobody nor neither without only all most some every each any both either "
+    "other another few fewer many more less least several enough cannot cant dont "
     "doesnt didnt wont wouldnt couldnt shouldnt isnt arent wasnt werent havent hasnt hadnt aint mustnt neednt"
 ).split())
 WORD_RE = re.compile(r"[^\W_]+")
@@ -37,7 +39,7 @@ TAG_RE = re.compile(r"<[^>\n]*>")
 ANNOTATION_RE = re.compile(r"\[(?:music|applause|laughter|inaudible|silence|_+)\]", re.IGNORECASE)
 ELLIPSIS_RE = re.compile(r"\[?\s*(?:…|\.\s?\.\s?\.)\s*\]?")
 QUOTE_RE = re.compile(r'(?<!\\)“([^”]+)”|(?<![\w\\])"((?:\\.|[^"\\])+)"')
-REFERENCE_USE_RE = re.compile(r"(?<![\\!\w])\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?(?!\(|:)")
+REFERENCE_USE_RE = re.compile(r"(?:!|(?<![\\!\w]))\[([^\[\]\n]+)\](?:\[([^\[\]\n]*)\])?(?!\(|:)")
 REFERENCE_LABEL_RE = re.compile(r"^ {0,3}\[([^\]\n]+)\]:")
 BLOCKQUOTE_RE = re.compile(r"^ {0,3}(?:> ?)+")
 LIST_RE = re.compile(r"^ {0,3}(?:[-+*]|\d+[.)])[ \t]+")
@@ -51,8 +53,12 @@ STAMP_RE = re.compile(
 CUE_CLOCK = r"(?:\d+:)?\d{1,2}:\d{2}[.,]\d{1,3}"
 CUE_RE = re.compile(rf"^\s*({CUE_CLOCK})\s*-->\s*({CUE_CLOCK})(?:\s|$)")
 CLEAN_CUE_RE = re.compile(r"^\[(\d+:\d{2}:\d{2}(?:[.,]\d{1,3})?)\][ \t]*(.*)$", re.MULTILINE)
-SENTENCE_RE = re.compile(r"[.!?][\"”’)\]*_]*\s+(?=[A-Z0-9“\"*\[_>])")
-PAREN_RE = re.compile(r"\(\s*(?:about|around|at|ca\.?|~)?\s*$", re.IGNORECASE)
+PAREN_CUE = r"\(\s*(?:(?i:about|around|at|ca\.?|~)\s*)?"
+PAREN_RE = re.compile(PAREN_CUE + r"$")
+SENTENCE_RE = re.compile(
+    rf"[.!?][\"”’)\]*_]*\s+(?=[\w“\"*\[>])"
+    rf"(?!(?:\[[^\]\n]*\]\s*)+{PAREN_CUE}{STAMP})"
+)
 DURATION_BEFORE_RE = re.compile(r"\b(?:duration|runtime|running time|length|runs|lasts)\W{0,3}(?:of\s+)?$", re.I)
 DURATION_AFTER_RE = re.compile(r"^\s*(?:long\b|in length\b|runtime\b|total\b)", re.I)
 
@@ -82,6 +88,7 @@ class Source:
     tokens: tuple[str, ...]
     positions: dict[str, list[int]]
     times: tuple[tuple[float, float], ...] = ()
+    passage_breaks: tuple[int, ...] = ()
 
 
 def _words(text: str, *, caption: bool = False) -> tuple[str, ...]:
@@ -93,7 +100,7 @@ def _words(text: str, *, caption: bool = False) -> tuple[str, ...]:
     plain = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     words: list[str] = []
     for word in WORD_RE.findall(plain):
-        if word not in FILLERS and (not words or word != words[-1] or word in POLARITY):
+        if word not in FILLERS and (not words or word != words[-1] or word in PROTECTED_WORDS):
             words.append(word)
     return tuple(words)
 
@@ -157,6 +164,8 @@ def _blocks(text: str) -> Iterator[tuple[int, list[str]]]:
             yield number, [line]
         elif line.strip():
             if not lines:
+                if line.expandtabs(4).startswith("    "):
+                    continue  # Indented code cannot interrupt an open paragraph.
                 start = number
                 quoted = bool(quote_prefix)
             lines.append(line)
@@ -199,10 +208,12 @@ def _citation_blocks(text: str, sources: dict[str, list[Path]]) -> Iterator[tupl
             if target in sources and not match[0].startswith("!"):
                 targets.add(target)
             # Keep visible link labels for quotation detection, not URL/title text.
-            start = text.rfind("](", match.start(), match.start(name))
+            start = text.rfind("](", match.start(), match.start(name)) + 1
             visible[start:match.end()] = quoted_text[start:match.end()] = _blank(text[start:match.end()])
             reference_text[match.start():match.end()] = _blank(match[0])
         for match in REFERENCE_USE_RE.finditer("".join(reference_text)):
+            if match[0].startswith("!") or _escaped(text, match.start()):
+                continue
             target = references.get(_label(match[2] or match[1]))
             if target in sources:
                 targets.add(target)
@@ -256,9 +267,11 @@ def _quotes(text: str, sources: dict[str, list[Path]]) -> Iterator[Quote]:
         quoted = list(QUOTE_RE.finditer(block))
         masked = list(block)
         for match in quoted:
-            # Do not read timestamps or sentence boundaries inside a quote.
+            # Only terminal punctuation can separate a quote from following prose.
             start, end = match.span(1 if match[1] is not None else 2)
-            masked[start:end] = re.sub(r"[^\n]", "x", block[start:end])
+            last = start + len(block[start:end].rstrip())
+            stop = last - 1 if block[last - 1:last] in {".", "!", "?"} else end
+            masked[start:stop] = re.sub(r"[^\n]", "x", block[start:stop])
         stamp_text = "".join(masked)
         stamps = list(_stamps(stamp_text))
         boundaries = [0, *(match.end() for match in SENTENCE_RE.finditer(stamp_text)), len(block)]
@@ -309,11 +322,17 @@ def _read_source(path: Path) -> Source | None:
     except (OSError, ValueError):
         return None
     times: list[tuple[float, float]] = []
+    passage_breaks: list[int] = []
     if path.suffix.lower() in {".srt", ".vtt"} or CLEAN_CUE_RE.search(text):
         caption_words: list[str] = []
         previous: tuple[str, ...] = ()
         previous_end = -float("inf")
         for span, cue in _cue_words(text):
+            if not cue:
+                continue
+            # A large silence separates passages even when the words align.
+            if times and span[0] > previous_end + WINDOW_SECONDS:
+                passage_breaks.append(len(caption_words))
             overlap = 0
             if span[0] <= previous_end + 1:
                 for size in range(min(len(previous), len(cue)), 0, -1):
@@ -331,11 +350,11 @@ def _read_source(path: Path) -> Source | None:
     positions: dict[str, list[int]] = {}
     for index, word in enumerate(tokens):
         positions.setdefault(word, []).append(index)
-    return Source(tokens, positions, tuple(times))
+    return Source(tokens, positions, tuple(times), tuple(passage_breaks))
 
 
 def _harmless(gap: tuple[str, ...], words: tuple[str, ...], index: int) -> bool:
-    if any(word in POLARITY for word in gap):
+    if any(word in PROTECTED_WORDS for word in gap):
         return False
     nearby = words[max(0, index - 2):index + 2]
     cursor = 0
@@ -351,8 +370,8 @@ def _harmless(gap: tuple[str, ...], words: tuple[str, ...], index: int) -> bool:
     return True
 
 
-def _matches(source: Source, quote: Quote, allowed_drops: int = 0) -> Iterator[tuple[int, int]]:
-    """Find whole words in order; only declared gaps can omit content words."""
+def _matches(source: Source, quote: Quote, allowed_drops: int = 0) -> Iterator[tuple[int, bool]]:
+    """Yield match starts and whether a matched caption word is near the cited time."""
     words = tuple(word for part in quote.parts for word in part)
     boundaries = set()
     offset = 0
@@ -360,40 +379,49 @@ def _matches(source: Source, quote: Quote, allowed_drops: int = 0) -> Iterator[t
         offset += len(part)
         boundaries.add(offset)
 
+    def near(position: int) -> bool:
+        if quote.stamp is None or not source.times:
+            return False
+        cue_start, cue_end = source.times[position]
+        return any(
+            cue_end >= lo - WINDOW_SECONDS and cue_start <= hi + WINDOW_SECONDS
+            for lo, hi in quote.stamp.spans
+        )
+
     for start in source.positions.get(words[0], ()):
+        break_index = bisect_right(source.passage_breaks, start)
+        passage_end = (
+            source.passage_breaks[break_index] if break_index < len(source.passage_breaks) else len(source.tokens)
+        )
         # Keep alternative alignments: the first repeated fragment after an
         # ellipsis may dead-end while the next one matches the rest.
-        ends = {start + 1: 0}
+        ends = {(start + 1, near(start)): 0}
         for index, word in enumerate(words[1:], 1):
-            following: dict[int, int] = {}
+            following: dict[tuple[int, bool], int] = {}
             positions = source.positions.get(word, ())
-            for end, dropped in ends.items():
+            for (end, near_citation), dropped in ends.items():
                 declared = index in boundaries
                 width = MAX_FRAGMENT_GAP if declared else allowed_drops - dropped
                 for pos_index in range(bisect_left(positions, end), len(positions)):
                     position = positions[pos_index]
-                    if position > end + width:
+                    if position >= passage_end or position > end + width:
                         break
                     gap = source.tokens[end:position]
                     if declared:
-                        if any(token in POLARITY for token in gap):
+                        if any(token in PROTECTED_WORDS for token in gap):
                             break
                         count = dropped
                     elif not _harmless(gap, words, index):
                         continue
                     else:
                         count = dropped + len(gap)
-                    following[position + 1] = min(count, following.get(position + 1, count))
+                    state = (position + 1, near_citation or near(position))
+                    following[state] = min(count, following.get(state, count))
             if not following:
                 ends = {}
                 break
             ends = following
-        yield from ((start, end) for end in ends)
-
-
-def _near(source: Source, start: int, end: int, stamp: Stamp) -> bool:
-    first, last = source.times[start], source.times[end - 1]
-    return any(last[1] >= lo - WINDOW_SECONDS and first[0] <= hi + WINDOW_SECONDS for lo, hi in stamp.spans)
+        yield from ((start, near_citation) for _, near_citation in ends)
 
 
 def _format_time(seconds: float) -> str:
@@ -409,8 +437,8 @@ def _check(quote: Quote, evidence: dict[Path, Source | None]) -> tuple[str, str]
     for path, source in evidence.items():
         if source is None:
             continue
-        for start, end in _matches(source, quote):
-            if quote.stamp is None or (source.times and _near(source, start, end, quote.stamp)):
+        for start, near_citation in _matches(source, quote):
+            if quote.stamp is None or near_citation:
                 return "verified", ""
             if not source.times:
                 word_match = True
@@ -419,9 +447,7 @@ def _check(quote: Quote, evidence: dict[Path, Source | None]) -> tuple[str, str]
                 other_time = f"{path.name} at {_format_time(source.times[start][0])}"
 
     missing = [path.name for path, source in evidence.items() if source is None]
-    if missing:
-        return "unchecked", "configured source unavailable: " + ", ".join(missing)
-    if other_time:
+    if other_time and not missing:
         return "wrong_timestamp", f"cites {quote.stamp.text}; wording found in {other_time}"
 
     # Preserve the distinction between a literal match and harmless drops.
@@ -429,10 +455,12 @@ def _check(quote: Quote, evidence: dict[Path, Source | None]) -> tuple[str, str]
     allowed_drops = max(3, sum(map(len, quote.parts)) // 4)
     for source in evidence.values():
         if source is not None and source.times and any(
-            quote.stamp is None or _near(source, start, end, quote.stamp)
-            for start, end in _matches(source, quote, allowed_drops)
+            quote.stamp is None or near_citation
+            for _, near_citation in _matches(source, quote, allowed_drops)
         ):
             return "harmless_elision", ""
+    if missing:
+        return "unchecked", "configured source unavailable: " + ", ".join(missing)
     if word_match:
         return "unchecked", f"wording found in text; no caption match establishes {quote.stamp.text}"
     cited = f" at {quote.stamp.text}" if quote.stamp else ""
