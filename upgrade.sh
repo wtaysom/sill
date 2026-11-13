@@ -89,7 +89,7 @@ cleanup() {
   if [[ -n "$partial" ]]; then rm -f -- "$partial"; fi
   if (( code && worker_stopped && ! migration_started )); then
     # start uses the prior existing container, never a newly built image.
-    sill_compose start maintenance_worker || true
+    sill_check_database_identity && sill_compose start maintenance_worker || true
   fi
   if (( code )) && [[ -n "$backup" ]]; then
     printf 'Upgrade stopped. Valid pre-upgrade backup: %s\n' "$backup" >&2
@@ -148,6 +148,7 @@ if (( ! SCHEMA_ONLY )); then
   sill_prepare_instance "$mode"
   sill_check_running_instance
   settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$dimension")" || fail "Compose instance does not match the installed data"
+  sill_capture_database_identity "$settings"
   # Preserve the running embedding space, including a custom revision that
   # predates the new defaults. Omitted fields are pinned after backup below.
   EMBEDDING_MODEL_ID="$(printf '%s' "$settings" | python3 -c 'import json,sys; print(json.load(sys.stdin)["EMBEDDING_MODEL_ID"])')"
@@ -179,25 +180,30 @@ if (( ! SCHEMA_ONLY )); then
   sill_preserve_embedding_identity "$dimension"
   # No services are changed until backup succeeds. Build/install failure
   # leaves the prior worker container available and running.
-  sill_compose build db maintenance_worker
+  sill_build_runtime
   sill_install_backend
   printf 'Pause any enabled beat schedule and close connected clients during this upgrade. Database sessions will be fenced during migration.\n'
+  sill_check_database_identity
   sill_compose stop maintenance_worker
   worker_stopped=1
 fi
+if (( ! SCHEMA_ONLY )); then sill_check_database_identity; fi
 migration_started=1
 if ! migration apply; then
   # A failed first migration (including the client-session fence) rolls back
   # completely. Restore the old worker only if its schema is still unchanged.
   if (( worker_stopped )); then
     after="$(migration preflight 2>/dev/null)" || after=""
-    if [[ "$after" == "$state" ]]; then sill_compose start maintenance_worker; fi
+    if [[ "$after" == "$state" ]]; then
+      sill_check_database_identity && sill_compose start maintenance_worker
+    fi
   fi
   fail "Migration stopped; see last successful stamp and backup above"
 fi
 if (( ! SCHEMA_ONLY )); then
   sill_start_runtime
   sill_wait_healthy "${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}" db embeddings rabbitmq
+  sill_check_database_identity
   sill_compose up -d --no-deps --force-recreate maintenance_worker
   sill_wait_healthy "${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}" db embeddings rabbitmq maintenance_worker
   export SILL_EXPECTED_VERSION="$(sill_checkout_version)"
@@ -205,6 +211,7 @@ if (( ! SCHEMA_ONLY )); then
   register_clients
   if [[ -n "$HOOKS_FOR" ]]; then refresh_hooks; fi
   if (( ! NO_VERIFY )); then "$SILL_DIR/verify.sh" --no-seed; fi
+  sill_check_database_identity
   printf 'Restart Claude Code/Codex sessions and fully quit/reopen Claude Desktop when selected, then resume the paused beat schedule.\n'
 fi
 printf 'Upgrade complete: version %s; %s migrations applied. Backup: %s\n' "$(sill_checkout_version)" "$pending" "$backup"

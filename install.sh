@@ -154,7 +154,7 @@ step_prepare_instance() {
 
 step_docker_up() {
   say "Step 3/10: build images and start db, embeddings, rabbitmq"
-  sill_run sill_compose build
+  sill_build_runtime
   sill_start_runtime
 }
 
@@ -300,6 +300,7 @@ step_verify() {
   else
     sill_run "$SILL_DIR/verify.sh"
   fi
+  sill_check_database_identity
 }
 
 # --- step 10: banner ----------------------------------------------------------

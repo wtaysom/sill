@@ -78,7 +78,7 @@ git pull
 
 `upgrade.sh` checks the selected instance and writes a validated private
 archive under `backups/preupgrade-*.sql.gz` before changing the runtime.
-It rebuilds and reinstalls the runtime, applies pending migrations, and
+It rebuilds the worker, reinstalls the package, applies pending migrations, and
 verifies the running version. The migration temporarily fences new
 connections and stops if other clients are still connected. If it stops,
 read the last successful migration stamp and the backup path in the
@@ -87,6 +87,21 @@ prints from the same checkout. That command checks the selected database
 and restores its connection allowance. Retry after addressing the
 reported failure. A backup can be used for recovery into an empty
 database after confirming the target and keeping the original data.
+
+Fresh installs build PostgreSQL 16 on Debian Bookworm. Managed upgrades and
+installer reruns retain the existing database container and immutable image,
+checking its identity and Compose/volume ownership before runtime changes and
+at completion. Missing, replaced or stopped databases are refused; start a
+stopped database with its existing container/configuration before retrying.
+The existing PostgreSQL/OS image receives no security updates through this
+application upgrade, and its port bindings and restart policy remain unchanged.
+Older Bullseye PostgreSQL packages are EOL. Moving an existing database to a new
+OS image needs a separate backed-up migration that handles collation changes;
+this command does not perform that migration or refresh collation versions.
+Do not use direct `docker compose build/up` to upgrade an existing database:
+those commands bypass this preservation path and may recreate it on a newer
+OS image while retaining the old data volume. `reset.sh` remains a destructive
+fresh-cluster operation, not an upgrade or an OS migration.
 
 Upgrade and installer reruns preflight the existing embedding service, stored
 vector dimension and any active profile before restarting services. When the

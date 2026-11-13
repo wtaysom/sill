@@ -1,4 +1,4 @@
-"""Validate the installed embedding space and pin only omitted identity fields."""
+"""Validate existing database ownership and preserve the installed embedding space."""
 import fcntl
 import stat
 import tempfile
@@ -23,31 +23,49 @@ def inspect(kind, name):
     return json.loads(subprocess.check_output(["docker", kind, "inspect", name], text=True))[0]
 
 
-def validate(config, settings, dimension, *, install=False, observe_revision=False):
+def database_identity(config, expected=None):
+    """Identify the running container; managed updates never recreate this db."""
     project = config["name"]
-    services = config["services"]
-    db = inspect("container", services["db"]["container_name"])
-    for service in (("db", "embeddings") if install else ("db", "embeddings", "maintenance_worker")):
-        obj = db if service == "db" else inspect("container", services[service]["container_name"])
-        labels = obj["Config"].get("Labels") or {}
-        if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service:
-            raise ValueError(f"{service} does not belong to the requested Compose project")
-        if service == "db" and not obj["State"]["Running"]:
-            raise ValueError("Database is stopped; start the installed instance with its existing configuration before upgrading")
-        if service == "embeddings":
-            embedding = obj
-    volumes = [v for v in services["db"]["volumes"] if v["target"] == "/var/lib/postgresql/data"]
+    service = config["services"]["db"]
+    db = inspect("container", service["container_name"])
+    labels = db["Config"].get("Labels") or {}
+    if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != "db":
+        raise ValueError("Database does not belong to the requested Compose project")
+    if not db["State"]["Running"]:
+        raise ValueError("Database is stopped; start the installed instance with its existing configuration before upgrading")
+    container_id, image_id = db.get("Id", ""), db.get("Image", "")
+    if not re.fullmatch(r"[a-f0-9]{64}", container_id) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
+        raise ValueError("Cannot prove the existing database container and immutable image identity")
+    volumes = [v for v in service["volumes"] if v["target"] == "/var/lib/postgresql/data"]
     if len(volumes) != 1 or volumes[0]["type"] != "volume":
         raise ValueError("Unsupported database storage; expected the installed named Compose volume")
     source = volumes[0]["source"]
-    expected = config["volumes"][source]["name"]
+    volume_name = config["volumes"][source]["name"]
     mounts = [m for m in db["Mounts"] if m["Destination"] == "/var/lib/postgresql/data"]
-    if len(mounts) != 1 or mounts[0].get("Name") != expected:
+    if len(mounts) != 1 or mounts[0].get("Name") != volume_name:
         raise ValueError("Requested Compose volume differs from the existing database volume")
-    volume = inspect("volume", expected)
+    volume = inspect("volume", volume_name)
     labels = volume.get("Labels") or {}
     if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.volume") != source:
         raise ValueError("Database volume has unexpected Compose ownership")
+    identity = {"project": project, "container_name": service["container_name"],
+                "container_id": container_id, "image_id": image_id,
+                "volume_name": volume_name, "volume_source": source}
+    if expected is not None and identity != expected:
+        raise ValueError("Database identity changed during this operation; no replacement will be started")
+    return identity
+
+
+def validate(config, settings, dimension, *, install=False, observe_revision=False):
+    project = config["name"]
+    services = config["services"]
+    for service in (("embeddings",) if install else ("embeddings", "maintenance_worker")):
+        obj = inspect("container", services[service]["container_name"])
+        labels = obj["Config"].get("Labels") or {}
+        if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service:
+            raise ValueError(f"{service} does not belong to the requested Compose project")
+        if service == "embeddings":
+            embedding = obj
     command = embedding["Config"]["Cmd"]
     model = command[command.index("--model-id") + 1]
     env = dict(x.split("=", 1) for x in embedding["Config"]["Env"] if "=" in x)
@@ -180,10 +198,14 @@ def persist_identity(path, original, saved, actual):
 def main():
     config = json.load(sys.stdin)
     path = Path(sys.argv[1])
+    if sys.argv[2] == "--check-database":
+        database_identity(config, json.loads(sys.argv[3]))
+        return
     install = sys.argv[2] == "--install"
     if install and not existing_instance(config, path, "--fresh-profile" in sys.argv[3:]):
         print("{}")
         return
+    database = database_identity(config)
     original = snapshot(path)
     saved = load_instance_env(path) if original is not None else {}
     dimension = int(db_query(config, "SELECT public.embedding_dimension()")) if install else int(sys.argv[2])
@@ -195,7 +217,7 @@ def main():
             raise ValueError(f"{key} conflicts with the validated identity; reconcile it explicitly")
     if "--persist" in sys.argv[3:]:
         persist_identity(path, original, saved, actual)
-    print(json.dumps(actual))
+    print(json.dumps({**actual, "_database": database}))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ SILL_BACKEND="$SILL_DIR/backend"
 SILL_ENV_FILE="$SILL_BACKEND/.env"
 COMPOSE_FILE="$SILL_BACKEND/docker-compose.yml"
 SILL_WAIT_HEALTHY_DEFAULT=1800
+# Only this invocation's validated observation may select the existing-db lane.
+# In particular, reset and a fresh installer must ignore inherited shell flags.
+SILL_DATABASE_IDENTITY=""
 
 sill_compose() {
   local env_file="$SILL_ENV_FILE"
@@ -298,8 +301,25 @@ sill_wait_healthy() {
   done
 }
 
+sill_build_runtime() {
+  sill_check_database_identity || return 1
+  if [[ -n "$SILL_DATABASE_IDENTITY" ]]; then
+    sill_run sill_compose build maintenance_worker
+  else
+    sill_run sill_compose build db maintenance_worker
+  fi
+}
+
 sill_start_runtime() {
-  if ! sill_run sill_compose up -d db embeddings rabbitmq; then
+  sill_check_database_identity || return 1
+  local services=(db embeddings rabbitmq) flags=()
+  if [[ -n "$SILL_DATABASE_IDENTITY" ]]; then
+    # Do not offer Compose a chance to replace the existing database, even
+    # when its generated image tag or the current service definition changed.
+    services=(embeddings rabbitmq)
+    flags=(--no-deps)
+  fi
+  if ! sill_run sill_compose up -d ${flags[@]+"${flags[@]}"} "${services[@]}"; then
     sill_runtime_diagnostics db embeddings rabbitmq
     return 1
   fi
@@ -313,6 +333,7 @@ sill_finish_runtime() {
 
 sill_start_maintenance() {
   local timeout="$1"
+  sill_check_database_identity || return 1
   # Core dependencies were checked above. Let our shared wait report
   # startup state rather than waiting without progress inside Compose.
   if ! sill_compose up -d --no-deps maintenance_worker; then
@@ -371,10 +392,32 @@ sill_preserve_embedding_identity() {
   local settings mode="$1" flag="" profile_flag="" key value
   if (( ! ${DRY_RUN:-0} )); then flag=--persist; fi
   if [[ "$mode" == --install && "${EMBEDDING_PROFILE:-raw}" != raw ]]; then profile_flag=--fresh-profile; fi
+  sill_check_database_identity || return 1
   settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$mode" ${flag:+"$flag"} ${profile_flag:+"$profile_flag"})" || return 1
+  sill_capture_database_identity "$settings" || return 1
   while IFS='=' read -r key value; do
     case "$key" in
       EMBEDDING_MODEL_ID|EMBEDDING_REVISION|EMBEDDING_DIMENSION) export "$key=$value" ;;
     esac
-  done < <(printf '%s' "$settings" | python3 -c 'import json,sys; print("\n".join(k+"="+v for k,v in json.load(sys.stdin).items()))')
+  done < <(printf '%s' "$settings" | python3 -c 'import json,sys; print("\n".join(k+"="+v for k,v in json.load(sys.stdin).items() if k != "_database"))')
+}
+
+
+sill_capture_database_identity() {
+  local observed
+  observed="$(printf '%s' "$1" | python3 -c 'import json,sys; d=json.load(sys.stdin).get("_database"); print(json.dumps(d,sort_keys=True) if d else "")')" || return 1
+  if [[ -n "$SILL_DATABASE_IDENTITY" && "$SILL_DATABASE_IDENTITY" != "$observed" ]]; then
+    printf 'Database identity changed during this operation; no replacement will be started.\n' >&2
+    return 1
+  fi
+  if [[ -z "$SILL_DATABASE_IDENTITY" && -n "$observed" ]]; then
+    printf 'Retaining the existing database container and immutable image. PostgreSQL/OS security updates, ports and restart settings are unchanged; an OS refresh needs a separate backed-up migration.\n'
+  fi
+  SILL_DATABASE_IDENTITY="$observed"
+}
+
+sill_check_database_identity() {
+  [[ -n "$SILL_DATABASE_IDENTITY" ]] || return 0
+  sill_compose config --format json |
+    "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" --check-database "$SILL_DATABASE_IDENTITY"
 }

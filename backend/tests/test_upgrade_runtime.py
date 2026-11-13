@@ -78,12 +78,22 @@ if args[:2] == ["container", "ls"]:
     output = "sill_db\nsill_embeddings\nsill_maintenance_worker"
 elif args[:2] == ["container", "inspect"]:
     service = {"sill_db": "db", "sill_embeddings": "embeddings", "sill_maintenance_worker": "maintenance_worker"}[args[-1]]
-    output = json.dumps([{"State": {"Running": True}, "Config": {"Labels": {
-      "com.docker.compose.project": "wrong" if fail == "project" else "backend", "com.docker.compose.service": service},
+    previous = [json.loads(line) for line in (root / "docker-calls").read_text().splitlines()] if (root / "docker-calls").exists() else []
+    phase = os.getenv("TEST_DB_CHANGE_AFTER", "preflight")
+    changed = phase == "preflight" or (phase == "backup" and any("pg_dump" in c for c in previous)) or (phase == "build" and any("build" in c for c in previous)) or (phase == "worker" and any("up" in c and "maintenance_worker" in c for c in previous)) or (phase == "stop" and any("stop" in c for c in previous))
+    state = os.getenv("TEST_DB_STATE", "") if changed and service == "db" else ""
+    if state == "volume-owner":
+        (root / "changed-volume-owner").touch()
+    if state == "missing":
+        raise SystemExit(1)
+    output = json.dumps([{"Id": ("e" if state == "container" else "c") * 64,
+      "Image": "" if state == "unknown-image" else "sha256:" + ("e" if state == "image" else "d") * 64,
+      "State": {"Running": state != "stopped"}, "Config": {"Labels": {
+      "com.docker.compose.project": "wrong" if fail == "project" or state == "project" else "backend", "com.docker.compose.service": service},
       "Cmd": ["--model-id", "custom/model"], "Env": (["EMBEDDING_DIMENSION=768"] if fail in ("legacy-revision", "unknown-revision") else ["REVISION=" + ("main" if fail == "symbolic-revision" else "a" * 40), "EMBEDDING_DIMENSION=768"])},
-      "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}]}])
+      "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "other_volume" if state == "mount" else "backend_postgres_data"}]}])
 elif args[:2] == ["volume", "inspect"]:
-    output = json.dumps([{"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.volume": "postgres_data"}}])
+    output = json.dumps([{"Labels": {"com.docker.compose.project": "other" if (root / "changed-volume-owner").exists() else "backend", "com.docker.compose.volume": "postgres_data"}}])
 elif args[:2] == ["image", "inspect"]:
     output = "sha256:new"
 elif args[0] == "inspect" and args[2] == "{{.Image}}":
@@ -632,3 +642,54 @@ def test_fresh_identity_preflight_needs_no_installed_python_dependencies(tmp_pat
     assert result.returncode == 0, details(result)
     assert json.loads(result.stdout) == {}
     assert not (tmp_path/'.env').exists()
+
+
+@pytest.mark.parametrize("script,version", [("install.sh", "current"), ("upgrade.sh", ""), ("upgrade.sh", "current")])
+def test_existing_runtime_never_builds_or_recreates_database(upgrade, script, version):
+    result = run(upgrade, script, "--no-seed" if script == "install.sh" else "--no-verify", TEST_UPGRADE_FAILURE=version)
+    assert result.returncode == 0, details(result)
+    commands = [c[7:] for c in calls(upgrade) if c[0] == "compose"]
+    builds = [c for c in commands if c[0] == "build"]
+    assert builds == [["build", "maintenance_worker"]]
+    starts = [c for c in commands if c[0] == "up"]
+    assert starts and all("db" not in c and "--no-deps" in c for c in starts)
+    assert any("maintenance_worker" in c for c in starts)
+    assert "retaining" in result.stdout.lower() and "database" in result.stdout.lower()
+    assert "_database" not in (upgrade[0] / "backend/.env").read_text()
+
+
+@pytest.mark.parametrize("script", ["install.sh", "upgrade.sh"])
+@pytest.mark.parametrize("state", ["stopped", "missing", "unknown-image"])
+def test_existing_database_must_be_running_and_identifiable_before_runtime_mutation(upgrade, script, state):
+    result = run(upgrade, script, TEST_DB_STATE=state)
+    assert result.returncode != 0, details(result)
+    assert not any("build" in c or "up" in c or "pg_dump" in c for c in calls(upgrade))
+
+
+@pytest.mark.parametrize("script,phase,state", [
+    (script, phase, state)
+    for script, phase in [("upgrade.sh", "backup"), ("upgrade.sh", "build"),
+                          ("upgrade.sh", "stop"), ("upgrade.sh", "worker"),
+                          ("install.sh", "build"), ("install.sh", "worker")]
+    for state in ["container", "image"]
+] + [(script, "build", state) for script in ["install.sh", "upgrade.sh"]
+     for state in ["project", "mount", "volume-owner", "stopped", "missing"]])
+def test_changed_database_is_never_substituted_or_reported_success(upgrade, script, phase, state):
+    result = run(upgrade, script, "--no-seed" if script == "install.sh" else "--no-verify",
+                 TEST_DB_STATE=state, TEST_DB_CHANGE_AFTER=phase)
+    assert result.returncode != 0, details(result)
+    assert "Upgrade complete" not in result.stdout and "Sill is installed" not in result.stdout
+    commands = [c[7:] for c in calls(upgrade) if c[0] == "compose"]
+    assert not any(c[0] in ("build", "up") and ("db" in c or c == ["build"]) for c in commands)
+    if phase in ("backup", "build", "stop"):
+        assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+        assert not any(c[0] in ("up", "start") for c in commands)
+
+
+@pytest.mark.parametrize("script", ["install.sh", "upgrade.sh"])
+def test_existing_database_dry_run_checks_without_runtime_changes(upgrade, script):
+    before = (upgrade[0] / "backend/.env").read_bytes()
+    result = run(upgrade, script, "--dry-run")
+    assert result.returncode == 0, details(result)
+    assert before == (upgrade[0] / "backend/.env").read_bytes()
+    assert not any("build" in c or "up" in c or "pg_dump" in c for c in calls(upgrade))

@@ -128,7 +128,7 @@ if args[:2] == ["container", "ls"]:
 if args[:2] == ["container", "inspect"]:
     service = "db" if args[-1] == "sill_db" else "embeddings"
     choice = json.loads((root / "embedding-choice").read_text())
-    print(json.dumps([{"State": {"Running": True}, "Config": {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.service": service}, "Cmd": ["--model-id", choice["EMBEDDING_MODEL_ID"]], "Env": ["REVISION=" + choice["EMBEDDING_REVISION"], "EMBEDDING_DIMENSION=768"]}, "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}]}]))
+    print(json.dumps([{"Id": "c" * 64, "Image": "sha256:" + "d" * 64, "State": {"Running": True}, "Config": {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.service": service}, "Cmd": ["--model-id", choice["EMBEDDING_MODEL_ID"]], "Env": ["REVISION=" + choice["EMBEDDING_REVISION"], "EMBEDDING_DIMENSION=768"]}, "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}]}]))
     sys.exit()
 if args[0] == "exec":
     if "http://localhost:80/info" in args:
@@ -725,3 +725,27 @@ def test_hook_only_conflicts_refused_before_runtime(runtime, scope, override):
     for target in (home, project):
         assert not (target / ".codex/hooks.json").exists()
         assert not (target / ".claude/settings.json").exists()
+
+
+def test_fresh_install_and_reset_start_database_despite_inherited_preservation_flag(runtime):
+    inherited = {"SILL_DATABASE_IDENTITY": '{"container_id":"untrusted","image_id":"untrusted"}'}
+    first = run(runtime, "install.sh", "--no-seed", **inherited)
+    assert first.returncode == 0, details(first)
+    log = Path(runtime[2]["TEST_FIXTURE"]) / "docker-calls"
+    first_calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert any(c[0] == "compose" and c[7:] in (["build"], ["build", "db", "maintenance_worker"]) for c in first_calls)
+    assert any("up" in c and "db" in c for c in first_calls)
+    log.unlink()
+    reset = run(runtime, "reset.sh", "--yes", "--no-seed", **inherited)
+    assert reset.returncode == 0, details(reset)
+    reset_calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert any("down" in c and "-v" in c for c in reset_calls)
+    assert any("up" in c and "db" in c for c in reset_calls)
+
+
+def test_orphaned_data_volume_is_not_a_fresh_install(runtime):
+    result = run(runtime, "install.sh", "--no-seed", TEST_EXISTING_VOLUME="1")
+    assert result.returncode != 0, details(result)
+    log = Path(runtime[2]["TEST_FIXTURE"]) / "docker-calls"
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any("build" in c or "up" in c for c in commands)
