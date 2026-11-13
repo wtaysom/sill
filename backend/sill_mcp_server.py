@@ -17,10 +17,12 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -34,6 +36,7 @@ from cognitive_memory_api import (
     RelationshipInput,
     RelationshipType,
 )
+from instance_config import InstanceConfigError, instance_dsn, load_instance_env, validate_dsn
 
 
 def _print_err(msg: str) -> None:
@@ -1006,7 +1009,8 @@ def _server_version() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sill-mcp", description="MCP server exposing CognitiveMemory tools over stdio.")
-    p.add_argument("--dsn", default=os.getenv("SILL_DB_DSN") or None, help="Postgres DSN; defaults to POSTGRES_* env vars")
+    p.add_argument("--env-file", type=Path, help="Absolute path to the instance dotenv file")
+    p.add_argument("--dsn", help="PostgreSQL URI; overrides SILL_DB_DSN and POSTGRES_* settings")
     p.add_argument(
         "--version", action="version", version=f"%(prog)s {_server_version()}",
         help="Print the installed sill-mcp version and exit.",
@@ -1014,17 +1018,45 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
-    args = build_parser().parse_args(argv)
-    dsn = args.dsn or _env_dsn()
+@contextmanager
+def _without_pg_environment():
+    # Asyncpg can read PGPORT even when the URI contains an explicit port.
+    # Keep its libpq-style environment from changing explicit instance mode.
+    inherited = {key: value for key, value in os.environ.items() if key.startswith("PG")}
+    for key in inherited:
+        del os.environ[key]
     try:
-        asyncio.run(_run_server(dsn))
+        yield
+    finally:
+        os.environ.update(inherited)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.env_file is None:
+            load_dotenv()
+            dsn = args.dsn or os.getenv("SILL_DB_DSN") or _env_dsn()
+            asyncio.run(_run_server(dsn))
+        else:
+            settings = load_instance_env(args.env_file)
+            dsn = instance_dsn(settings) if args.dsn is None else validate_dsn(args.dsn)
+            with _without_pg_environment():
+                asyncio.run(_run_server(dsn))
         return 0
     except KeyboardInterrupt:
         return 130
-    except Exception as e:
-        _print_err(str(e))
+    except InstanceConfigError as exc:
+        _print_err(f"sill-mcp: {exc}")
+        return 1
+    except Exception as exc:
+        if args.env_file is None:
+            _print_err(str(exc))
+        else:
+            _print_err(
+                f"sill-mcp: {args.env_file}: could not start the server ({type(exc).__name__}). "
+                "Check the database and selected settings."
+            )
         return 1
 
 

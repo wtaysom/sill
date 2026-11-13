@@ -6,17 +6,19 @@
 #   --yes         Skip the confirmation prompt.
 #   --help        Show this help.
 #
-# Destructive by default: drops Docker volumes, removes the backend install,
-# removes the plugin symlink. MCP config entries in ~/.claude.json and
-# ~/.codex/config.toml are intentionally left for the user to edit — we don't
-# want to clobber other servers they may have wired alongside sill.
+# By default this drops Docker volumes, removes the backend install,
+# removes the plugin symlink. Client MCP registrations are left for
+# deliberate removal. Remove the Sill entry for each client you connected.
+#   Claude Code      mcpServers.sill in ~/.claude.json
+#   Codex            mcp_servers.sill in ${CODEX_HOME:-$HOME/.codex}/config.toml
+#   Claude Desktop   mcpServers.sill in ~/Library/Application Support/Claude/claude_desktop_config.json
 
 set -euo pipefail
 
 KEEP_DATA=0
 ASSUME_YES=0
 
-usage() { sed -n '2,15p' "$0"; }
+usage() { sed -n '2,14p' "$0"; }
 
 while (( $# )); do
   case "$1" in
@@ -88,14 +90,10 @@ fi
 
 # --- step 4: MCP entry warning -----------------------------------------------
 say "4/4: MCP entries — manual edit"
-cat <<EOF
-  We did NOT touch ~/.claude.json or ~/.codex/config.toml. To finish
-  uninstalling, remove the 'sill' entries by hand:
+cat <<'EOF'
+  To finish uninstalling, remove the Sill entry for each client you connected.
 
-    * ~/.claude.json            : delete mcpServers.sill
-    * ~/.codex/config.toml      : delete [mcp_servers.sill] (and [features].hooks
-                                  if you only enabled it for sill)
-
-  We avoid editing these files because they may contain other MCP servers
-  whose ordering or comments we shouldn't disturb.
+    Claude Code      mcpServers.sill in ~/.claude.json
+    Codex            mcp_servers.sill in ${CODEX_HOME:-$HOME/.codex}/config.toml
+    Claude Desktop   mcpServers.sill in ~/Library/Application Support/Claude/claude_desktop_config.json
 EOF

@@ -32,6 +32,7 @@ tests that pin all of this.
 Needs no docker, database, or network.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -137,12 +138,20 @@ def test_each_swept_file_names_the_live_registry(rel, needle):
     assert needle in body, f"{rel} no longer tells the reader where the registry is"
 
 
-def test_uninstall_instructions_stay_column_aligned():
-    """The hand-edit block is read off a terminal; a shortened path that keeps
-    the old padding puts the colons out of line."""
-    body = (REPO_ROOT / "uninstall.sh").read_text(encoding="utf-8")
-    rows = [line for line in body.splitlines()
-            if line.lstrip().startswith("* ~/.") and " : " in line]
-    assert len(rows) >= 2, "expected the two-row hand-edit table in uninstall.sh"
-    columns = {line.index(" : ") for line in rows}
-    assert len(columns) == 1, f"colons are not aligned across rows: {rows}"
+def test_uninstall_help_lists_three_aligned_manual_removal_paths():
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "uninstall.sh"), "--help"],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    expected = {
+        "Claude Code": "mcpServers.sill in ~/.claude.json",
+        "Codex": "mcp_servers.sill in ${CODEX_HOME:-$HOME/.codex}/config.toml",
+        "Claude Desktop": "mcpServers.sill in ~/Library/Application Support/Claude/claude_desktop_config.json",
+    }
+    rows = {
+        match[1]: (match.start(2), match[2])
+        for line in result.stdout.splitlines()
+        if (match := re.fullmatch(r"#   (Claude Code|Codex|Claude Desktop) +(mcp.*)", line))
+    }
+    assert {client: instruction for client, (_, instruction) in rows.items()} == expected
+    assert len({column for column, _ in rows.values()}) == 1
