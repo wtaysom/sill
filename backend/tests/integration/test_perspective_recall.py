@@ -90,9 +90,13 @@ async def test_perspective_filter_before_limit(migrated_dsn):
                 assert rows[0]['score'] == pytest.approx(2/61)
         result = await client.recall(keyword, limit=1, speaker='Inez', include_partial=False)
         assert [r.id for r in result.memories] == [target]
+        await client.remember(keyword+' blank name', speaker='   ', minted_in=STAMP)
+        await client.remember(keyword+' padded name', speaker=' Inez ', minted_in=STAMP)
         speakers = dict(await client.speakers())
         assert speakers['Inez'] == 1 and speakers['crowd'] == 20
         assert '#Nobody' not in speakers and 'archived-only' not in speakers
+        assert '   ' not in speakers
+        assert speakers[' Inez '] == 1  # Listing never rewrites a stored identity.
         assert await client.speakers(min_count=20, limit=1) == [('crowd',20)]
 
 

@@ -22,7 +22,9 @@ transcript. Readers explicitly render undeclared production as such.
 
 `session_context` accepts host IDs from `CODEX_THREAD_ID`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_SESSION_ID`, or a hook payload. Conflicting
-host IDs remain unknown unless the payload disambiguates them.
+host IDs remain unknown unless the payload matches one of them. A payload
+that conflicts with all supplied native IDs, even a sole environment ID,
+leaves the native host unknown and cannot supply a derived transcript path.
 `SILL_SESSION_ID` supplies an explicit correlation scope;
 `SILL_SESSION_ID_SOURCE=worker_attempt` and `SILL_ATTEMPT_ID` describe a worker
 attempt, independently of `host_session_id`. Optional `SILL_VOICE`,

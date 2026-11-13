@@ -25,7 +25,12 @@ def session_context(payload=None, *, env=None):
                   ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
                   if (value := _identifier(environ.get(name)))]
     host_id = host_source = None
-    if len({value for _, value in native_ids}) > 1:
+    native_values = {value for _, value in native_ids}
+    if hook_id and native_values and hook_id not in native_values:
+        # A sole environment value can also belong to an inherited parent.
+        # Contradictory hook evidence establishes neither as this native host.
+        host_source = "conflicting_host_evidence"
+    elif len(native_values) > 1:
         # A nested CLI can inherit its parent's identifier. Only a matching
         # hook payload disambiguates those native environments safely.
         matches = [(name, value) for name, value in native_ids if value == hook_id]

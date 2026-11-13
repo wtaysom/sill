@@ -339,7 +339,7 @@ class CognitiveMemory:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("""SELECT speaker, COUNT(*) AS count FROM memories
                 WHERE archived_at IS NULL AND speaker IS NOT NULL
-                  AND speaker <> '' AND speaker NOT LIKE '#%'
+                  AND btrim(speaker) <> '' AND speaker NOT LIKE '#%'
                 GROUP BY speaker HAVING COUNT(*) >= $1 ORDER BY count DESC, speaker LIMIT $2""",
                 min_count, limit)
             return [(row["speaker"], int(row["count"])) for row in rows]
