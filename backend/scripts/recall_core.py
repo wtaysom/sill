@@ -281,6 +281,8 @@ async def _selected_query(payload: dict) -> str:
             # Separate statement before the query's snapshot: M5 cutover barrier.
             await conn.execute('SELECT pg_advisory_xact_lock_shared(714014)')
             rows = await conn.fetch(payload['sql'])
+            if payload.get('row_arrays'):
+                return '\n'.join(json.dumps(list(row), default=str) for row in rows)
             return '\n'.join(str(row[0]) for row in rows)
     finally:
         await conn.close(timeout=1)
@@ -293,14 +295,19 @@ def _selected_main() -> None:
         raise SystemExit(1) from None
 
 
-def _run_sql(sql: str, *, timeout: float = QUERY_TIMEOUT) -> str:
+def _run_sql(sql: str, *, timeout: float = QUERY_TIMEOUT, deadline: float | None = None,
+             row_arrays: bool = False) -> str:
     """Bounded child transport. Explicit file wins exclusively; errors redact DSNs."""
-    deadline = getattr(_deadlines, 'value', None)
+    lane_deadline = getattr(_deadlines, 'value', None)
+    if lane_deadline is not None:
+        deadline = min(deadline, lane_deadline) if deadline is not None else lane_deadline
     if deadline is not None:
         timeout = min(timeout, deadline - time.monotonic())
     if timeout <= 0:
         raise RecallUnavailable('Recall deadline exceeded')
     selected = os.environ.get('SILL_INSTANCE_ENV_FILE')
+    if row_arrays and selected is None:
+        raise RecallUnavailable('Selected row transport requires an explicit instance')
     try:
         if selected is not None:
             dsn = instance_dsn(load_instance_env(Path(selected)))
@@ -308,7 +315,7 @@ def _run_sql(sql: str, *, timeout: float = QUERY_TIMEOUT) -> str:
                    if not k.startswith(('PG','POSTGRES_','SILL_DB_'))}
             result = subprocess.run([sys.executable, '-c',
                 'from scripts.recall_core import _selected_main; _selected_main()'],
-                input=json.dumps({'dsn':dsn,'sql':sql,'timeout':timeout}),
+                input=json.dumps({'dsn':dsn,'sql':sql,'timeout':timeout,'row_arrays':row_arrays}),
                 env=env, capture_output=True, text=True, timeout=timeout,
                 cwd=str(Path(__file__).resolve().parents[1]))
         else:
@@ -386,29 +393,29 @@ def recall_rows(fn: str, query_text: str, limit: int = 15, *,
     return parse_memory_rows(_run_sql(sql), limit)
 
 
-def full_contents(ids: list[str]) -> dict[str,str]:
+def full_contents(ids: list[str], *, deadline: float | None = None) -> dict[str,str]:
     """Lossless display hydration; the displaying caller records exposure once."""
     valid = _ids(ids)
     if not valid:
         return {}
     sql = "SELECT row_to_json(r) FROM (SELECT id::text,content FROM public.memories WHERE id IN (" + ','.join(_literal(i)+'::uuid' for i in valid) + ') AND archived_at IS NULL) r'
-    rows = _json_rows(_run_sql(sql))
+    rows = _json_rows(_run_sql(sql, deadline=deadline))
     if any(not isinstance(r.get('id'),str) or not isinstance(r.get('content'),str) for r in rows):
         raise RecallUnavailable('Recall store returned invalid content rows')
     return {r['id']:r['content'] for r in rows}
 
 
-def record_exposure(ids, timeout: int = 10) -> None:
+def record_exposure(ids, timeout: int = 10, *, deadline: float | None = None) -> None:
     """Count unique displayed IDs, without refreshing recency. Failures are typed."""
     valid = _ids(ids)
     if valid:
         _run_sql('UPDATE public.memories SET access_count=COALESCE(access_count,0)+1 WHERE id IN ('
-                 + ','.join(_literal(i)+'::uuid' for i in valid)+')', timeout=timeout)
+                 + ','.join(_literal(i)+'::uuid' for i in valid)+')', timeout=timeout, deadline=deadline)
 
 
 def fused_recall(text: str, previous: str = '', fetch=recall_rows,
                  keywords: list[str] | None = None, limit: int = 5,
-                 fast_min_similarity: float = .25) -> list[dict]:
+                 fast_min_similarity: float = .25, *, deadline: float | None = None) -> list[dict]:
     """Fuse distinct lanes with RRF k=60, retaining the selected row's score.
 
     Production uses at most four bounded child transports and one overall
@@ -417,6 +424,8 @@ def fused_recall(text: str, previous: str = '', fetch=recall_rows,
     """
     if not text.strip() or limit <= 0:
         return []
+    if deadline is not None and deadline <= time.monotonic():
+        raise RecallUnavailable('Recall deadline exceeded')
     jobs = [(fn,q) for q in fused_subqueries(text,previous,keywords)
             for fn in ('fast','hybrid')]
     options = {'limit': FUSED_POOL, 'fast_min_similarity': fast_min_similarity}
@@ -436,7 +445,7 @@ def fused_recall(text: str, previous: str = '', fetch=recall_rows,
         except Exception:
             return None
     if fetch is recall_rows:
-        deadline = time.monotonic() + FUSION_TIMEOUT
+        deadline = min(deadline, time.monotonic() + FUSION_TIMEOUT) if deadline is not None else time.monotonic() + FUSION_TIMEOUT
         def bounded(job):
             _deadlines.value = deadline
             try:

@@ -84,7 +84,7 @@ def test_no_sidecar_written_when_no_memories(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_pattern_carry_forward_surfaces_and_consumes_the_sidecar(tmp_path):
-    sidecar = tmp_path / "response-patterns-last-carryfwd-sess.json"
+    sidecar = tmp_path / "response-patterns-last-sha256-83d9078614f3d1f7f2aeef8ad78c0a327998f2de637fc167cf501168f106dce9.json"
     sidecar.write_text(json.dumps({
         "timestamp": "2026-08-05T00:00:00",
         "warnings": ["you agreed without verifying last turn"],
@@ -122,3 +122,53 @@ def test_pattern_carry_forward_absent_is_a_quiet_no_op(tmp_path):
     out = json.loads(r.stdout)
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "[PATTERN CHECK" not in ctx
+
+# Shared callback runner uses only synthetic rows and the real hook program.
+from test_write_recall import callback, ROWS
+
+
+def test_prompt_recall_current_claude_and_codex_event_injects_expected_context(callback, monkeypatch, tmp_path):
+    run, calls, exposed = callback
+    import _store
+    monkeypatch.setattr(_store, 'query', lambda *a, **kw: [])
+    transcript = tmp_path / 'session.jsonl'
+    transcript.write_text(json.dumps({'type':'assistant','message':{'content':'Previous cedar survey'}})+'\n')
+    for fields in ({}, {'turn_id':'turn-1'}):
+        out = run(dict(prompt='Cedar meadow survey records and water retention', session_id='s',
+                       hook_event_name='UserPromptSubmit', transcript_path=str(transcript), **fields),
+                  'spontaneous-recall.py')
+        assert 'Synthetic cedar finding' in out['hookSpecificOutput']['additionalContext']
+        assert 'score=0.0164' in out['hookSpecificOutput']['additionalContext']
+        assert out['hookSpecificOutput']['hookEventName'] == 'UserPromptSubmit'
+    assert len(exposed) == 10
+    assert 'Previous cedar survey' in calls[0][1]
+    assert calls[0][2]['limit'] == 5
+
+
+def test_prompt_quiet_keeps_model_context_and_store_outage_visible(callback, monkeypatch):
+    run, calls, exposed = callback
+    import _store
+    from scripts import recall_core
+    monkeypatch.setattr(_store, 'query', lambda *a, **kw: [])
+    monkeypatch.setenv('SILL_RECALL_QUIET','1')
+    payload = dict(prompt='Cedar meadow survey records and water retention')
+    out = run(payload,'spontaneous-recall.py')
+    assert 'Synthetic cedar' in out['hookSpecificOutput']['additionalContext']
+    assert 'Synthetic cedar' not in out['systemMessage']
+    monkeypatch.setattr(recall_core,'fused_recall',lambda *a, **kw: [])
+    out = run(payload,'spontaneous-recall.py')
+    assert 'failed' not in out['systemMessage']
+    def failed(*a, **kw):
+        raise recall_core.RecallUnavailable('unavailable')
+    monkeypatch.setattr(recall_core,'fused_recall',failed)
+    out = run(payload,'spontaneous-recall.py')
+    assert 'failed' in out['systemMessage']
+
+
+def test_short_prompt_invalid_explicit_instance_reports_unchecked(tmp_path):
+    result=run_hook({'prompt':'yes','session_id':'s'}, {
+        'SILL_INSTANCE_ENV_FILE':str(tmp_path/'missing.env'), 'SILL_LOG_DIR':str(tmp_path)})
+    assert result.returncode == 0
+    output=json.loads(result.stdout)
+    assert '[TIME]' in output['systemMessage']
+    assert 'unavailable' in output['systemMessage'].lower()

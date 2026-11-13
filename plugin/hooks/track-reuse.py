@@ -27,6 +27,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+import _store
 
 try:
     import psycopg2
@@ -75,8 +76,12 @@ def log(message: str):
 def get_db_connection():
     if psycopg2 is None:
         log("psycopg2 unavailable; skipping reuse tracking")
+        if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+            print(json.dumps({'systemMessage':'[sill] Reuse store unavailable; reuse unchecked.'}))
         return None
     try:
+        if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+            return _store.selected_connection(psycopg2.connect)
         return psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
@@ -85,7 +90,8 @@ def get_db_connection():
             password=DB_PASS,
         )
     except Exception as e:
-        log(f"DB connection failed: {e}")
+        log("DB connection unavailable")
+        print(json.dumps({"systemMessage":"[sill] Reuse store unavailable; reuse unchecked."}))
         return None
 
 
@@ -386,33 +392,16 @@ def touch_memory_reuse(conn, memory_id: str, evidence: str, session_id: str,
             conn.commit()
             return True
     except Exception as e:
-        log(f"Error touching memory {memory_id}: {e}")
+        log("Reuse accounting unavailable")
         conn.rollback()
         return False
 
 
 def read_recall_sidecars(session_id: str, recent_window_minutes: int = 5) -> list[dict]:
-    """Read the per-session and 'recent' sidecar files written by recall
-    channels that bypass MCP tool_results and so would otherwise be invisible
-    here (e.g. the spontaneous-recall hook's own memory injections).
+    """Read this session's bounded public recall journal, time-gated to five minutes.
 
-    Each entry is {"ts", "source", "memories": [{"id","content"}, ...]}.
-    Both files are time-gated to the last `recent_window_minutes` minutes.
-
-    The per-session file is append-only and never truncated (spontaneous-
-    recall.py only ever opens it with mode "a"), so an unbounded read would
-    make the candidate set grow monotonically for the life of the session —
-    every UserPromptSubmit turn adds its recalled memories, and none ever
-    drop off. With BURST_LIMIT zeroing any batch of more than a few flagged
-    memories in one Stop event (guard-3, a citation-sweep guard), a long
-    session's ever-growing candidate pool makes that guard fire more often
-    the longer the session runs, purely from pool size — turning an
-    anti-citation-sweep guard into a session-length kill switch that
-    silently stops recording reuse. Time-gating both files the same way
-    caps the candidate pool by recency instead of by session boundary,
-    which is what BURST_LIMIT's "one Stop event" framing actually assumes:
-    a memory recalled hours ago is no more part of "what's live right now"
-    than one recalled in a different session entirely.
+    Never use an unscoped recent bucket: exposure in another session is not
+    evidence of context supplied to this assistant.
     """
     out = []
     seen_ids = set()
@@ -425,10 +414,9 @@ def read_recall_sidecars(session_id: str, recent_window_minutes: int = 5) -> lis
 
     log_dir = Path(os.environ.get("SILL_LOG_DIR", "/tmp"))
     candidate_paths = []
-    sid = (session_id or "").strip()
+    sid = _harness.hook_session_path_key(session_id)
     if sid:
         candidate_paths.append((log_dir / f"recall-sidecar-{sid}.jsonl", True))
-    candidate_paths.append((log_dir / "recall-sidecar-recent.jsonl", True))
 
     for path, time_gated in candidate_paths:
         if not path.exists():
@@ -483,7 +471,7 @@ def main():
 
     response_text = get_response_text(input_data)
     recalled_memories = get_recalled_memories(input_data)
-    session_id = input_data.get("session_id", "")
+    session_id = _harness.hook_session_id(input_data, env=os.environ)
 
     # Merge in sidecar-surfaced memories (recall paths with no MCP tool call
     # for this hook to scan) without duplicating anything already found via

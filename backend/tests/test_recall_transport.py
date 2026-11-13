@@ -86,3 +86,51 @@ def test_exposure_selected_failure_is_typed(core, monkeypatch):
     monkeypatch.setattr(core.subprocess,'run',lambda *a,**kw: pytest.fail('fallback attempted'))
     with pytest.raises(core.RecallUnavailable):
         core.record_exposure(['00000000-0000-0000-0000-000000000001'])
+
+
+def test_display_phases_share_absolute_deadline(monkeypatch):
+    from scripts import recall_core as core
+    import time
+    import pytest
+    past = time.monotonic() - 1
+    mid = '00000000-0000-0000-0000-000000000001'
+    with pytest.raises(core.RecallUnavailable):
+        core.full_contents([mid], deadline=past)
+    with pytest.raises(core.RecallUnavailable):
+        core.record_exposure([mid], deadline=past)
+    with pytest.raises(core.RecallUnavailable):
+        core.fused_recall('Cedar meadow water', deadline=past)
+
+
+def test_callback_deadline_bounds_every_production_child(core,monkeypatch):
+    import time
+    calls=[]
+    monkeypatch.delenv('SILL_INSTANCE_ENV_FILE',raising=False)
+    def transport(*a,**kw):
+        calls.append(kw['timeout'])
+        return SimpleNamespace(returncode=0,stdout='')
+    monkeypatch.setattr(core.subprocess,'run',transport)
+    deadline=time.monotonic()+.4
+    assert core.fused_recall('Cedar meadow water survey',deadline=deadline) == []
+    mid='00000000-0000-0000-0000-000000000001'
+    assert core.full_contents([mid],deadline=deadline) == {}
+    core.record_exposure([mid],deadline=deadline)
+    assert len(calls)>2 and all(0<t<=.4 for t in calls)
+
+
+def test_selected_child_row_array_mode_preserves_all_columns_and_nulls(core,monkeypatch):
+    import asyncio
+    import sys
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def transaction():
+        yield
+    class Connection:
+        def transaction(self): return transaction()
+        async def execute(self,*args): pass
+        async def fetch(self,*args): return [('line\n|||臺灣','inserted',None)]
+        async def close(self,**kw): pass
+    async def connect(*args,**kw): return Connection()
+    monkeypatch.setitem(sys.modules,'asyncpg',SimpleNamespace(connect=connect))
+    output=asyncio.run(core._selected_query({'dsn':'unused','timeout':1,'sql':'SELECT fixture','row_arrays':True}))
+    assert json.loads(output) == ['line\n|||臺灣','inserted',None]
