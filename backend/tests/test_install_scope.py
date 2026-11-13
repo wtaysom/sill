@@ -240,6 +240,12 @@ def test_home_scope_codex_render_writes_fresh_then_leaves_existing_alone(tmp_pat
     dst = home / ".codex" / "hooks.json"
     assert dst.exists()
     rendered = dst.read_text()
+    write_group, = json.loads(rendered)['hooks']['PostToolUse']
+    assert write_group['matcher'] == 'Write|Edit|MultiEdit|apply_patch'
+    write_hook, = write_group['hooks']
+    assert write_hook['timeout'] == 30
+    assert 'SILL_INSTANCE_ENV_FILE=' in write_hook['command']
+    assert 'write-recall.py' in write_hook['command']
     assert "{{SILL_PLUGIN_DIR}}" not in rendered
     assert str(REPO_ROOT / "plugin") in rendered
 

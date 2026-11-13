@@ -8,7 +8,8 @@ The Sill — mint path for durable memory.
       expressive/declaration).
 
 Used by CLI hooks, detached workers, and any future agent. All queries go
-through subprocess to docker exec psql.
+through bounded subprocess transports. An explicit instance selector uses the
+shared selected transport; otherwise the legacy docker exec psql route remains.
 
 orient/check/stance are house- and ollama-bound and are deferred to Plan 5 —
 this module carries the mint path only.
@@ -55,6 +56,8 @@ def _load_backend_env() -> None:
     works inside a beat and fails from the shell that launched it is exactly
     the surprise this file's error reporting exists to prevent.
     """
+    if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+        return  # Explicit selection, including invalid/empty, is exclusive.
     env_path = Path(__file__).resolve().parent / ".env"
     try:
         text = env_path.read_text(encoding="utf-8")
@@ -85,6 +88,19 @@ VALID_TYPES = ("semantic", "episodic", "procedural", "strategic")
 
 def _query_db(sql: str, timeout: int = 10) -> list[list[str]]:
     """Run SQL against the memory database. Returns rows as lists of strings."""
+    if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+        try:
+            from scripts.recall_core import _run_sql
+            output = _run_sql(sql, timeout=timeout, row_arrays=True)
+            rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+            if any(not isinstance(row, list) for row in rows):
+                raise ValueError('invalid row shape')
+            # Retain the legacy empty-field null contract without losing other
+            # columns, delimiters, newlines, or the atomic top-level CTE.
+            return [['' if value is None else str(value) for value in row] for row in rows]
+        except Exception:
+            print('[sill db] Selected store unavailable; mint not confirmed.', file=sys.stderr)
+            return []
     cmd = [
         "docker", "exec", DB_CONTAINER,
         "psql", "-U", DB_USER, "-d", DB_NAME,

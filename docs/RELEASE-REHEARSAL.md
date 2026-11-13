@@ -506,7 +506,7 @@ something.
    Compose's precedence (an exported variable still wins), the same way
    `verify.sh`, `upgrade.sh` and `memory_health.py` already do. Five tests.
 
-**Still not closed, and worth naming:** the guards
+**Historical 0.2 status (addressed by the 0.3 selected-instance adapter):** the guards
 (`plugin/hooks/stored-slot-guard.py` and friends) reach the database by the
 same `docker exec "$SILL_DB_CONTAINER"` route and still read only the process
 environment — F8 fixed that with a diagnostic in the doc rather than a code
@@ -521,3 +521,36 @@ differently than its doc says, that is worth reporting — the nine findings
 above were all found by exactly that, and every one of them had been shipped
 past by people who believed the document. The three in §5 were found by
 distrusting this document's own word "unverified".
+
+
+## 0.3 prompt/write callback rehearsal boundary
+
+H2's offline tests exercise current Claude/Codex event shapes, synthetic prompt
+text, real concurrent write-hook processes, quiet/zero/outage behavior, the
+selected-instance adapter, and rendered registration. They do not establish
+that a native host consumed the context. The sanitized captured event fixtures
+omit prompt text; retain that limitation beside any evidence derived from them.
+
+The release controller owns the remaining isolated native rehearsal:
+
+1. Create a dedicated synthetic store, distinct from the live installation,
+   with uniquely recognizable memory text and known IDs. Register its absolute
+   env-file path using the installed interpreter and the rendered template.
+   Set inherited DB coordinates deliberately to stale/nonexistent targets.
+2. Record Claude Code/Codex CLI versions, exact temporary trusted project
+   scope, command registration (including `SILL_INSTANCE_ENV_FILE`), and the
+   captured callback's `hook_event_name`, session fields and supported tool.
+   Do not infer callback trust from successful MCP connection.
+3. On each host, observe a synthetic UserPromptSubmit recall, a PostToolUse
+   write recall on its supported Write/Edit or apply_patch path, and a
+   portable PreToolUse guard. Record visible/model context separately from
+   process stdout. A second write to the same canonical path should stay
+   quiet; another session should remain independent.
+4. Inspect only the synthetic store's exposure/reuse evidence. Only injected
+   rows increment exposure; hydration alone does not, and exposure never
+   updates last_accessed. Record any unavailable/unchecked result explicitly.
+5. Report callbacks actually observed for each named host. A CLI observation
+   does not establish desktop or hosted callback support. Do not edit live
+   app settings, trust entries, or the live Sili database for this rehearsal.
+
+Sili

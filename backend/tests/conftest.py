@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND_ROOT.parent / "plugin/hooks"))
 
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
@@ -24,7 +25,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 @pytest.fixture
 def recall_hook(monkeypatch, capsys, tmp_path):
-    """Run the actual prompt hook with synthetic Docker and archive responses."""
+    """Run the actual prompt hook against synthetic core and archive boundaries."""
     hook = BACKEND_ROOT.parent / "plugin" / "hooks" / "spontaneous-recall.py"
     episodic_cli = tmp_path / "episodic-memory"
     episodic_cli.touch()
@@ -50,21 +51,31 @@ def recall_hook(monkeypatch, capsys, tmp_path):
                 calls["episodes"].append(int(args[4]))
                 spend("episodes", args, timeout)
                 return subprocess.CompletedProcess(args, 0, episodes, "")
-            assert args[0] == "docker", args
-            query = args[-1]
-            if "INSERT INTO session_activity" in query:
-                spend("clock", args, timeout)
-                return subprocess.CompletedProcess(args, 0, "|||-1|||1\n", "")
-            if query.startswith("UPDATE memories "):
-                spend("access", args, timeout)
-                return subprocess.CompletedProcess(args, 0, "", "")
-            calls["store"].append(query)
-            spend("store", args, timeout)
-            if isinstance(store_response, Exception):
-                raise store_response
-            if store_response is not None:
-                return store_response
-            return subprocess.CompletedProcess(args, 0, "", "")
+            raise AssertionError(f'Unexpected subprocess: {args}')
+
+        from scripts import recall_core as core
+        import _store
+
+        def fused(text, previous='', **kwargs):
+            calls['store'].append(kwargs)
+            try:
+                spend('store', [], max(0, kwargs['deadline'] - time.monotonic()))
+                if isinstance(store_response, Exception) or (store_response is not None and store_response.returncode):
+                    raise core.RecallUnavailable('unavailable')
+                return core.parse_memory_rows(store_response.stdout, kwargs['limit']) if store_response else []
+            except (OSError, subprocess.SubprocessError):
+                raise core.RecallUnavailable('unavailable') from None
+
+        def clock(*args, **kwargs):
+            spend('clock', [], kwargs['timeout'])
+            return []
+
+        def exposure(ids, **kwargs):
+            if ids:
+                try:
+                    spend('access', [], max(0, min(10, kwargs['deadline']-time.monotonic())))
+                except subprocess.SubprocessError:
+                    raise core.RecallUnavailable('unavailable') from None
 
         with monkeypatch.context() as patch:
             for name in tuple(os.environ):
@@ -75,6 +86,10 @@ def recall_hook(monkeypatch, capsys, tmp_path):
             for name, value in (settings or {}).items():
                 patch.setenv(name, value)
             patch.setattr(subprocess, "run", fake_run)
+            patch.setattr(core, 'fused_recall', fused)
+            patch.setattr(core, 'full_contents', lambda *a, **kw: {})
+            patch.setattr(core, 'record_exposure', exposure)
+            patch.setattr(_store, 'query', clock)
             if delays is not None:
                 patch.setattr(time, "monotonic", lambda: elapsed)
             patch.setattr(sys, "stdin", io.StringIO(json.dumps({

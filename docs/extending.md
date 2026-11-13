@@ -417,3 +417,74 @@ Twenty-two memories about inquiry, verification, recall patterns,
 attribution, and storage hygiene that the upstream project converged
 on over six months. You can read the whole thing at
 `seed/methodology.jsonl`; it's plain JSONL.
+
+
+## Prompt and write recall (0.3)
+
+Both callbacks use `scripts.recall_core` for fusion, previous-turn extraction,
+focused snippets, content hydration and exposure accounting. Scores retain
+their source SQL meaning; the fast lane floor is query cosine, not the blended
+fast score. Prompt settings `SILL_RECALL_MAX_MEMORIES` (5), `SILL_RECALL_MAX_CONVERSATIONS` (2),
+`SILL_RECALL_MIN_QUERY_LENGTH` (20), `SILL_RECALL_MIN_SIMILARITY` (0.25), and
+`SILL_RECALL_QUIET` remain supported. A zero count disables that source.
+Quiet mode preserves model context, time and visible store failures. Prior
+context comes only from the event's own readable transcript, otherwise empty.
+
+The default `PostToolUse` registration matches `Write|Edit|MultiEdit|apply_patch`
+with the installed Python interpreter and a 30-second host timeout. Set
+`SILL_WRITE_RECALL=0` to disable it. Detached/headless calls, wrong events,
+missing session identity, ignored logs/data paths, and fewer than 80 stripped
+added characters do not retrieve. One callback selects the first eligible
+unseen canonical path, takes at most 1,500 added characters from that file,
+runs one fused lookup with candidate limit 10, and injects at most three IDs
+not previously shown in that session. Later eligible files wait for a later
+callback. Output is only `hookSpecificOutput.additionalContext` for
+`PostToolUse`; it contains readable text, four-decimal scores, IDs and available
+source metadata. No exposure refreshes retrieval recency or records a reuse.
+
+Write recall has one absolute monotonic 25-second deadline: up to 17 seconds
+for fusion, hydration until second 23, accounting until second 25. Prompt
+recall shares 40 seconds under its 45-second registration, including session
+bookkeeping and the optional episodic CLI; fusion is capped at 15 seconds.
+`fused_recall`, `full_contents`, and `record_exposure` accept an optional
+keyword-only `deadline` (absolute `time.monotonic()`), preserving existing
+limits when omitted. Production transports take the smaller remaining budget
+and their existing timeout; no uncancellable timeout thread is added.
+
+All DB hooks honor an explicit `SILL_INSTANCE_ENV_FILE` exclusively, using
+the common instance parser. Invalid selection never falls back to inherited
+coordinates or a default container. Unavailable stores produce a recall
+warning or unchecked receipt/reuse/checkpoint signal, with redacted errors.
+Legacy routing remains when no instance file is selected.
+
+State lives under `SILL_LOG_DIR`. A canonical lowercase UUID is its filename
+key verbatim; any other nonblank session string becomes `sha256-<hex>`.
+Missing identity keeps prompt state request-local and disables write recall.
+The public journal remains `recall-sidecar-<key>.jsonl`, with UTC ISO `ts`,
+`source` (`spontaneous-recall` or `write-recall`), and `memories` containing
+`id` and the shown `content`. Reuse reads only this session, within five
+minutes, and never reads a global recent bucket. Stop carry-forward uses the
+same key convention.
+
+A per-session `flock` bounds lock waits to 0.5 seconds. Paths are leased with
+random ownership tokens and an epoch expiry 35 seconds later; a failed lookup
+releases only its own lease, and interrupted callbacks expire. Fresh rows are
+chosen again under the lock before emission. State and the journal use atomic
+replacement; the journal retains at most 512 entries. The dedupe index keeps
+up to 8,192 shown IDs and 4,096 completed paths; reaching either cap disables
+new write lookups for that session instead of forgetting older IDs or paths.
+Each atomic replacement has one fixed temporary filename under the lock, so
+repeated interrupted writes do not accumulate orphan temporary files.
+Like any stdout callback, a process killed between output and journal commit
+cannot provide transactional exactly-once delivery to the host. Host receipt
+is not acknowledged by this protocol.
+
+The optional response-pattern insight mint invokes `sill notice`. This indirect
+DB path also honors explicit selection and skips adjacent `.env` loading when
+a selector is present, including empty/invalid selectors. The shared private
+transport's `row_arrays=True` mode returns complete JSON arrays from selected
+child queries, retaining all columns and nulls without wrapping or altering a
+top-level data-modifying CTE. Only the legacy mint boundary converts a null to
+its historical empty-field representation. Default recall JSON transport and
+unselected CLI behavior remain unchanged. Write recall uses the same configured
+fast cosine floor as prompt recall.

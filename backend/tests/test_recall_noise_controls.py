@@ -1,6 +1,7 @@
 """Behavior of the prompt hook's recall settings with synthetic results."""
 
 import subprocess
+import json
 
 import pytest
 
@@ -11,7 +12,7 @@ import pytest
 def test_memory_count_controls_query_limit(recall_hook, value, expected):
     _, calls = recall_hook(settings={"SILL_RECALL_MAX_MEMORIES": value})
     query, = calls["store"]
-    assert query.rstrip().endswith(f"LIMIT {expected};")
+    assert query["limit"] == expected
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -56,16 +57,14 @@ def test_zero_minimum_length_allows_short_topical_prompts(recall_hook):
 def test_similarity_setting_controls_fast_recall_only(recall_hook, value, expected):
     _, calls = recall_hook(settings={"SILL_RECALL_MIN_SIMILARITY": value})
     query, = calls["store"]
-    assert "FROM fast_recall(" in query
-    assert f"WHERE fr.score >= {expected}\n" in query
+    assert query["fast_min_similarity"] == expected
 
 
 
 def test_zero_fast_score_floor_omits_the_filter(recall_hook):
     _, calls = recall_hook(settings={"SILL_RECALL_MIN_SIMILARITY": "0"})
     query, = calls["store"]
-    assert "FROM fast_recall(" in query
-    assert "WHERE fr.score" not in query
+    assert query["fast_min_similarity"] == 0
 
 
 def test_maximum_supported_minimum_is_honored(recall_hook):
@@ -84,12 +83,11 @@ def test_fast_floor_does_not_filter_hybrid_rrf_scores(recall_hook):
         settings={"SILL_RECALL_MIN_SIMILARITY": "1"},
         prompt="Codex hook settings for cedar meadow",
         store_response=subprocess.CompletedProcess(
-            [], 0, f"{MEMORY_ID}|||semantic|||0.0164|||0.2||||||vector||||||{MEMORY}\n", "",
+            [], 0, json.dumps(dict(id=MEMORY_ID,type="semantic",score=0.0164,importance=.2,content=MEMORY)), "",
         ),
     )
     query, = calls["store"]
-    assert "FROM hybrid_recall(" in query
-    assert ">= 1" not in query
+    assert query["fast_min_similarity"] == 1
     assert MEMORY in payload["hookSpecificOutput"]["additionalContext"]
 
 
@@ -101,7 +99,7 @@ def test_quiet_only_hides_the_displayed_result_list(recall_hook, setting, quiet)
     payload, _ = recall_hook(
         settings=settings,
         store_response=subprocess.CompletedProcess(
-            [], 0, f"{MEMORY_ID}|||semantic|||0.5|||0.2||||||vector||||||{MEMORY}\n", "",
+            [], 0, json.dumps(dict(id=MEMORY_ID,type="semantic",score=0.5,importance=.2,content=MEMORY)), "",
         ),
         episodes=EPISODE,
     )

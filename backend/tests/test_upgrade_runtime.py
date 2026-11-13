@@ -2,6 +2,7 @@
 from pathlib import Path
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 
@@ -58,7 +59,7 @@ def test_worker_copies_every_packaged_module():
 from test_install_runtime import runtime, run, details, executable, DOCKER
 
 UPGRADE_DOCKER = r'''
-import json, os, pathlib, sys
+import json, os, pathlib, re, sys
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["TEST_FIXTURE"])
 checkout = pathlib.Path(os.environ["TEST_CHECKOUT"])
@@ -94,7 +95,8 @@ elif args[0] == "exec":
         output = "-- PostgreSQL database dump\n" * 2000
         status = 1 if fail == "dump" else 0
     elif "python" in args:
-        output = "0.2.1"
+        output = re.search(r'^version\s*=\s*"([^"]+)"',
+                           (checkout / 'backend/pyproject.toml').read_text(), re.MULTILINE).group(1)
     elif "psql" in args:
         if "-c" not in args:
             ready = sys.stdin.readline()
@@ -164,6 +166,11 @@ if handled:
 '''
 
 
+def candidate_version(checkout):
+    return re.search(r'^version\s*=\s*"([^"]+)"',
+                     (checkout / 'backend/pyproject.toml').read_text(), re.MULTILINE).group(1)
+
+
 @pytest.fixture
 def upgrade(runtime):
     checkout, home, env = runtime
@@ -174,7 +181,10 @@ def upgrade(runtime):
     root = Path(env["TEST_FIXTURE"])
     executable(root / "test-bin/docker", f"#!{sys.executable}\n" + UPGRADE_DOCKER + DOCKER)
     mcp = root / "sill-mcp"
-    script = mcp.read_text().replace('assert sys.argv[1] == "--env-file"', 'if sys.argv[1:] == ["--version"]:\n    print("sill-mcp 0.2.1")\n    raise SystemExit()\nassert sys.argv[1] == "--env-file"')
+    version = candidate_version(checkout)
+    script = re.sub(r'"version": "[^"]+"', f'"version": "{version}"', mcp.read_text())
+    script = script.replace('assert sys.argv[1] == "--env-file"',
+        f'if sys.argv[1:] == ["--version"]:\n    print("sill-mcp {version}")\n    raise SystemExit()\nassert sys.argv[1] == "--env-file"')
     mcp.write_text(script)
     (root / "docker-calls").unlink()
     return runtime
@@ -415,7 +425,7 @@ pathlib.Path(os.environ["TEST_FIXTURE"], "private-staging").write_text(sys.argv[
 
 def test_mcp_handshake_must_match_candidate_version_even_when_cli_matches(upgrade):
     mcp = Path(upgrade[2]["TEST_FIXTURE"]) / "sill-mcp"
-    script = mcp.read_text().replace('"version": "0.2.1"', '"version": "0.0.1"')
+    script = mcp.read_text().replace(f'"version": "{candidate_version(upgrade[0])}"', '"version": "0.0.1"')
     mcp.write_text(script)
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_UPGRADE_FAILURE="current")
     assert result.returncode != 0

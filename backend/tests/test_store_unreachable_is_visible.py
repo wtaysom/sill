@@ -79,7 +79,7 @@ def test_slow_successful_archive_survives_a_store_timeout(recall_hook):
 
 def test_access_tracking_leaves_time_to_emit_both_sources(recall_hook):
     memory = "The cedar meadow has three survey plots"
-    memory_row = f"7e40b444-12ba-40a5-9215-cc1340bbbe25|||semantic|||0.5|||0.2||||||vector||||||{memory}\n"
+    memory_row = json.dumps(dict(id="7e40b444-12ba-40a5-9215-cc1340bbbe25",type="semantic",score=.5,importance=.2,content=memory))
     snippet = "Surveyors measured cedar seedlings after the spring rain"
     payload, calls = recall_hook(
         store_response=subprocess.CompletedProcess([], 0, memory_row, ""),

@@ -96,7 +96,7 @@ def log_match(pattern_name: str, matched_text: str, response_snippet: str,
         log(f"log_match failed: {e}")
 
 
-def carry_forward(warnings: list[str], session_id: str | None):
+def carry_forward(warnings: list[str], session_id: str | None, *, payload=None):
     """Stash this turn's warnings where the UserPromptSubmit hook will find them.
 
     A Stop hook fires after the reply is already on screen, so its own
@@ -107,7 +107,8 @@ def carry_forward(warnings: list[str], session_id: str | None):
     # Key on the SAME id spontaneous-recall.py reads with (env wins there too).
     # A mismatch would write under one key and read under another — a silent miss,
     # which is the failure class this whole change exists to remove.
-    sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or session_id or "").strip()
+    sid = _harness.hook_session_path_key(_harness.hook_session_id(
+        payload if payload is not None else {'session_id': session_id}, env=os.environ))
     if not sid:
         return
     try:
@@ -474,10 +475,10 @@ def auto_store_insight(response_text: str, summary: str, concepts: list[str],
             log(f"Auto-stored insight as {mem_id[:8]}: {summary}")
             return mem_id[:8]
         else:
-            log(f"Auto-store failed; sill notice output: {out!r} stderr: {(result.stderr or '').strip()!r}")
+            log("Auto-store failed; mint not confirmed")
             return None
     except Exception as e:
-        log(f"Auto-store exception: {e}")
+        log("Auto-store unavailable; mint not confirmed")
         return None
 
 
@@ -865,7 +866,7 @@ def main():
 
         # additionalContext on Stop creates the next turn — a feedback loop;
         # the sidecar delivers the flag on the human's next prompt instead.
-        carry_forward(warnings, input_data.get("session_id"))
+        carry_forward(warnings, input_data.get("session_id"), payload=input_data)
         output: dict[str, object] = {}
         if notices:
             output["systemMessage"] = "[sill] " + " | ".join(notices)
