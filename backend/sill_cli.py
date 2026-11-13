@@ -40,7 +40,17 @@ def _cmd_seed_import(args: argparse.Namespace, _extra: list[str]) -> int:
     # Lazy import so `sill --help` works even if psycopg2 isn't installed yet.
     from scripts.seed_import import main as _seed_import_main
 
-    summary = _seed_import_main(args.path)
+    if args.env_file is None:
+        summary = _seed_import_main(args.path)
+    else:
+        from instance_config import InstanceConfigError, instance_dsn, load_instance_env
+
+        try:
+            dsn = instance_dsn(load_instance_env(args.env_file))
+        except InstanceConfigError as exc:
+            print(f"sill seed import: {exc}", file=sys.stderr)
+            return 1
+        summary = _seed_import_main(args.path, dsn=dsn)
     return 0 if summary.errors == 0 else 1
 
 
@@ -116,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Import a JSONL methodology seed into the running db",
     )
     seed_import.add_argument("path", help="Path to a JSONL seed file")
+    seed_import.add_argument("--env-file", type=Path, help="Absolute path to the instance dotenv file")
     seed_import.set_defaults(func=_cmd_seed_import)
 
     # db

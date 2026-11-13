@@ -29,8 +29,8 @@ while (( $# )); do
   esac
 done
 
-SILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPOSE_FILE="$SILL_DIR/backend/docker-compose.yml"
+# shellcheck source=scripts/install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
 
 if (( ! ASSUME_YES )); then
   if (( KEEP_DATA )); then
@@ -51,18 +51,17 @@ note() { printf '  %s\n' "$*"; }
 
 # --- step 1: docker compose down ---------------------------------------------
 say "1/4: docker compose down"
-# Run from backend/ so the .env there (with any SILL_DB_CONTAINER /
-# POSTGRES_PORT overrides) targets the right project/containers.
 if (( KEEP_DATA )); then
-  (cd "$SILL_DIR/backend" && docker compose -f "$COMPOSE_FILE" down --remove-orphans) || true
+  sill_compose down --remove-orphans
 else
-  (cd "$SILL_DIR/backend" && docker compose -f "$COMPOSE_FILE" down -v --remove-orphans) || true
+  sill_compose down -v --remove-orphans
 fi
 
 # --- step 2: uninstall backend -----------------------------------------------
 say "2/4: uninstall backend"
-if command -v pipx >/dev/null 2>&1 && pipx list 2>/dev/null | grep -q '^package sill-memory '; then
-  pipx uninstall sill-memory || true
+if command -v pipx >/dev/null 2>&1 &&
+   pipx_venvs="$(sill_pipx_venvs)" && [[ -x "$pipx_venvs/sill-memory/bin/sill" ]]; then
+  pipx uninstall sill-memory
   note "removed pipx package sill-memory"
 fi
 venv="$HOME/.local/share/sill-venv"
@@ -72,7 +71,7 @@ if [[ -d "$venv" ]]; then
 fi
 for bin in sill sill-mcp sill-worker; do
   link="$HOME/.local/bin/$bin"
-  if [[ -L "$link" ]]; then
+  if [[ -L "$link" && "$(readlink "$link")" == "$venv/bin/$bin" ]]; then
     rm -f "$link"
     note "removed symlink $link"
   fi

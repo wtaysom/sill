@@ -4,51 +4,28 @@
 # Exits 0 only if all six checks pass. Designed to be safe to re-run.
 #
 # Checks:
-#   1. docker compose ps shows db + embeddings healthy.
+#   1. Database, embeddings and RabbitMQ healthy; maintenance worker running.
 #   2. sill-mcp answers a real MCP `initialize` handshake over stdio.
-#   3. SELECT count(*) FROM memories returns >= 22 (seed loaded).
+#   3. At least 22 active memories (skip with --no-seed).
 #   4. plugin/hooks/response-patterns.py exits 0 on a canned Stop event.
-#   5. schema_migrations matches backend/migrations/ (schema level current).
+#   5. Report the schema checked during readiness.
 #   6. adapter conformance: the four-slot contract (docs/adapters.md) holds
 #      on both harnesses' fixture shapes.
 
 set -euo pipefail
 
-SILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPOSE_FILE="$SILL_DIR/backend/docker-compose.yml"
+# shellcheck source=scripts/install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
 
-# Read backend/.env the way `docker compose` does, so every check in this
-# file resolves the same install the compose checks do. Without this, check 1
-# (which runs from backend/, so compose loads .env) and check 3 (a bare
-# `docker exec "$SILL_DB_CONTAINER"`) read two different configurations: an
-# operator who follows this repo's own advice to "set SILL_DB_CONTAINER in
-# backend/.env if you need two stacks side by side" gets a green check 1 and
-# a check 3 that queries whatever container happens to be named `sill_db` —
-# in the worst case, a different Sill's database, reported as a pass.
-# Precedence matches compose: an already-exported shell variable wins, .env
-# fills in the rest.
-load_env_file() {
-  local f="$SILL_DIR/backend/.env" line key val
-  [[ -f "$f" ]] || return 0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%$'\r'}"
-    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
-    [[ "$line" == *=* ]] || continue
-    key="${line%%=*}"
-    val="${line#*=}"
-    key="${key//[[:space:]]/}"
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    [[ -n "${!key+x}" ]] && continue
-    val="${val#\"}"; val="${val%\"}"
-    val="${val#\'}"; val="${val%\'}"
-    export "$key=$val"
-  done < "$f"
-}
-load_env_file
-
-CONTAINER="${SILL_DB_CONTAINER:-sill_db}"
-DB_USER="${POSTGRES_USER:-sill}"
-DB_NAME="${POSTGRES_DB:-sill}"
+NO_SEED=0
+while (( $# )); do
+  case "$1" in
+    --no-seed) NO_SEED=1; shift ;;
+    --help|-h) printf 'Usage: verify.sh [--no-seed]\n'; exit 0 ;;
+    *) printf 'verify.sh: unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+trap sill_cleanup_instance EXIT
 
 fail() {
   printf '  FAIL: %s\n' "$*" >&2
@@ -65,31 +42,6 @@ note() {
 
 say() {
   printf '\n=== %s ===\n' "$*"
-}
-
-# Resolve the interpreter that has the backend (and its dev extras) installed.
-#
-# Check 6 used to test `python3` for pytest and run pytest with `python3` — but
-# `install.sh` puts the backend in a pipx venv, or in ~/.local/share/sill-venv,
-# never in the system python3. So on a normal install check 6 always found no
-# pytest and always took its degraded branch, while printing a remedy naming
-# SILL_PYTHON that it then never read. Following that remedy exactly could not
-# change the outcome.
-#
-# Resolution order mirrors install.sh's sill_python() — the same order the
-# backend was installed in — with an explicit SILL_PYTHON winning, since that
-# is what docs/onboarding/01-install.md and scheduling/README.md already tell
-# operators to set.
-sill_python() {
-  if [[ -n "${SILL_PYTHON:-}" ]]; then
-    printf '%s' "$SILL_PYTHON"
-    return
-  fi
-  local pipx_py="${PIPX_HOME:-$HOME/.local/pipx}/venvs/sill-memory/bin/python"
-  [[ -x "$pipx_py" ]] && { printf '%s' "$pipx_py"; return; }
-  local venv_py="$HOME/.local/share/sill-venv/bin/python"
-  [[ -x "$venv_py" ]] && { printf '%s' "$venv_py"; return; }
-  printf 'python3'
 }
 
 # Speak MCP to the installed server and require a real answer.
@@ -111,9 +63,9 @@ sill_python() {
 # wait — the server opens a database connection before it will answer, so
 # this is not instant.
 mcp_handshake() {
-  SILL_MCP_CMD="${SILL_MCP_CMD:-sill-mcp}" \
+  SILL_MCP_CMD="${SILL_MCP_CMD:-}" \
   SILL_VERIFY_MCP_TIMEOUT_S="${SILL_VERIFY_MCP_TIMEOUT_S:-20}" \
-  python3 <<'PY'
+  python3 - "$@" <<'PY'
 import json
 import os
 import shlex
@@ -121,7 +73,7 @@ import subprocess
 import sys
 import threading
 
-cmd = shlex.split(os.environ["SILL_MCP_CMD"])
+cmd = shlex.split(os.environ["SILL_MCP_CMD"]) if os.environ["SILL_MCP_CMD"] else sys.argv[1:]
 budget = float(os.environ["SILL_VERIFY_MCP_TIMEOUT_S"])
 
 request = {
@@ -221,47 +173,37 @@ PY
 }
 
 # --- check 1 -------------------------------------------------------------------
-say "Check 1/6: docker compose services healthy"
-for svc in db embeddings; do
-  status="$(cd "$SILL_DIR/backend" && docker compose -f "$COMPOSE_FILE" ps --format json "$svc" 2>/dev/null | python3 -c '
-import json, sys
-raw = sys.stdin.read().strip()
-if not raw:
-    print("missing"); sys.exit()
-for line in raw.splitlines():
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    print(obj.get("Health") or obj.get("State") or "unknown")
-    break
-' 2>/dev/null || true)"
-  if [[ "$status" != "healthy" ]]; then
-    fail "$svc is '$status', expected 'healthy'"
-  fi
-  pass "$svc is healthy"
-done
+say "Check 1/6: Compose runtime ready"
+sill_prepare_instance
+sill_wait_healthy "${SILL_VERIFY_WAIT_HEALTHY_S:-${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}}" \
+  db embeddings rabbitmq maintenance_worker
+sill_check_running_instance
 
 # --- check 2 -------------------------------------------------------------------
 say "Check 2/6: sill-mcp answers an MCP initialize handshake"
-if ! command -v "${SILL_MCP_CMD:-sill-mcp}" >/dev/null 2>&1; then
-  fail "sill-mcp not on PATH (is the backend installed and ~/.local/bin on PATH?)"
-fi
-if handshake="$(mcp_handshake)"; then
-  pass "MCP handshake answered by $handshake"
+if [[ -n "${SILL_MCP_CMD:-}" ]]; then
+  if ! handshake="$(mcp_handshake)"; then
+    fail "MCP test command did not answer the initialize handshake (see above)."
+  fi
 else
-  fail "sill-mcp did not answer an MCP initialize handshake (see above). Reinstall the backend ('pip install -e backend') and re-run; if it persists, run 'sill-mcp' by hand and read its first line of output."
+  mcp="$(sill_bin sill-mcp)" || exit 1
+  if ! handshake="$(mcp_handshake "$mcp" --env-file "$SILL_RUNTIME_ENV_FILE")"; then
+    fail "sill-mcp did not answer the initialize handshake. Check the selected instance and re-run ./install.sh if needed."
+  fi
 fi
+pass "MCP handshake answered by $handshake"
 
 # --- check 3 -------------------------------------------------------------------
 say "Check 3/6: seed loaded (memories count >= 22)"
-count="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
-  "SELECT count(*) FROM memories WHERE archived_at IS NULL" 2>/dev/null || echo 0)"
-count="$(printf '%s' "$count" | tr -d '[:space:]')"
-if [[ -z "$count" || "$count" -lt 22 ]]; then
-  fail "memories count is '$count', expected >= 22 (run 'sill seed import seed/methodology.jsonl')"
+if (( NO_SEED )); then
+  note "--no-seed: skipping"
+else
+  if ! count="$(sill_db_query 'SELECT count(*) FROM memories WHERE archived_at IS NULL' 2>/dev/null)" ||
+     [[ ! "$count" =~ ^[0-9]+$ || "$count" -lt 22 ]]; then
+    fail "expected at least 22 active memories; rerun ./install.sh to import the seed."
+  fi
+  pass "memories count is $count"
 fi
-pass "memories count is $count"
 
 # --- check 4 -------------------------------------------------------------------
 say "Check 4/6: response-patterns hook parses a canned Stop event"
@@ -276,18 +218,7 @@ fi
 
 # --- check 5 -------------------------------------------------------------------
 say "Check 5/6: schema level current"
-want="$(ls "$SILL_DIR"/backend/migrations/[0-9][0-9][0-9]_*.sql 2>/dev/null | wc -l | tr -d '[:space:]' || echo 0)"
-have="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
-  "SELECT count(*) FROM schema_migrations" 2>/dev/null | tr -d '[:space:]' || echo 0)"
-if [[ -z "$have" || "$have" -lt "$want" ]]; then
-  fail "schema_migrations has ${have:-0} of $want migrations (run ./upgrade.sh)"
-fi
-speaker_col="$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
-  "SELECT count(*) FROM information_schema.columns WHERE table_name='memories' AND column_name='speaker'" 2>/dev/null | tr -d '[:space:]' || echo 0)"
-if [[ "$speaker_col" != "1" ]]; then
-  fail "memories.speaker column missing despite stamp — run ./upgrade.sh and report if it recurs"
-fi
-pass "schema at level $have/$want; speech-act columns present"
+pass "migration ledger and public.memories.speaker checked in readiness"
 
 # --- check 6 -------------------------------------------------------------------
 say "Check 6/6: adapter conformance (inject/mint/capture/track, both harnesses)"

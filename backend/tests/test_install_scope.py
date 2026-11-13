@@ -250,6 +250,23 @@ def test_home_scope_codex_render_writes_fresh_then_leaves_existing_alone(tmp_pat
     assert "already exists" in r2.stdout
 
 
+def test_rendered_hook_command_handles_spaces_and_apostrophes(tmp_path):
+    import shlex
+
+    home = tmp_path / "new home"
+    home.mkdir()
+    plugin = tmp_path / "owner's checkout" / "plugin"
+    interpreter = home / "python tools" / "python"
+    r = source_and_call(
+        '_render_codex_hooks "$SILL_DIR/plugin/codex.hooks.json.template" '
+        f'"$HOME/hooks.json" {shlex.quote(str(plugin))} {shlex.quote(str(interpreter))}',
+        home=home,
+    )
+    assert r.returncode == 0, r.stderr
+    command = json.loads((home / "hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert shlex.split(command) == [str(interpreter), str(plugin / "hooks/response-patterns.py")]
+
+
 def test_home_scope_claude_merge_is_idempotent_and_preserves_other_content(tmp_path):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
