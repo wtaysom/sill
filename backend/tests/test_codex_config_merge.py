@@ -29,7 +29,7 @@ covers the backstop by feeding it exactly such a layout.
 Needs no docker, database, or network.
 """
 
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -50,7 +50,6 @@ except ModuleNotFoundError:  # 3.10, this project's CI floor
 # interpreter does not have. The in-place-extension fix itself does run on
 # 3.10 — that is the part that matters there — and CI's 3.12 leg pins all of
 # it.
-pytestmark = pytest.mark.skipif(tomllib is None, reason="tomllib is 3.11+")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = REPO_ROOT / "install.sh"
@@ -102,6 +101,7 @@ command = "/opt/node_repl"
 """
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_an_existing_features_section_is_extended_not_redeclared(tmp_path):
     result, text = wire_codex(tmp_path, EXISTING_FEATURES)
     assert result.returncode == 0, result.stderr
@@ -110,11 +110,13 @@ def test_an_existing_features_section_is_extended_not_redeclared(tmp_path):
     assert data["features"] == {"js_repl": False, "hooks": True}
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_the_merged_config_still_parses_as_toml(tmp_path):
     _, text = wire_codex(tmp_path, EXISTING_FEATURES)
     tomllib.loads(text)  # the whole point: this raised TOMLDecodeError before
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_unrelated_entries_survive_the_merge(tmp_path):
     _, text = wire_codex(tmp_path, EXISTING_FEATURES)
     data = tomllib.loads(text)
@@ -123,6 +125,7 @@ def test_unrelated_entries_survive_the_merge(tmp_path):
     assert data["mcp_servers"]["sill"]["command"] == "sill-mcp"
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_a_config_with_no_features_section_still_gets_one(tmp_path):
     _, text = wire_codex(tmp_path, 'model = "gpt-5.6-sol"\n')
     data = tomllib.loads(text)
@@ -130,6 +133,7 @@ def test_a_config_with_no_features_section_still_gets_one(tmp_path):
     assert data["mcp_servers"]["sill"]["command"] == "sill-mcp"
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_a_missing_config_is_created(tmp_path):
     _, text = wire_codex(tmp_path, None)
     data = tomllib.loads(text)
@@ -137,6 +141,7 @@ def test_a_missing_config_is_created(tmp_path):
     assert data["mcp_servers"]["sill"]["command"] == "sill-mcp"
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_the_merge_is_idempotent(tmp_path):
     _, once = wire_codex(tmp_path, EXISTING_FEATURES)
     result, twice = wire_codex(tmp_path, None)  # None = leave the merged file alone
@@ -144,6 +149,7 @@ def test_the_merge_is_idempotent(tmp_path):
     assert "already has sill MCP" in result.stdout
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_an_unparseable_config_is_left_alone(tmp_path):
     """Someone's hand-broken config is theirs; layering a merge on top only
     makes the breakage harder to attribute."""
@@ -153,6 +159,7 @@ def test_an_unparseable_config_is_left_alone(tmp_path):
     assert "isn't valid TOML" in result.stdout
 
 
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_a_header_the_regexes_misread_is_refused_not_written(tmp_path):
     """A trailing comment on the header defeats both section regexes, so the
     merge would append a second [features] and produce invalid TOML. The
@@ -166,7 +173,7 @@ def test_a_header_the_regexes_misread_is_refused_not_written(tmp_path):
     assert "Codex is NOT wired" in result.stdout
 
 
-@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib is 3.11+")
+@pytest.mark.skipif(tomllib is None, reason="legacy installer uses tomllib")
 def test_every_shipped_branch_produces_parseable_toml(tmp_path):
     """Sweep the input shapes step 7 can meet, and assert the invariant that
     actually matters across all of them: whatever it writes, Codex can read."""
@@ -186,3 +193,92 @@ def test_every_shipped_branch_produces_parseable_toml(tmp_path):
             tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:  # pragma: no cover - failure path
             pytest.fail(f"case {name!r} produced invalid TOML: {exc}\n{text}")
+
+
+# Exercise the shared registration entry point on both supported interpreters.
+# The legacy installer tests above stay until install.sh delegates step 7.
+
+
+@pytest.mark.parametrize(("before", "features"), [
+    ('[features] # keep the header\nhooks = false # keep the choice\n', {"hooks": False}),
+    ('features.codex_hooks = false # keep the choice\n', {"codex_hooks": False}),
+    ('features = {codex_hooks=false, js_repl=true} # keep this\n',
+     {"codex_hooks": False, "js_repl": True}),
+    ('[features] # keep header\njs_repl = false', {"js_repl": False}),
+])
+def test_connect_preserves_codex_features_and_comments(tmp_path, before, features):
+    import tomlkit
+
+    result, config, _, _ = connect_codex(tmp_path, before)
+    assert result.returncode == 0, result.stderr
+    after = config.read_text()
+    assert before.strip() in after
+    assert tomlkit.parse(after).unwrap()["features"] == features
+
+
+@pytest.mark.parametrize("before", [
+    ('mcp_servers.one.command = "first" # first server\n'
+     'mcp_servers.two.command = "second" # second server\n'
+     'model = "fixture" # keep model\n'),
+    ('mcp_servers = {one = {command = "first"}, two = {command = "second"}} # all servers\n'
+     'model = "fixture" # keep model\n'),
+    ('model = "fixture" # keep model\n'
+     '["mcp_servers"."one"] # first server\ncommand = "first"\n'
+     '["mcp_servers"."two"] # second server\ncommand = "second"\n'),
+])
+def test_connect_preserves_valid_codex_server_layouts(tmp_path, before):
+    import tomlkit
+
+    result, config, command, instance = connect_codex(tmp_path, before)
+    assert result.returncode == 0, result.stderr
+    after = config.read_text()
+    data = tomlkit.parse(after).unwrap()
+    assert data["model"] == "fixture"
+    assert data["mcp_servers"] == {
+        "one": {"command": "first"},
+        "two": {"command": "second"},
+        "sill": {"command": str(command), "args": ["--env-file", str(instance)]},
+    }
+    for line in before.splitlines():
+        if "#" in line:
+            assert line[line.index("#"):] in after
+
+
+@pytest.mark.parametrize("before", [
+    '["mcp_servers"."sill"] # existing registration\ncommand = "sill-mcp" # old launcher\n',
+    'mcp_servers.sill.command = "sill-mcp" # old launcher\n',
+    'mcp_servers = {sill = {command="sill-mcp"}} # existing registration\n',
+])
+def test_connect_adopts_one_legacy_codex_entry_in_place(tmp_path, before):
+    import tomlkit
+
+    result, config, command, instance = connect_codex(tmp_path, before, "--adopt-legacy")
+    assert result.returncode == 0, result.stderr
+    after = config.read_text()
+    assert tomlkit.parse(after).unwrap() == {
+        "mcp_servers": {
+            "sill": {"command": str(command), "args": ["--env-file", str(instance)]}
+        }
+    }
+    for line in before.splitlines():
+        assert line[line.index("#"):] in after
+
+
+def connect_codex(tmp_path, before, *args):
+    home = tmp_path / "home"
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(before, encoding="utf-8")
+    command = tmp_path / "sill-mcp"
+    command.write_text("#!/bin/sh\n", encoding="utf-8")
+    command.chmod(0o700)
+    instance = tmp_path / "instance.env"
+    instance.touch()
+    result = subprocess.run(
+        [sys.executable, "-m", "sill_cli", "connect", "codex", "--env-file", str(instance),
+         "--mcp-command", str(command), *args],
+        capture_output=True, text=True, timeout=20,
+        cwd=REPO_ROOT / "backend",
+        env={"HOME": str(home), "PATH": "", "LC_ALL": os.environ.get("LC_ALL", "C")},
+    )
+    return result, config, command, instance

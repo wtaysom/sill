@@ -7,6 +7,7 @@ Subcommands wired so far:
                             (Task 15)
   sill db psql              Drop into a psql shell against the db container
                             (wired in a later task)
+  sill connect <client>     Register this instance with a local MCP client.
   sill verify               Run the standard smoke-check suite
                             (wired in a later task)
   sill notice ...           Store one deliberate memory (the mint path);
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 
@@ -46,6 +48,27 @@ def _cmd_db_psql(_args: argparse.Namespace, _extra: list[str]) -> int:
     raise NotImplementedError(
         "db psql — wired in a later task (drops into psql against $SILL_DB_CONTAINER)"
     )
+
+
+def _cmd_connect(args: argparse.Namespace, _extra: list[str]) -> int:
+    from client_config import ClientConfigError, client_config_path, register_client
+
+    command = args.mcp_command
+    if command is None:
+        # pipx may expose sill as a symlink. Prefer the entry point's own
+        # bin directory and fall back to the interpreter's environment.
+        launcher = Path(sys.argv[0]).resolve().with_name("sill-mcp")
+        command = launcher if launcher.is_file() else Path(sys.executable).with_name("sill-mcp")
+    try:
+        status = register_client(
+            args.client, args.env_file, command,
+            dry_run=args.dry_run, adopt_legacy=args.adopt_legacy,
+        )
+    except ClientConfigError as exc:
+        print(f"sill connect: {exc}", file=sys.stderr)
+        return 1
+    print(f"sill connect: {status} in {client_config_path(args.client)}")
+    return 0
 
 
 def _cmd_verify(_args: argparse.Namespace, _extra: list[str]) -> int:
@@ -100,6 +123,14 @@ def build_parser() -> argparse.ArgumentParser:
     db_sub = db.add_subparsers(dest="subcommand", required=True, metavar="<subcommand>")
     db_psql = db_sub.add_parser("psql", help="Open a psql shell against the db container")
     db_psql.set_defaults(func=_cmd_db_psql)
+
+    connect = sub.add_parser("connect", help="Register this instance with a local MCP client")
+    connect.add_argument("client", choices=("claude-code", "codex", "claude-desktop"))
+    connect.add_argument("--env-file", type=Path, required=True, help="Absolute path to the instance dotenv file")
+    connect.add_argument("--mcp-command", type=Path, help="Absolute path to the sill-mcp executable")
+    connect.add_argument("--dry-run", action="store_true", help="Validate registration without changing files")
+    connect.add_argument("--adopt-legacy", action="store_true", help="Replace an ambiguous bare sill-mcp entry")
+    connect.set_defaults(func=_cmd_connect)
 
     # verify
     verify = sub.add_parser("verify", help="Run the smoke-check suite")
