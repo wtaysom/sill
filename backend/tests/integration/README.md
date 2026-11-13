@@ -49,9 +49,18 @@ and execute both legacy and new overloads under `ag_catalog,public`.
 ## Release schema contract (actual Docker initdb)
 
 The required CI job also runs `test_schema_contract.py`. It creates only the
-`sill_v03_m7` Compose project, refuses pre-existing project resources, checks
-loopback ports 15461–15463 are unused, and removes its own containers and volumes
-on completion. It does not connect to the ordinary `SILL_TEST_DSN` fixture.
+`sill_v03_m7_<nonce>` Compose project with matching
+`sill_test_m7_<nonce>_*` containers, refuses pre-existing exact container/network
+names regardless of labels, and checks loopback ports 15461–15463 are unused.
+Database volumes are anonymous: there are no named-volume references to adopt.
+Before startup `resources.json` records the concrete manifest. `ownership.json`
+then records verified container/network IDs, nonce labels and actual container
+Mounts. Cleanup checks that ownership and identities still match, removes only
+those immutable container IDs with `docker container rm -f -v` (including their
+anonymous volumes), and removes the verified network by ID. It never runs
+Compose down or deletes a volume by name. Missing, ambiguous or changed ownership
+preserves resources and fails for operator inspection. It does not connect to
+the ordinary `SILL_TEST_DSN` fixture.
 
 ```sh
 docker build -t sill-test-db backend
