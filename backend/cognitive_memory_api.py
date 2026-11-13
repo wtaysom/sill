@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import math
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ from uuid import UUID
 import asyncpg
 
 from prompt_resources import compose_personhood_prompt
+
+logger = logging.getLogger(__name__)
 
 class MemoryType(str, Enum):
     EPISODIC = "episodic"
@@ -520,11 +524,8 @@ class CognitiveMemory:
                 source_attribution=source_attribution,
                 source_references=source_references,
                 trust_level=trust_level,
+                concepts=concepts,
             )
-
-            if concepts:
-                for concept in concepts:
-                    await conn.fetchval("SELECT link_memory_to_concept($1::uuid, $2::text, 1.0)", memory_id, concept)
 
             return memory_id
 
@@ -546,38 +547,18 @@ class CognitiveMemory:
             return dict(_coerce_json(row["profile"]))
 
     async def remember_batch(self, memories: Iterable[MemoryInput]) -> list[UUID]:
+        items = [{
+            "type": m.type.value, "content": m.content, "importance": m.importance,
+            "source_attribution": m.source_attribution, "trust_level": m.trust_level,
+            "concepts": m.concepts,
+            "type_metadata": self._type_metadata(m.type, m.content, m.emotional_valence,
+                                                 m.context, m.source_references, batch=True),
+        } for m in memories]
         async with self._pool.acquire() as conn:
-            items: list[dict[str, Any]] = []
-            mem_list = list(memories)
-            for m in mem_list:
-                item: dict[str, Any] = {"type": m.type.value, "content": m.content, "importance": m.importance}
-                if m.source_attribution is not None:
-                    item["source_attribution"] = m.source_attribution
-                if m.trust_level is not None:
-                    item["trust_level"] = m.trust_level
-                if m.type == MemoryType.EPISODIC:
-                    item["context"] = m.context
-                    item["emotional_valence"] = m.emotional_valence
-                elif m.type == MemoryType.SEMANTIC:
-                    item["source_references"] = m.source_references if m.source_references is not None else m.context
-                elif m.type == MemoryType.PROCEDURAL:
-                    item["steps"] = m.context if m.context is not None else {"steps": []}
-                elif m.type == MemoryType.STRATEGIC:
-                    item["supporting_evidence"] = m.context
-                items.append(item)
-
-            import json
-
-            created = await conn.fetchval("SELECT batch_create_memories($1::jsonb)", json.dumps(items))
-            ids = list(created or [])
-
-            # Link concepts (still per-memory).
-            for mid, m in zip(ids, mem_list):
-                if m.concepts:
-                    for concept in m.concepts:
-                        await conn.fetchval("SELECT link_memory_to_concept($1::uuid, $2::text, 1.0)", mid, concept)
-
-            return ids
+            rows = await conn.fetch("SELECT * FROM public.mint_memories($1::jsonb) ORDER BY idx", json.dumps(items))
+            for row in rows:
+                logger.info("memory mint id=%s outcome=%s restates=%s", row["memory_id"], row["outcome"], row["restates"])
+            return [row["memory_id"] for row in rows]
 
     async def remember_batch_raw(
         self,
@@ -586,11 +567,13 @@ class CognitiveMemory:
         *,
         type: MemoryType = MemoryType.EPISODIC,
         importance: float = 0.5,
+        embedding_profile: str | None = None,
     ) -> list[UUID]:
         """
         Insert memories with pre-computed embeddings (bypasses get_embedding()).
 
         Notes:
+        - New rows receive the legacy raw-batch subtype defaults; reused rows stay unchanged.
         - Graph nodes are created to keep AGE state consistent.
         - Embedding dimension must match the DB typmod.
         """
@@ -600,22 +583,26 @@ class CognitiveMemory:
         async with self._pool.acquire() as conn:
             expected_dim = int(await conn.fetchval("SELECT embedding_dimension()"))
             for embedding in embeddings:
+                if any(not math.isfinite(value) for value in embedding):
+                    raise ValueError("embeddings must contain only finite numbers")
                 if len(embedding) != expected_dim:
                     raise ValueError(f"embedding dimension mismatch: expected {expected_dim}, got {len(embedding)}")
 
             created = await conn.fetchval(
                 """
-                SELECT batch_create_memories_with_embeddings(
+                SELECT public.batch_create_memories_with_embeddings(
                     $1::memory_type,
                     $2::text[],
                     $3::jsonb,
-                    $4::float
+                    $4::float,
+                    $5::text
                 )
                 """,
                 type.value,
                 contents,
                 _to_jsonb_arg(embeddings),
                 float(importance),
+                embedding_profile,
             )
             return list(created or [])
 
@@ -1106,60 +1093,38 @@ class CognitiveMemory:
     # INTERNALS
     # =========================================================================
 
-    async def _create_memory(
-        self,
-        conn: asyncpg.Connection,
-        content: str,
-        type: MemoryType,
-        importance: float,
-        emotional_valence: float,
-        context: dict[str, Any] | None,
-        *,
-        source_attribution: dict[str, Any] | None = None,
-        source_references: Any | None = None,
-        trust_level: float | None = None,
-    ) -> UUID:
+    @staticmethod
+    def _type_metadata(type: MemoryType, content: str, emotional_valence: float,
+                       context: dict[str, Any] | None, source_references: Any,
+                       *, batch: bool = False) -> dict[str, Any]:
+        # Existing typed APIs always request a subtype, even without context.
         if type == MemoryType.EPISODIC:
-            return await conn.fetchval(
-                "SELECT create_episodic_memory($1::text, NULL, $2::jsonb, NULL, $3::float, CURRENT_TIMESTAMP, $4::float, $5::jsonb, $6::float)",
-                content,
-                _to_jsonb_arg(context),
-                emotional_valence,
-                importance,
-                _to_jsonb_arg(source_attribution),
-                trust_level,
-            )
+            return {"context": context, "emotional_valence": emotional_valence}
         if type == MemoryType.SEMANTIC:
-            sources = source_references if source_references is not None else context
-            return await conn.fetchval(
-                "SELECT create_semantic_memory($1::text, 0.8::float, NULL, NULL, $2::jsonb, $3::float, $4::jsonb, $5::float)",
-                content,
-                _to_jsonb_arg(sources),
-                importance,
-                _to_jsonb_arg(source_attribution),
-                trust_level,
-            )
+            return {"confidence": 0.8, "source_references": source_references if source_references is not None else context}
         if type == MemoryType.PROCEDURAL:
-            steps = context if context is not None else {}
-            return await conn.fetchval(
-                "SELECT create_procedural_memory($1::text, $2::jsonb, NULL, $3::float, $4::jsonb, $5::float)",
-                content,
-                _to_jsonb_arg(steps),
-                importance,
-                _to_jsonb_arg(source_attribution),
-                trust_level,
-            )
+            return {"steps": context if context is not None else ({"steps": []} if batch else {})}
         if type == MemoryType.STRATEGIC:
-            return await conn.fetchval(
-                "SELECT create_strategic_memory($1::text, $2::text, 0.8::float, $3::jsonb, NULL, $4::float, $5::jsonb, $6::float)",
-                content,
-                content,
-                _to_jsonb_arg(context),
-                importance,
-                _to_jsonb_arg(source_attribution),
-                trust_level,
-            )
+            return {"pattern_description": content, "confidence_score": 0.8, "supporting_evidence": context}
         raise ValueError(f"Unknown memory type: {type}")
+
+    async def _create_memory(
+        self, conn: asyncpg.Connection, content: str, type: MemoryType,
+        importance: float, emotional_valence: float, context: dict[str, Any] | None,
+        *, source_attribution: dict[str, Any] | None = None,
+        source_references: Any | None = None, trust_level: float | None = None,
+        concepts: list[str] | None = None,
+    ) -> UUID:
+        row = await conn.fetchrow(
+            """SELECT * FROM public.mint_memory(
+                $1::memory_type,$2::text,$3::float,$4::jsonb,
+                p_type_metadata=>$5::jsonb,p_concepts=>$6::text[],p_trust_level=>$7::float)
+            """, type.value, content, importance, _to_jsonb_arg(source_attribution),
+            _to_jsonb_arg(self._type_metadata(type, content, emotional_valence, context, source_references)),
+            concepts, trust_level,
+        )
+        logger.info("memory mint id=%s outcome=%s restates=%s", row["memory_id"], row["outcome"], row["restates"])
+        return row["memory_id"]
 
     async def _recall_memories(
         self,

@@ -24,5 +24,6 @@ INSERT INTO schema_migrations (migration_id, source) VALUES
     ('006', 'initdb'),
     ('007', 'initdb'),
     ('008', 'initdb'),
-    ('009', 'initdb')
+    ('009', 'initdb'),
+    ('010', 'initdb')
 ON CONFLICT (migration_id) DO NOTHING;
