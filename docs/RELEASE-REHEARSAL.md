@@ -47,9 +47,9 @@ Publication is pending. The v0.2.0 rehearsal below remains a historical record.
   absence of a beat schedule on rerun. Check the candidate version from
   the installed command, MCP initialize and the running worker.
 - Run `./upgrade.sh --dry-run` and `./upgrade.sh` on each tagged fixture.
-  Restore each backup to a separate disposable database and check row
-  identity and the AGE graph. Confirm data and configuration survive a
-  second upgrade with zero pending migrations. Check re-embedding
+  Restore each backup with the [isolated restore runbook](RESTORE.md), including
+  its explicit AGE catalog step, and check row identity and the AGE graph.
+  Confirm data and configuration survive a second upgrade with zero pending migrations. Check re-embedding
   interruption and rollback.
 - Repeat the memory round trip on the integrated candidate. Desktop local
   Codex requires a manual app run. Hosted ChatGPT awaits sign-in and a
