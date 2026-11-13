@@ -5,11 +5,18 @@ clients. It runs Postgres with pgvector and Apache AGE locally and exposes
 memory tools through MCP. Optional hooks add automatic recall and checks in
 Claude Code and Codex CLI.
 
+This checkout is the v0.3.0 release candidate.
+[Release rehearsal](docs/RELEASE-REHEARSAL.md)
+
 ## Quick start
 
-On macOS or Linux, install Git, Python 3.10 or later, and a Docker engine
-with Compose. Start Docker and sign in to the client you want to use. If
-you already use Sill, follow [Upgrading](#upgrading).
+Install Git, Python 3.10 or later, and a Docker engine with Compose.
+Start Docker and sign in to the client you want to use. If you already
+use Sill, follow [Upgrading](#upgrading).
+
+For Claude Desktop on macOS, run the commands below. On macOS or Linux,
+use `--client claude-code` for Claude Code or `--client codex` for Codex CLI
+in the install command.
 
 ```bash
 git clone https://github.com/wtaysom/sill.git
@@ -18,12 +25,11 @@ cd sill
 ./verify.sh
 ```
 
-The example selects Claude Desktop on macOS. For Claude Code use
-`--client claude-code`. For Codex CLI or desktop local Codex use
-`--client codex`. Repeat the flag to connect more than one. If you omit
-`--client`, the installer connects the Claude Code and Codex CLIs it detects.
-See the [client setup guide](docs/desktop-clients.md) for registries, restart
-and permission steps, and the current verification status of each client.
+Use `--client codex` for a local Codex desktop session too. Repeat the
+flag to connect more than one client. If you omit `--client`, the
+installer connects the Claude Code and Codex CLIs it detects. See the
+[client setup guide](docs/desktop-clients.md) for registries, restart
+and permission steps, and client verification status.
 
 **Restart your client**, then use the
 [first-use runbook](docs/onboarding/README.md) to remember a synthetic
@@ -128,6 +134,11 @@ docker compose -f backend/docker-compose.yml ps
 For explicit embedding image/platform overrides and direct Compose use,
 see [the instance settings example](backend/.env.example). Keep the
 embedding model and dimension consistent with the existing data.
+
+A new install uses raw embedding inputs by default. To opt in to search
+prompts on a new store with the pinned default model, add
+`--embedding-profile embeddinggemma-search-v1` to the install command.
+[Embedding profile requirements](docs/EMBEDDING-PROFILES.md#explicit-fresh-installation)
 
 ## What gets installed
 

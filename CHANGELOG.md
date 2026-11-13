@@ -3,9 +3,33 @@
 All notable changes to Sill are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## v0.3.0 — 2026-11-13
+
+Release candidate. See the [release rehearsal](docs/RELEASE-REHEARSAL.md)
+for observed results and outstanding checks.
 
 ### Added
+
+- **Install and connect a selected instance.** Register Claude Code,
+  Codex, or Claude Desktop on macOS with `--client`, or connect a client
+  later with `sill connect`. Each local entry uses the selected instance's
+  env file. The [first-use runbook](docs/onboarding/README.md) starts with
+  remembering and retrieving the same synthetic memory from separate
+  sessions.
+- **Preserve more context about memory writes.** Atomic creation records
+  speaker, declared production and supersession metadata when supplied.
+  Recall can filter by speaker before ranking. Goal transitions and commitment
+  release have dedicated database operations.
+- **Opt in to an embedding search profile.** New stores can choose
+  `--embedding-profile embeddinggemma-search-v1` with the pinned default
+  model. Raw inputs remain the default. The profile migration stages
+  vectors with resumable batches, an atomic activation and a rollback
+  path. [Embedding profiles](docs/EMBEDDING-PROFILES.md)
+- **Supervise Claude and Codex beat attempts.** One worker owns a rotation
+  at a time. `sill-worker --mode beat --once` records a bounded attempt
+  with a receipt and cleans up its agent process group on timeout or
+  interruption. Standalone receipt, dateline and link checks audit
+  selected Markdown files. [Beat worker](docs/beats.md)
 
 - **Configure spontaneous recall through the hook environment.** Set result
   counts, minimum prompt length and a fast recall score floor. Quiet mode
@@ -14,6 +38,19 @@ All notable changes to Sill are recorded here. Format loosely follows
   and ranges.
 
   Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `feat/recall-noise-controls`.
+
+### Changed
+
+- **Upgrade the selected runtime.** `upgrade.sh` previews the plan,
+  validates a backup and applies pending migrations, including 008–015,
+  to the selected database. It reinstalls the package and recreates the
+  maintenance worker. [Upgrade steps](README.md#upgrading)
+- **Published ports bind to loopback by default.** An explicit
+  `SILL_BIND_ADDR` selects a different bind address. Managed installs
+  select a pinned embeddings image for the Docker engine architecture.
+- **Track recall exposure and explicit use separately.** Search results
+  record exposure, while explicit retrieval by ID records use. Recall
+  results continue to report the Reciprocal Rank Fusion `score`.
 
 ### Fixed
 
