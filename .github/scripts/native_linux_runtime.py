@@ -62,6 +62,23 @@ def redact(value, temporary):
     return value.replace(str(temporary), "<fixture>").replace("sill_password", "<fixture-password>")
 
 
+def installer_path(directory):
+    # The installer checks PATH for pipx and agent CLIs. Expose only the real
+    # commands used by its shell scripts and the CI fixture setup.
+    directory.mkdir(mode=0o700)
+    (directory / "python3").symlink_to(sys.executable)
+    docker = shutil.which("docker")
+    require(docker, "Docker CLI is missing on the runner")
+    (directory / "docker").symlink_to(Path(docker).resolve())
+    for name in ("bash", "cat", "dirname", "git", "ln", "mkdir", "rm", "sed", "sleep", "tar"):
+        command = shutil.which(name, path=os.defpath)
+        require(command, f"required system command is missing: {name}")
+        (directory / name).symlink_to(command)
+    if crontab := shutil.which("crontab", path=os.defpath):
+        (directory / "crontab").symlink_to(crontab)
+    return str(directory)
+
+
 def loopback_ports():
     # Keep sockets open together so all three selected ports are distinct.
     with socket.socket() as db, socket.socket() as amqp, socket.socket() as management:
@@ -316,10 +333,8 @@ def rehearse(source, temporary, evidence, report):
     outside = temporary / "other cwd"
     for path in (home, checkout, outside, home / ".codex", home / ".claude"):
         path.mkdir(mode=0o700)
-    env = dict(HOME=str(home), PATH=f"{Path(sys.executable).parent}:/usr/bin:/bin", LANG="C.UTF-8",
+    env = dict(HOME=str(home), PATH=installer_path(temporary / "bin"), LANG="C.UTF-8",
                DOCKER_HOST="unix:///var/run/docker.sock", PIP_CONFIG_FILE=os.devnull)
-    require(not any(shutil.which(name, path=env["PATH"]) for name in ("pipx", "claude", "codex")),
-            "expected the installer venv path without native client binaries")
     config = home / ".codex/config.toml"
     claude = home / ".claude.json"
     config.write_text(CODEX_CONFIG)
