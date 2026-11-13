@@ -49,6 +49,7 @@ sill-worker = "worker:main"
 [tool.setuptools]
 py-modules = [
   "memory_tools",
+  "embedding_profiles",
   "cognitive_memory_api",
   "prompt_resources",
   "sill",

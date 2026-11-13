@@ -333,7 +333,10 @@ class MemoryToolHandler:
             return {"error": f"Unknown tool: {tool_name}"}
         
         try:
-            return handler(arguments)
+            # End the transaction after each tool so regime locks never linger
+            # on an idle legacy handler connection.
+            with self.conn:
+                return handler(arguments)
         except Exception as e:
             return {"error": str(e)}
 
@@ -541,10 +544,11 @@ class MemoryToolHandler:
         limit = min(args.get('limit', 3), 10)
         
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock_shared(714014)")
             # Search clusters by embedding similarity
             cur.execute("""
                 WITH query_embedding AS (
-                    SELECT get_embedding(%s) as emb
+                    SELECT public.get_embedding(%s, 'query') as emb
                 )
                 SELECT 
                     mc.id,
@@ -598,10 +602,11 @@ class MemoryToolHandler:
         limit = min(args.get('limit', 3), 10)
         
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock_shared(714014)")
             # Search procedural memories
             cur.execute("""
                 WITH query_embedding AS (
-                    SELECT get_embedding(%s) as emb
+                    SELECT public.get_embedding(%s, 'query') as emb
                 )
                 SELECT 
                     m.id as memory_id,
@@ -633,9 +638,10 @@ class MemoryToolHandler:
         limit = min(args.get('limit', 3), 10)
         
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock_shared(714014)")
             cur.execute("""
                 WITH query_embedding AS (
-                    SELECT get_embedding(%s) as emb
+                    SELECT public.get_embedding(%s, 'query') as emb
                 )
                 SELECT 
                     m.id as memory_id,
