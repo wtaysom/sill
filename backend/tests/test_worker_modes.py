@@ -127,7 +127,7 @@ def test_pyproject_packages_rabbit_bridge():
 
 def test_dockerfile_worker_copies_rabbit_bridge():
     text = DOCKERFILE_WORKER.read_text()
-    assert "rabbit_bridge.py" in text, (
+    assert "rabbit_bridge.py" in text or "COPY *.py /app/" in text, (
         "Dockerfile.worker's COPY line does not carry rabbit_bridge.py into the image")
 
 

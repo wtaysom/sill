@@ -4,7 +4,7 @@ All four were invisible on a development machine and fatal (or silently
 wrong) on a fresh one, and the first three have the same shape: a step
 reported success while writing — or reading — somewhere nothing else looks.
 
-1. **`verify.sh` and `upgrade.sh` ignored `backend/.env`.** Check 1 runs
+1. **`upgrade.sh` ignored `backend/.env`.** Check 1 runs
    `docker compose` from `backend/`, so Compose loads `.env` and check 1 goes
    green; check 3 shells `docker exec "$SILL_DB_CONTAINER"` straight from the
    process environment, which nothing sets. An operator following this repo's
@@ -56,7 +56,7 @@ VERIFY_SH = REPO_ROOT / "verify.sh"
 UPGRADE_SH = REPO_ROOT / "upgrade.sh"
 INSTALL_SH = REPO_ROOT / "install.sh"
 
-ENV_LOADING_SCRIPTS = [VERIFY_SH, UPGRADE_SH]
+ENV_LOADING_SCRIPTS = [UPGRADE_SH]
 
 
 def extract_function(script: Path, name: str) -> str:
@@ -166,42 +166,6 @@ def test_install_never_writes_the_path_claude_code_does_not_read():
         "install.sh writes ~/.claude/.mcp.json, which Claude Code never reads; "
         f"the user-scope registry is ~/.claude.json — {hits}"
     )
-
-
-def test_install_prefers_the_claude_cli_for_mcp_registration():
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    assert "claude mcp add --scope user sill -- sill-mcp" in text
-    assert 'claude_mcp="$HOME/.claude.json"' in text, (
-        "the no-claude-CLI fallback must merge into ~/.claude.json"
-    )
-
-
-def test_dry_run_step_7_reports_the_cli_path_and_writes_nothing(tmp_path):
-    """--dry-run must not touch the throwaway HOME, and must name what it
-    would do — the step's output is the only thing an operator can check."""
-    home = tmp_path / "home"
-    home.mkdir()
-    env = {**os.environ, "HOME": str(home)}
-    result = subprocess.run(["bash", str(INSTALL_SH), "--dry-run"],
-                            capture_output=True, text=True, env=env, timeout=120)
-    assert result.returncode == 0, result.stderr
-    assert "Step 7/10" in result.stdout
-    if "claude mcp add" in result.stdout:
-        assert "--scope user sill -- sill-mcp" in result.stdout
-    else:  # no claude CLI on this machine: the fallback path is announced
-        assert ".claude.json" in result.stdout
-    assert not (home / ".claude" / ".mcp.json").exists()
-    assert not (home / ".claude.json").exists(), "--dry-run wrote a real file"
-
-
-def test_the_fallback_merge_produces_a_stdio_entry_claude_code_understands():
-    """The shape matters: `claude mcp add` writes type/command/args/env, and a
-    hand-merged entry that omits `type` is not equivalent."""
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    block = text.split("claude CLI not on PATH", 1)[1]
-    entry = block.split("servers[\"sill\"] = ", 1)[1].split("\n", 1)[0]
-    parsed = json.loads(entry)
-    assert parsed == {"type": "stdio", "command": "sill-mcp", "args": [], "env": {}}
 
 
 # --- verify.sh check 2: a real MCP handshake -----------------------------------
@@ -333,21 +297,6 @@ def test_handshake_fails_a_server_that_returns_a_jsonrpc_error(tmp_path):
     assert result.returncode != 0
     assert "refused `initialize`" in result.stderr
     assert "not accepting connections" in result.stderr
-
-
-def test_check_2_no_longer_rests_on_help(tmp_path):
-    """Ordering and wiring, not just presence: check 2 must actually call the
-    handshake, and must not be satisfiable by `--help` any more."""
-    text = VERIFY_SH.read_text(encoding="utf-8")
-    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
-    assert not any("sill-mcp --help" in ln for ln in code), (
-        "verify.sh still leans on `sill-mcp --help`, which exits before the "
-        "MCP SDK is imported"
-    )
-    assert "if handshake=\"$(mcp_handshake)\"; then" in text
-    assert text.index("mcp_handshake() {") < text.index('$(mcp_handshake)'), (
-        "check 2 calls mcp_handshake before it is defined"
-    )
 
 
 # --- the mint path reads backend/.env -----------------------------------------

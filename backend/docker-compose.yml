@@ -12,17 +12,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sill} -d ${POSTGRES_DB:-sill}"]
+      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      # The baseline may retry the embedding server during initdb. Do not
+      # call that temporary socket-only PostgreSQL process healthy.
+      start_period: ${SILL_INSTALL_WAIT_HEALTHY_S:-1800}s
     ports:
-      # SILL_BIND_ADDR defaults to 0.0.0.0 — every interface, as before. This
-      # database runs POSTGRES_HOST_AUTH_METHOD=trust, so anything that can
-      # reach the port is a superuser on the whole store; set it to 127.0.0.1
-      # in backend/.env unless another host genuinely needs to connect.
-      - "${SILL_BIND_ADDR:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432"
+      # Postgres uses trust authentication. Only publish locally by default.
+      - "${SILL_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     command:
       - postgres
       - -c
@@ -34,19 +33,20 @@ services:
       - private
 
   embeddings:
-    # Defaults are the amd64 release line. On an arm64 host (Apple Silicon)
-    # that image runs under emulation — see backend/.env.example for the
-    # native alternative and the tradeoff it carries.
-    image: ${EMBEDDING_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.8}
+    # Managed scripts select native defaults. Direct Compose defaults to amd64.
+    image: ${EMBEDDING_IMAGE:-${SILL_DEFAULT_EMBEDDING_IMAGE:-ghcr.io/huggingface/text-embeddings-inference@sha256:8de25e75ce39617f17f2f6c77d60a4f75b65e779ed5005420eb1400072a15c1c}}
     container_name: ${SILL_EMBEDDINGS_CONTAINER:-sill_embeddings}
     restart: ${SILL_RESTART_POLICY:-unless-stopped}
-    platform: ${EMBEDDING_PLATFORM:-linux/amd64}
+    platform: ${EMBEDDING_PLATFORM:-${SILL_DEFAULT_EMBEDDING_PLATFORM:-linux/amd64}}
     command:
       - --model-id
       - ${EMBEDDING_MODEL_ID:-unsloth/embeddinggemma-300m}
       - --dtype
       - float32
+      - --max-batch-tokens
+      - ${EMBEDDING_MAX_BATCH_TOKENS:-2048}
     environment:
+      REVISION: ${EMBEDDING_REVISION:-${SILL_DEFAULT_EMBEDDING_REVISION:-main}}
       EMBEDDING_MODEL_ID: ${EMBEDDING_MODEL_ID:-unsloth/embeddinggemma-300m}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-768}
     expose:
@@ -58,10 +58,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      # First-time boot downloads ~300MB of safetensors when the upstream
-      # repo has no ONNX files (Candle backend fallback). Give it plenty
-      # of headroom — subsequent boots are near-instant.
-      start_period: 600s
+      # Cold model downloads can take over 15 minutes. Match the managed
+      # runtime's 30 minute default readiness budget.
+      start_period: ${SILL_INSTALL_WAIT_HEALTHY_S:-1800}s
     networks:
       - private
       - public  # needed for initial model download from HuggingFace
@@ -74,8 +73,8 @@ services:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-sill}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-sill_password}
     ports:
-      - "${SILL_BIND_ADDR:-0.0.0.0}:${RABBITMQ_PORT:-5672}:5672"
-      - "${SILL_BIND_ADDR:-0.0.0.0}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+      - "${SILL_BIND_ADDR:-127.0.0.1}:${RABBITMQ_PORT:-5672}:5672"
+      - "${SILL_BIND_ADDR:-127.0.0.1}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:

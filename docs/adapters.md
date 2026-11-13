@@ -1,6 +1,6 @@
 # Harness Adapters
 
-Sill's hooks run on two agent harnesses today — Claude Code and Codex —
+Sill's CLI hook adapters target two agent harnesses — Claude Code and Codex —
 and are built to make room for more. This document is the contract that
 makes "supports harness X" a checkable claim instead of a hope: four
 slots, what each requires of a harness, the normalization vocabulary that
@@ -98,7 +98,7 @@ to walk — and a shell that can run the configured `$SILL_CLI` (default
 Neither hand-copies the other's assertions; see each test's own docstring
 for the boundary.
 
-### 3. capture — the conversation reaches a searchable archive
+### 3. capture — hooks can read local transcript records
 
 **Mechanism:** `plugin/hooks/_harness.py`'s `iter_transcript_tool_uses(path)`
 — reads a session transcript file and yields `{id, name, input}` for every
@@ -208,8 +208,8 @@ to confirm, not a given.
 | Assistant text on `Stop` | requires a transcript read (`get_response_text` walks the file) | handed directly as `last_assistant_message` | `assistant_text`; also read ad hoc by `response-patterns.py`/`track-reuse.py` |
 | Events available | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `PreCompact` (the ones some hook in this repo targets — `PostToolUse`/`PreCompact` are opt-in, not in the default template; see `docs/hooks.md`) | superset — adds `PostCompact`, `PermissionRequest`, `SubagentStart`, `SubagentStop`; wire is Claude-compatible at the top level | n/a — no hook in this repo currently targets a Codex-only event |
 | Harness self-identification | no positive marker found | `turn_id` present on every event | `detect` |
-| MCP server registration | `~/.claude.json` (global, one entry: `mcpServers.sill`; written by `claude mcp add --scope user` when the CLI is on `PATH`, else merged directly) | `~/.codex/config.toml` (global, `[mcp_servers.sill]` + `[features].hooks = true`) | `install.sh` step 7 writes both |
-| Hook wiring | `<project>/.claude/settings.local.json` (merges idempotently on every `--hooks-for` re-run); also `~/.claude/settings.json` under `--scope home` | `<project>/.codex/hooks.json` under `install.sh` (written once; **skipped** if it already exists, by design — first wiring only); also `~/.codex/hooks.json` under `--scope home`. Re-rendering an existing file is `upgrade.sh --hooks-for`'s job, not `install.sh`'s — it diffs against the current template and requires `--force-hooks` to overwrite (fixed the gap this row used to describe as unconditional; see `docs/hooks.md`'s "Adding hooks to a project") | `install.sh` step 8, from `plugin/codex.hooks.json.template`; `upgrade.sh --hooks-for` for re-rendering |
+| MCP server registration | `~/.claude.json` (user scope, `mcpServers.sill`) | `${CODEX_HOME:-$HOME/.codex}/config.toml` (user scope, `[mcp_servers.sill]`) | `sill connect`, also used by the installer and upgrader |
+| Hook wiring | `<project>/.claude/settings.local.json` (merges idempotently on every `--hooks-for` re-run); also `~/.claude/settings.json` under `--scope home` | `<project>/.codex/hooks.json` under `install.sh` (written once; **skipped** if it already exists, by design — first wiring only); also `~/.codex/hooks.json` under `--scope home`. Re-rendering an existing file is `upgrade.sh --hooks-for`'s job, not `install.sh`'s — it previews changes to Sill commands, preserves unrelated hooks, and requires `--force-hooks` to replace an edited Sill command | `install.sh` step 9, from `plugin/codex.hooks.json.template`; `upgrade.sh --hooks-for` for re-rendering |
 | Hook command trust | none — commands run as configured | **SHA-256-pinned** per command in `config.toml`'s `[hooks.state]` — see the warning below | n/a — operational, not code |
 
 To register a specific instance directly, run `sill connect claude-code`
@@ -217,8 +217,11 @@ or `sill connect codex` with `--env-file /absolute/path/to/backend/.env`.
 Use `sill connect claude-desktop` for Claude Desktop on macOS. Add
 `--dry-run` to check the merge before writing. The client launches the
 installed `sill-mcp` using the absolute env-file path. Set database
-coordinates or a DSN in that file. Its settings are read literally without
-shell expansion.
+coordinates or `SILL_DB_DSN` in that file. Values are read literally and
+take precedence over ambient PostgreSQL settings. Rendered CLI hooks
+select the file via `SILL_INSTANCE_ENV_FILE`. See [client setup and
+verification](desktop-clients.md) for desktop local Codex, Claude Desktop,
+and the hosted ChatGPT route.
 
 A previous installer may have registered the bare `sill-mcp` command.
 Check which instance it was using before replacing that entry with

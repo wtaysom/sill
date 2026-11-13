@@ -195,7 +195,25 @@ def _insert_via_create_memory(
     return str(cur.fetchone()[0])
 
 
-def main(path: str | Path, *, fake_embeddings: bool | None = None) -> ImportSummary:
+def _connect_explicit(dsn: str):
+    # libpq can otherwise inherit service/SSL/target overrides for fields
+    # absent from the URI. Keep explicit instance mode isolated.
+    inherited = {key: value for key, value in os.environ.items() if key.startswith("PG")}
+    for key in inherited:
+        del os.environ[key]
+    try:
+        try:
+            conn = psycopg2.connect(dsn)
+        except psycopg2.Error:
+            raise SystemExit("seed_import: could not connect to the selected instance") from None
+    finally:
+        os.environ.update(inherited)
+    return conn
+
+
+def main(
+    path: str | Path, *, fake_embeddings: bool | None = None, dsn: str | None = None,
+) -> ImportSummary:
     """Import the JSONL file at *path*. Returns a summary.
 
     `fake_embeddings`: if None, read SILL_FAKE_EMBEDDINGS env (default False).
@@ -219,7 +237,7 @@ def main(path: str | Path, *, fake_embeddings: bool | None = None) -> ImportSumm
     summary = ImportSummary()
     total = len(rows)
 
-    conn = psycopg2.connect(**_db_kwargs())
+    conn = psycopg2.connect(**_db_kwargs()) if dsn is None else _connect_explicit(dsn)
     try:
         with conn:
             with conn.cursor() as cur:

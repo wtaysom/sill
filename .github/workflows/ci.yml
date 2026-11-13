@@ -89,7 +89,7 @@ jobs:
           done
 
       - name: Upgrade the baseline container via upgrade.sh
-        run: SILL_DB_CONTAINER=base ./upgrade.sh --no-verify
+        run: SILL_DB_CONTAINER=base ./upgrade.sh --schema-only --no-verify
 
       - name: Diff schema dumps
         run: |
