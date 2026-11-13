@@ -168,3 +168,17 @@ def test_context_formatter_keeps_enough_precision_to_discriminate():
         f"score printed to {m.group('places')} decimal places; RRF values "
         "0.0164/0.0161/0.0159 collapse to the same string below 4"
     )
+
+
+def test_public_score_survives_provenance_port():
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from sill_mcp_server import _jsonable
+    memory = api.Memory(uuid4(), api.MemoryType.SEMANTIC, 'Synthetic declaration', .7,
+                        score=1/61, speaker='Inez', production=None, minted_in={'model':None})
+    assert _jsonable(memory)['score'] == 1/61
+    assert 'similarity' not in _jsonable(memory)
+    context = api.HydratedContext([memory], [], [], [], None, None, [])
+    text = api.format_context_for_prompt(context)
+    assert 'score: 0.0164' in text and 'made: undeclared' in text
+    assert {'production', 'minted_in', 'speaker', 'force', 'restates_id'} <= field_names(api.MemoryPreview)

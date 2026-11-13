@@ -23,9 +23,11 @@ mkdir -p notes journal logs/analyst logs/reflector
 The example ships two voices — an analyst that measures, tests and builds,
 and a reflector that thinks about something without needing to produce an
 artifact. Each declares a standing prompt, a transcripts directory, and an
-`output_glob`. Keep the `output_glob`s: a voice without one is judged on
-exit code alone, and exit code cannot see the failure phase 4 is about.
-`docs/beats.md` has the full field reference.
+`output_glob`. Keep the `output_glob`s to catch a successful CLI outcome
+that produced no new matching file. Both starter voices use Claude Code.
+To run a voice with Codex, set `"launcher": "codex"` and optionally `cli`
+to the absolute path from `command -v codex`. Run that voice with its own
+project trust and tool permissions. See [voice configuration](../beats.md#voice-config-format).
 
 ## Seed the first beats with something to bite on
 
@@ -74,11 +76,11 @@ scope from your own `beats.json` on every spawn; you never set it by hand.
 Then, per beat, exactly one outcome line. Success looks like this:
 
 ```text
-INFO - [analyst] Beat complete in 0.3s — transcript 20260805-091928.txt
-INFO - [reflector] Beat complete in 0.1s — transcript 20260805-091929.txt
+INFO - [analyst] Beat complete in 0.3s — transcript 12345678-1234-4123-8123-123456789abc.txt
+INFO - [reflector] Beat complete in 0.1s — transcript abcdefab-abcd-4abc-8abc-abcdefabcdef.txt
 ```
 
-"Complete" means exit 0 **and** the voice's `output_glob` gained a new file.
+"Complete" means the launcher succeeded and the voice's `output_glob` gained a new file.
 A real beat takes minutes, not the fractions of a second above.
 
 The failure this phase exists to catch looks like this:
@@ -118,27 +120,14 @@ ls notes journal
 cat "$(ls -t logs/analyst/*.txt | head -1)"
 ```
 
-The transcript's header is written by the worker, not the beat:
-
-```text
-# Analyst beat
-# Spawned: 2026-08-05T09:19:06-07:00 — worker-written wall-clock receipt at child spawn; the child cannot fabricate this line
-# Timestamp: 2026-08-05T09:19:07.312960
-# Duration: 0.3s
-# Exit code: 0
-# Model: claude-opus-4-8 (best-effort mtime match on session transcript)
-```
-
-The `# Model:` line is best-effort and says so: the worker matches the child's
-session transcript by modification time, which is a guess a busy machine can
-get wrong. Treat it as a hint, unlike `# Spawned:`, which is a receipt.
-
-The spawn clock is stamped by the parent process before the child gets
-control, so nothing the beat does afterward can change it. A beat's own
-account of when it ran is checkable against this line. Its own account of
-what it *did*, though, is not checkable here: the transcript holds the
-child's final message only, not its tool calls. A term's absence from a
-transcript is not evidence the beat never touched it.
+Open the `.json` receipt with the same UUID as the `.txt` summary. Check
+that its status is `succeeded`, `state_advanced` is `true`, and
+`new_outputs` lists the file you expected. `spawned_at` and `completed_at`
+are recorded by the worker. `requested_model` shows the launcher argument,
+if any, and `effective_model` identifies the model when the worker has
+evidence from the host. The summary holds the CLI's final message. Use the
+receipt's `host_session_id` to find the host's execution record if you need
+to inspect tool calls.
 
 Which is why the actual done-condition of this phase is the last one, and it
 is yours rather than the software's: **open the note and the journal entry

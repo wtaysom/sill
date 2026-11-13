@@ -308,9 +308,10 @@ def run_mint_path_in(tmp_path: Path, env_body: str | None, preset: dict) -> dict
 
     A copy, not the installed module: sill.py finds `.env` next to its own
     file, so pointing it at a fixture means putting the file there. It imports
-    nothing but the standard library, so a copy is the real thing.
+    two pure helper modules, copied alongside it to match the installed distribution.
     """
-    (tmp_path / "sill.py").write_bytes((BACKEND_ROOT / "sill.py").read_bytes())
+    for module in ("sill.py", "provenance.py", "session_identity.py"):
+        (tmp_path / module).write_bytes((BACKEND_ROOT / module).read_bytes())
     if env_body is not None:
         (tmp_path / ".env").write_text(env_body, encoding="utf-8")
     env = {k: v for k, v in os.environ.items()

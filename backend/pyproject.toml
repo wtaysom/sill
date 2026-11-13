@@ -56,6 +56,8 @@ py-modules = [
   "sill_mcp_server",
   "instance_config",
   "client_config",
+  "provenance",
+  "session_identity",
   "worker",
   "rabbit_bridge",
   "beat_worker",
