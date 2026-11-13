@@ -202,3 +202,169 @@ def test_legacy_exposure_failure_keeps_successful_read(db, caplog):
         cur.execute('SELECT 1')
         assert cur.fetchone()[0] == 1
     assert 'exposure telemetry failed' in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('method,phase', [
+    ('recent','entry'), ('recent','commit'), ('recent','rollback'),
+    ('recall','commit'), ('hydrate','commit'), ('cancel','entry'),
+])
+async def test_api_telemetry_deadline_disposes_stalled_connection(
+        migrated_dsn, monkeypatch, caplog, method, phase):
+    """Stall real protocol I/O at transaction boundaries, then prove pool reuse."""
+    import asyncio
+    import asyncpg
+    import cognitive_memory_api as api
+
+    monkeypatch.setattr(api, '_ACCESS_TIMEOUT', .05, raising=False)
+    connections = []
+    reads = []
+    waiting = asyncio.Event()
+
+    class StalledConnection(asyncpg.Connection):
+        armed = False
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            connections.append(self)
+
+        async def execute(self, query, *args, **kwargs):
+            if self.armed:
+                if phase == 'rollback' and query.startswith('UPDATE memories SET access_count'):
+                    raise RuntimeError('synthetic telemetry update failure')
+                control = {'entry':'BEGIN', 'commit':'COMMIT', 'rollback':'ROLLBACK'}[phase]
+                if query.startswith(control):
+                    # Actual asyncpg protocol wait, intentionally without a command
+                    # timeout. terminate() must abort it and release the pool slot.
+                    waiting.set()
+                    return await super().execute('SELECT pg_sleep(1)')
+            return await super().execute(query, *args, **kwargs)
+
+        async def fetch(self, query, *args, **kwargs):
+            if 'find_partial_activations' in query:
+                reads.append('partial')
+            return await super().fetch(query, *args, **kwargs)
+
+        async def fetchval(self, query, *args, **kwargs):
+            if 'gather_turn_context' in query:
+                reads.append('context')
+            return await super().fetchval(query, *args, **kwargs)
+
+    client = await api.CognitiveMemory.create(migrated_dsn, min_size=1, max_size=1,
+                                              connection_class=StalledConnection)
+    operation = None
+    mid = None
+    try:
+        text = 'stalledtelemetry '+uuid4().hex
+        mid = await client.remember(text)
+        stalled = connections[0]
+        old_pid = stalled.get_server_pid()
+        stalled.armed = True
+        if method in {'recent','cancel'}:
+            call = client.recall_recent(limit=100)
+        elif method == 'recall':
+            call = client.recall(text, include_partial=True)
+        else:
+            call = client.hydrate(text, include_partial=True)
+        operation = asyncio.create_task(call)
+        if method == 'cancel':
+            await asyncio.wait_for(waiting.wait(), .5)
+            operation.cancel()
+        done, _ = await asyncio.wait({operation}, timeout=.6)
+        assert operation in done, 'telemetry transaction exceeded its entire deadline'
+        if method == 'cancel':
+            assert operation.cancelled()
+        else:
+            result = operation.result()
+            memories = result if method == 'recent' else result.memories
+            assert mid in [memory.id for memory in memories]
+        assert stalled.is_closed(), 'unsafe connection must not return to the pool'
+        if method != 'cancel':
+            assert 'telemetry failed' in caplog.text
+        if method in {'recall','hydrate'}:
+            assert 'partial' in reads
+        if method == 'hydrate':
+            assert 'context' in reads
+        # Acquire/release must be bounded and use a replacement connection.
+        async with client._pool.acquire(timeout=.5) as replacement:
+            assert replacement.get_server_pid() != old_pid
+            assert await replacement.fetchval('SELECT 1', timeout=.5) == 1
+            # The synthetic server sleep can outlive socket disposal. Test-only
+            # cleanup allows that bounded sleep to finish; the read already returned.
+            await replacement.execute('DELETE FROM memories WHERE id=$1', mid, timeout=2)
+            mid = None
+    finally:
+        # This also makes a RED failure safe: abort actual pg_sleep before
+        # cancelling the test task, rather than waiting for a server response.
+        client._pool.terminate()
+        if operation is not None and not operation.done():
+            operation.cancel()
+            await asyncio.wait_for(asyncio.gather(operation, return_exceptions=True), .5)
+        if mid is not None:
+            conn = await asyncpg.connect(migrated_dsn, timeout=1, command_timeout=2)
+            try:
+                await conn.execute('DELETE FROM memories WHERE id=$1', mid)
+            finally:
+                await conn.close(timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('caller_timeout_ms', [0, 50])
+async def test_api_telemetry_bounds_actual_trigger_and_preserves_caller_setting(
+        migrated_dsn, monkeypatch, caller_timeout_ms):
+    import asyncio
+    import asyncpg
+    import cognitive_memory_api as api
+
+    monkeypatch.setattr(api, '_ACCESS_TIMEOUT', .1)
+    setup = await asyncpg.connect(migrated_dsn, timeout=1, command_timeout=6)
+    conn = None
+    mid = None
+    trigger = 'test_m6_stall_'+uuid4().hex
+    try:
+        mid = await setup.fetchval("SELECT memory_id FROM public.mint_memory('semantic',$1)", trigger)
+        await setup.execute(f'''CREATE FUNCTION public.{trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_sleep(5); RETURN NEW; END $$''')
+        await setup.execute(f'''CREATE TRIGGER {trigger} BEFORE UPDATE OF access_count ON public.memories
+            FOR EACH ROW WHEN (NEW.id='{mid}'::uuid) EXECUTE FUNCTION public.{trigger}()''')
+        conn = await asyncpg.connect(migrated_dsn, timeout=1)
+        transaction = conn.transaction()
+        await transaction.start()
+        await conn.execute("SELECT set_config('statement_timeout',$1,true)",str(caller_timeout_ms))
+        await asyncio.wait_for(api.CognitiveMemory._record_access(conn,[mid]), .5)
+        if caller_timeout_ms:
+            # The existing stricter server bound wins, ordinary rollback recovers
+            # the savepoint, and the caller's outer transaction remains usable.
+            assert not conn.is_closed()
+            assert await conn.fetchval('SHOW statement_timeout') == '50ms'
+            assert await conn.fetchval('SELECT 1') == 1
+        # A *different* connection must acquire the row while the caller's
+        # outer transaction remains open. No abandoned trigger/row lock may
+        # survive beyond the server bound plus this bounded cleanup allowance.
+        async with setup.transaction():
+            await setup.execute("SET LOCAL lock_timeout='300ms'")
+            assert await setup.fetchval('SELECT 1 FROM memories WHERE id=$1 FOR UPDATE',mid) == 1
+        if not conn.is_closed():
+            await transaction.rollback()
+    finally:
+        if conn is not None:
+            conn.terminate()
+        try:
+            await setup.execute(f'DROP TRIGGER IF EXISTS {trigger} ON public.memories')
+            await setup.execute(f'DROP FUNCTION IF EXISTS public.{trigger}()')
+            if mid is not None:
+                await setup.execute('DELETE FROM memories WHERE id=$1',mid)
+        finally:
+            await setup.close(timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('setting', ['25ms','3s'])
+async def test_api_telemetry_success_restores_caller_timeout(migrated_dsn, monkeypatch, setting):
+    import cognitive_memory_api as api
+    monkeypatch.setattr(api,'_ACCESS_TIMEOUT',.1)
+    async with client_in_transaction(migrated_dsn) as (client, conn):
+        mid = await client.remember('timeoutsetting '+uuid4().hex)
+        await conn.execute("SELECT set_config('statement_timeout',$1,true)",setting)
+        await client.recall_by_id(mid)
+        assert await conn.fetchval('SHOW statement_timeout') == setting

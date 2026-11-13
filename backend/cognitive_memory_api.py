@@ -30,6 +30,7 @@ import provenance
 from session_identity import mint_context
 
 logger = logging.getLogger(__name__)
+_ACCESS_TIMEOUT = 2.0
 
 
 def _attribution(row):
@@ -277,6 +278,7 @@ class CognitiveMemory:
             goals = ctx.get("goals") if include_goals else None
             urgent_drives = ctx.get("urgent_drives", []) if include_drives else []
 
+            await self._record_access(conn, [m.id for m in memories])
             return HydratedContext(
                 memories=memories,
                 partial_activations=partial,
@@ -332,6 +334,7 @@ class CognitiveMemory:
                 speaker=speaker,
             )
             partial = await self._find_partial_activations(conn, query) if include_partial else []
+            await self._record_access(conn, [m.id for m in memories])
             return RecallResult(memories=memories, partial_activations=partial, query=query)
 
     async def speakers(self, *, min_count: int = 1, limit: int = 100) -> list[tuple[str, int]]:
@@ -666,19 +669,78 @@ class CognitiveMemory:
 
     @staticmethod
     async def _record_access(conn, memory_ids, *, used: bool = False) -> None:
-        """Bounded best-effort telemetry; failure cannot abort a caller transaction."""
+        """Bound the entire telemetry transaction; discard unrecoverable connections.
+
+        asyncpg transaction-control calls have no per-call timeout. A single
+        deadline therefore aborts the connection synchronously, waking protocol
+        waiters and detaching its pool slot without awaiting rollback/close.
+        No background telemetry task survives the caller. Finish dependent reads
+        before calling this helper: deadline expiry can dispose the connection.
+        """
         ids = list(dict.fromkeys(memory_ids))
         if not ids:
             return
+        disposed = False
+        settled = False
+        expired = False
+
+        def dispose():
+            nonlocal disposed
+            if not disposed:
+                disposed = True
+                try:
+                    conn.terminate()
+                except asyncpg.InterfaceError:
+                    # A previously closed pooled connection is already detached.
+                    pass
+
+        def expire():
+            nonlocal expired
+            expired = True
+            dispose()
+
+        loop = asyncio.get_running_loop()
+        expires_at = loop.time() + _ACCESS_TIMEOUT
+        deadline = loop.call_at(expires_at, expire)
         try:
-            async with conn.transaction():
+            transaction = conn.transaction()
+            await transaction.start()
+            try:
+                previous_timeout = await conn.fetchval(
+                    "SELECT setting::int FROM pg_settings WHERE name='statement_timeout'")
+                remaining_ms = max(1, math.ceil((expires_at - loop.time()) * 1000))
+                server_timeout = min(previous_timeout or remaining_ms, remaining_ms)
+                # Bound actual UPDATE/trigger execution even when socket disposal
+                # precedes the driver's cancellation handshake. SET LOCAL belongs
+                # to this transaction/savepoint, so rollback restores caller state.
+                await conn.execute("SELECT set_config('statement_timeout',$1,true)",
+                                   str(server_timeout))
                 await conn.execute(
                     "UPDATE memories SET access_count=COALESCE(access_count,0)+1"
                     + (", last_accessed=CURRENT_TIMESTAMP" if used else "")
-                    + " WHERE id=ANY($1::uuid[])", ids, timeout=2)
+                    + " WHERE id=ANY($1::uuid[])", ids, timeout=_ACCESS_TIMEOUT)
+                # Releasing a savepoint does not undo SET LOCAL; preserve the
+                # caller's timeout on the success path as well as on rollback.
+                await conn.execute("SELECT set_config('statement_timeout',$1,true)",
+                                   str(previous_timeout))
+            except Exception:
+                await transaction.rollback()
+                settled = True
+                raise
+            else:
+                await transaction.commit()
+                settled = True
+        except asyncio.CancelledError:
+            dispose()
+            raise
         except Exception as exc:
+            if not settled:
+                dispose()
             logger.warning("Memory %s telemetry failed (%s)",
-                           "use" if used else "exposure", type(exc).__name__)
+                           "use" if used else "exposure",
+                           "deadline exceeded" if expired else type(exc).__name__)
+        finally:
+            deadline.cancel()
 
     async def touch_memories(self, memory_ids: Iterable[UUID]) -> int:
         """Increment access_count/last_accessed for the given memory ids."""
@@ -1277,7 +1339,6 @@ class CognitiveMemory:
                     emotional_valence=row["emotional_valence"],
                 )
             )
-        await self._record_access(conn, [m.id for m in memories])
         return memories
 
     async def _find_partial_activations(self, conn: asyncpg.Connection, query: str) -> list[PartialActivation]:
