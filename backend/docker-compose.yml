@@ -2,11 +2,7 @@ services:
   db:
     build: .
     container_name: ${SILL_DB_CONTAINER:-sill_db}
-    # `unless-stopped`, not `always`: come back after a reboot, an engine
-    # restart, or a crash, but stay down if the operator ran `compose stop`.
-    # Without this the whole store is one OrbStack/Docker Desktop restart away
-    # from being silently absent — spontaneous-recall degrades to a bare [TIME]
-    # header, which is indistinguishable from "nothing relevant was found".
+    # Resume after an engine restart and honor a deliberate `compose stop`.
     restart: ${SILL_RESTART_POLICY:-unless-stopped}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sill}

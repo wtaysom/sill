@@ -7,69 +7,34 @@ All notable changes to Sill are recorded here. Format loosely follows
 
 ### Added
 
-- **The recall hook's tunables are reachable without editing it**
-  (`SILL_RECALL_QUIET`, `SILL_RECALL_MAX_MEMORIES`,
-  `SILL_RECALL_MAX_CONVERSATIONS`, `SILL_RECALL_MIN_QUERY_LENGTH`,
-  `SILL_RECALL_MIN_SIMILARITY`). All five were hardcoded constants, so an
-  operator whose recall was technically working and practically noise had
-  no move except editing a tracked file that then fights every `git
-  pull`. Defaults are unchanged. That state is normal early rather than
-  exceptional — a young store answers every query out of whatever it
-  happens to contain, so the first weeks of any install produce
-  confident, irrelevant hits.
+- **Configure spontaneous recall through the hook environment.** Set result
+  counts, minimum prompt length and a fast recall score floor. Quiet mode
+  hides the result list while preserving the time header, failure notices
+  and model context. See [Hooks](docs/hooks.md#spontaneous-recall) for settings
+  and ranges.
 
-  `SILL_RECALL_QUIET` is the one worth knowing about: the hook emits two
-  independent payloads, a `systemMessage` the operator reads and an
-  `additionalContext` the model reads. Quiet silences the former and
-  leaves the latter untouched, so an operator who finds the on-screen
-  list distracting does not have to weaken recall to stop seeing it. The
-  `[TIME]` header always survives — without one visible line, a quiet
-  install and a dead store look identical, which is the same
-  invisible-failure shape the restart policy exists to prevent. Pinned by
-  `backend/tests/test_recall_noise_controls.py`, including a test that
-  fails if `QUIET_TUI` ever reaches `format_results()`.
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `feat/recall-noise-controls`.
 
 ### Fixed
 
-- **A dead store was indistinguishable from an empty result.** When a
-  recall query errored, the hook logged `Query failed` to its log file and
-  returned no memories — which the operator saw as a bare `[TIME]` header,
-  byte-identical to a healthy store matching nothing. Measured cost of
-  that ambiguity on one install: **eleven days, 69 prompts, five
-  projects, zero successful recalls, nobody noticed.** The degrade path
-  itself was correct — recall should not take the turn down — but
-  degrading *quietly* converts an outage into an invisible one. The hook
-  now raises `STORE_UNREACHABLE` on a failed query and says so in the
-  TUI, naming the log file. Deliberately **not** gated on
-  `SILL_RECALL_QUIET`: quiet is a preference about results, and a fault
-  is not a result — gating it there would blind precisely the operators
-  who had opted into silence. Pinned by
-  `backend/tests/test_store_unreachable_is_visible.py`, whose
-  load-bearing test asserts the warning never becomes quiet-gated.
+- **Failed store recall is visible.** The hook reports query errors, a missing
+  Docker executable and timeouts in the host's status message, with details in
+  the local log. The turn continues and any conversation results remain available.
+  Successful queries with no results produce no failure warning.
 
-  Note the companion condition, which no code change covers:
-  `restart: unless-stopped` only acts inside a *running* container
-  engine. If the engine itself does not start at login, there is nothing
-  for the policy to restart into — which is what actually happened here.
-  Operators on OrbStack: `orb config set app.start_at_login true`.
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `fix/visible-store-outage`.
 
-- **The stack did not come back after an engine restart, and nothing said
-  so.** None of the four services declared a `restart:` policy, so Docker
-  defaulted to `no`. The failure that produces is invisible rather than
-  loud: `spontaneous-recall.py` degrades gracefully when the store is
-  unreachable — it still emits its `[TIME]` header and returns no
-  memories — which is byte-for-byte what a healthy store looks like when
-  a query genuinely matches nothing. Observed on a live install
-  (2026-08-12): all four containers exited cleanly during an OrbStack
-  restart and stayed down over an hour across two active work projects,
-  with `docker inspect` reporting `RestartPolicy: no` and the host
-  showing 29 days of uptime. All four now default to
-  `${SILL_RESTART_POLICY:-unless-stopped}` — surviving reboots, engine
-  restarts and crashes, while still honoring a deliberate `docker compose
-  stop`, which matters in a project that asks operators to name a
-  shutdown condition in their charter. Pinned by
-  `backend/tests/test_restart_policy.py`, including a guard that fails if
-  a service is added without a policy.
+- **Compose services resume after the container engine restarts.** The
+  database, embeddings, RabbitMQ and maintenance worker use `unless-stopped`
+  and honor a deliberate `docker compose stop`. Set `SILL_RESTART_POLICY=no` to
+  start the stack manually. The container engine must be running.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `feat/restart-policy`.
+
+- **Keep the root `beats.json` local.** Git ignores the operator's copy. The
+  tracked template is still available at `backend/beats.example.json`.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)).
 
 ## v0.2.1 — 2026-08-06
 

@@ -21,11 +21,9 @@ matched. An agent reading a field called `similarity` with a value of 0.016
 concludes the store found nothing useful and discards a bullseye. Worse, two
 results of very different quality at the same rank are indistinguishable.
 
-The repo already knew the distinction where it mattered least and missed it
-where it mattered most: `plugin/hooks/spontaneous-recall.py` carries
-`HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not
-cosine similarity`, and `format_context()` already printed the value as
-"score". Only the field the model reads was mislabelled.
+The prompt hook distinguishes hybrid rank fusion from fast recall, and
+`format_context()` already printed the hybrid value as "score". The MCP
+result field needed the same name.
 
 These tests pin the name, the description's honesty, and — most importantly —
 that the description tells a reader the scale, since the number alone is

@@ -22,50 +22,34 @@ from pathlib import Path
 
 _SILL_LOG_DIR = Path(os.environ.get("SILL_LOG_DIR", "/tmp"))
 LOG_FILE = _SILL_LOG_DIR / "spontaneous-recall.log"
-def _env_int(name: str, default: int) -> int:
-    """Read an int tunable from the environment, ignoring unusable values.
 
-    A bad value must not take recall down: this hook runs on every prompt, and
-    a traceback here costs the operator their whole turn. Fall back silently.
-    """
+
+def _env_int(name: str, default: int, maximum: int) -> int:
+    """Read a bounded integer setting, using the default for invalid values."""
     try:
-        return int(os.environ.get(name, "").strip())
-    except (TypeError, ValueError):
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
         return default
+    return value if 0 <= value <= maximum else default
 
 
-def _env_float(name: str, default: float) -> float:
+def _env_score(name: str, default: float) -> float:
     try:
-        return float(os.environ.get(name, "").strip())
-    except (TypeError, ValueError):
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
         return default
+    return value if 0 <= value <= 1 else default
 
 
-# All five were hardcoded. They are the only levers an operator has when
-# recall is technically working and practically noise — which is the normal
-# early state, since a young store answers every query out of whatever it
-# happens to contain. Defaults are unchanged.
-MAX_MEMORIES = _env_int("SILL_RECALL_MAX_MEMORIES", 5)
-MAX_CONVERSATIONS = _env_int("SILL_RECALL_MAX_CONVERSATIONS", 2)
-MIN_QUERY_LENGTH = _env_int("SILL_RECALL_MIN_QUERY_LENGTH", 20)
-FAST_MIN_SIMILARITY = _env_float("SILL_RECALL_MIN_SIMILARITY", 0.25)
-HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not cosine similarity
+MAX_MEMORIES = _env_int("SILL_RECALL_MAX_MEMORIES", 5, 50)
+MAX_CONVERSATIONS = _env_int("SILL_RECALL_MAX_CONVERSATIONS", 2, 50)
+MIN_QUERY_LENGTH = _env_int("SILL_RECALL_MIN_QUERY_LENGTH", 20, 10_000)
+FAST_MIN_SCORE = _env_score("SILL_RECALL_MIN_SIMILARITY", 0.25)
 
-# Suppress the recalled-memory list from the TUI systemMessage without
-# touching what reaches the model. The two are separate payloads (see the
-# output block at the end of this file), so an operator who finds the display
-# distracting does not have to weaken recall itself to stop seeing it. The
-# [TIME] header is kept — it is one line and it is the only visible evidence
-# that the hook ran at all.
+# Quiet mode hides the visible result list. The time header, failure warning,
+# and model context still appear.
 QUIET_TUI = os.environ.get("SILL_RECALL_QUIET", "").strip().lower() in ("1", "true", "yes")
 
-# Set when a store query errors rather than legitimately returning nothing.
-# Those two states produced identical visible output — a bare [TIME] header —
-# which is how a dead store went unnoticed for eleven days across 69 prompts:
-# the hook logged "Query failed" to /tmp and showed the operator silence.
-# Surfaced in the TUI and deliberately NOT suppressed by SILL_RECALL_QUIET,
-# because quiet is a preference about results, not about faults.
-STORE_UNREACHABLE = False
 MIN_TOPICAL_KEYWORDS = 3  # Lever 1: skip process-only messages
 OPERATIONAL_TERMS = {
     "cli",
@@ -148,12 +132,14 @@ def build_query_text(prompt: str, keywords: list[str], use_hybrid: bool) -> str:
         return ' '.join(focus)
     return prompt[:500]
 
-def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> list[dict]:
+def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> list[dict] | None:
     """Query Postgres using the recall path best suited to the prompt.
 
-    If keywords are provided, prepends them to the prompt to steer
-    recall toward topical content rather than surface tone.
+    Keywords steer recall toward topical content. Return None on failure.
     """
+    if MAX_MEMORIES == 0:
+        return []
+
     use_hybrid = should_use_hybrid_recall(prompt, keywords)
     query_text = build_query_text(prompt, keywords or [], use_hybrid)
     log(f"Recall mode: {'hybrid' if use_hybrid else 'fast'}, query: {query_text[:120]}")
@@ -163,8 +149,7 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
 
     # content LAST so delimiter collisions only mangle content, not metadata
     if use_hybrid:
-        # hybrid_recall is helpful for operational/config prompts with exact
-        # tool names, but its RRF score is not a cosine similarity.
+        # Hybrid recall uses reciprocal rank fusion on a separate score scale.
         query = f"""
         SELECT memory_id::text, memory_type::text,
                round(score::numeric, 4) as similarity,
@@ -180,11 +165,11 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
             FROM hybrid_recall('{escaped}', {MAX_MEMORIES}, 60) hr
             JOIN memories m ON hr.memory_id = m.id
         ) sub
-        WHERE score >= {HYBRID_MIN_SIMILARITY}
         ORDER BY score DESC
         LIMIT {MAX_MEMORIES};
         """
     else:
+        score_filter = f"WHERE fr.score >= {FAST_MIN_SCORE}" if FAST_MIN_SCORE else ""
         query = f"""
         SELECT memory_id::text, memory_type::text,
                round((score * 0.7 + importance * 0.3)::numeric, 3) as similarity,
@@ -199,7 +184,7 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
                    m.source_attribution->>'ref' AS ref
             FROM fast_recall('{escaped}', {MAX_MEMORIES * 3}) fr
             JOIN memories m ON fr.memory_id = m.id
-            WHERE fr.score >= {FAST_MIN_SIMILARITY}
+            {score_filter}
         ) sub
         ORDER BY (score * 0.7 + importance * 0.3) DESC
         LIMIT {MAX_MEMORIES};
@@ -213,10 +198,8 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
         )
 
         if result.returncode != 0:
-            global STORE_UNREACHABLE
-            STORE_UNREACHABLE = True
             log(f"Query failed: {result.stderr}")
-            return []
+            return None
 
         memories = []
         for line in result.stdout.strip().split('\n'):
@@ -239,10 +222,10 @@ def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> lis
 
     except subprocess.TimeoutExpired:
         log("Query timed out")
-        return []
+        return None
     except Exception as e:
         log(f"Error querying memories: {e}")
-        return []
+        return None
 
 def extract_keywords(prompt: str) -> list[str]:
     """Extract meaningful keywords from prompt for memory search.
@@ -327,9 +310,9 @@ def extract_keywords(prompt: str) -> list[str]:
 def search_episodic_memory(query: str) -> list[dict]:
     """Search conversation archive using episodic-memory CLI (semantic search with indexing).
 
-    No-op when SILL_EPISODIC_MEMORY_PATH is unset or points to a missing file.
+    Skip the search when disabled or the episodic CLI is unavailable.
     """
-    if EPISODIC_CLI is None or not EPISODIC_CLI.exists():
+    if MAX_CONVERSATIONS == 0 or EPISODIC_CLI is None or not EPISODIC_CLI.exists():
         return []
 
     try:
@@ -721,7 +704,8 @@ if len(keywords) < MIN_TOPICAL_KEYWORDS:
 log(f"Query for: {prompt[:100]}...")
 
 # 1. sill vector search (Lever 2: keywords steer the embedding)
-memories = query_memories_vector(prompt, keywords=keywords)
+store_memories = query_memories_vector(prompt, keywords=keywords)
+memories = store_memories or []
 log(f"Found {len(memories)} memories")
 
 # 2. episodic-memory semantic search (optional)
@@ -797,14 +781,8 @@ if memories or conversations or time_header:
 
     # Build detailed summary for TUI
     tui_lines = [time_header] if time_header else []
-    if STORE_UNREACHABLE:
-        # Not gated on QUIET_TUI: an operator silencing the recall list has
-        # not asked to be kept ignorant of the store being down.
-        tui_lines.append(
-            "[sill] STORE UNREACHABLE — recall returned nothing because the "
-            "query failed, not because nothing matched. See "
-            f"{LOG_FILE} for the error."
-        )
+    if store_memories is None:
+        tui_lines.append(f"[sill] Store recall failed. See {LOG_FILE} for details.")
     if (memories or conversations) and not QUIET_TUI:
         tui_lines.append("[sill] Recalled:")
 
