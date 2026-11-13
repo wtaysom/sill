@@ -213,9 +213,9 @@ def snapshot(docker, owned, checkout, pack):
         return json.loads(docker("exec", owned["db"]["Id"], "psql", "-h", "127.0.0.1",
                                 "-XAt", "-v", "ON_ERROR_STOP=1", "-U", "sill", "-d", "sill", "-c", sql))
 
-    ledger = db("SELECT json_agg(migration_id ORDER BY migration_id) FROM public.schema_migrations WHERE source='initdb'")
+    ledger = db("SELECT json_agg(migration_id ORDER BY migration_id) FROM ag_catalog.schema_migrations WHERE source='initdb'")
     require(ledger == [f"{i:03}" for i in range(1, 16)]
-            and db("SELECT count(*) FROM public.schema_migrations") == len(ledger),
+            and db("SELECT count(*) FROM ag_catalog.schema_migrations") == len(ledger),
             "unexpected migration ledger")
     profile = db("""SELECT json_build_object('profile',profile,'provenance',provenance,
                      'fingerprint',public.embedding_profile_fingerprint(profile))
