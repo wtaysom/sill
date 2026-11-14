@@ -74,14 +74,32 @@ output with the real worker auditors to verify findings and an unavailable
 quote source. These are not native model or callback observations. No beat
 schedule was installed.
 
+## Hosted ChatGPT
+
+Web Chat mode passed a functional two-chat memory flow with the isolated
+Sill 0.3.0 runtime at `8380f2b` through Secure MCP Tunnel. The official
+tunnel-client 0.0.20 reported ready and polled successfully. The installed
+private plugin discovered 39 tools and was set to **Always ask**. One
+approval was observed in each chat: remember first, then recall in a new
+chat whose query omitted the stored location. The assistant answers
+reported the same synthetic UUID and the expected recalled payload.
+
+Those browser observations are separate from the independent checks:
+one direct call through the installed cloud plugin returned raw MCP data
+matching the expected full typed production, and read-only database
+comparisons matched the stored record. The observed browser UI exposed
+no raw tool JSON; its exact serialized arguments, results and execution
+count remain unverified. Assistant JSON was not treated as a tool receipt.
+Actual provider/model identity is unknown. This check establishes
+deliberate memory use, not full Sili startup, automatic recall, hooks or
+transcript capture.
+
 ## Remaining checks and limits
 
 - Observe the local Codex desktop app round trip manually. CLI success does
   not establish desktop behavior.
-- Complete the private tunnel runtime and ChatGPT plugin setup, then an
-  actual hosted tool round trip. A private tunnel has been created; no
-  authenticated runtime or hosted plugin has yet been tested. Local
-  tunnel-client checks do not establish hosted tool use.
+- Shut down the temporary hosted test tunnel. Cleanup remains pending;
+  the test client, private plugin and one-day runtime key are still present.
 
 Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
 the existing database container to avoid silently changing its collation

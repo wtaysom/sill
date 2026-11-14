@@ -89,7 +89,7 @@ the requested Sill tool calls. [Desktop MCP settings](https://learn.chatgpt.com/
 | Claude Code | Local stdio | Optional Claude Code hook | Local CLI JSONL for hook processing | Optional Claude Code hooks | 2.1.296 remembered and recalled in separate processes with Sill 0.3.0 at `8380f2b`. Prompt, guard, write and independent write callbacks passed across separate fixture runs. |
 | Codex CLI | Local stdio | Optional Codex hook | Local CLI JSONL for hook processing | Optional, reviewed Codex hooks | 0.162.1 retrieved the same Sill 0.3.0 UUID from Claude Code at `8380f2b`. Prompt, guard, write and independent write callbacks passed after normal hook trust. |
 | Desktop local Codex | Local stdio in the app's Codex host | Local hook support in the host. Sill behavior unverified. | Sill capture unverified | Sill enforcement unverified | Sill tool round trip pending. |
-| Hosted ChatGPT Chat / Work | Private custom MCP plugin via Secure MCP Tunnel | Explicit tool calls | None from this integration | None from this integration | Tunnel-client 0.0.20 command and profile setup checked locally. Hosted tool round trip pending. |
+| Hosted ChatGPT Chat / Work | Private custom MCP plugin via Secure MCP Tunnel | Explicit tool calls | None from this integration | None from this integration | Web Chat mode passed a functional two-chat memory check with tunnel-client 0.0.20 and Sill 0.3.0 at `8380f2b`. Independent raw cloud-plugin retrieval and database checks matched the full typed record; browser raw tool JSON was unavailable. |
 
 The native CLI checks verified the same synthetic UUID, speaker and full
 declared production across processes. Their measured runtime at `8380f2b`
@@ -108,11 +108,15 @@ connected client.
 
 ## Hosted ChatGPT Chat and Work via a private tunnel
 
-This route is pending an end-to-end Sill round trip from a hosted ChatGPT
-conversation. Local Codex and Claude use their own app sign-ins. This
-separate hosted setup needs a Platform organization with Secure MCP
-Tunnel access and a ChatGPT workspace that permits creating and using a
-private custom MCP plugin.
+The functional two-chat memory flow passed in hosted ChatGPT web Chat
+mode. Browser approvals and assistant answers were observed separately
+from an independent raw cloud-plugin recall and database comparison;
+the browser's exact tool JSON and execution count remain unverified.
+See the [release rehearsal](RELEASE-REHEARSAL.md#hosted-chatgpt) for the
+evidence boundary. Local Codex and Claude use their own app sign-ins.
+This separate hosted setup needs a Platform organization with Secure MCP
+Tunnel access and a ChatGPT workspace that permits creating and using
+a private custom MCP plugin.
 
 1. In Platform tunnel settings, find or create a private tunnel associated
    with the intended ChatGPT workspace. Creating or editing the tunnel
@@ -160,11 +164,13 @@ private custom MCP plugin.
    the readiness check. If the MCP child fails, verify both absolute
    paths, the private env file, and the local Sill runtime.
 5. In ChatGPT on the web, go to **Plugins > + > Add custom MCP server**.
-   Choose **Tunnel** under **Connection**, select your private tunnel,
-   confirm the authentication settings for the stdio binding, and
-   create and install the plugin in the intended workspace. Check that
-   discovery lists and enables both `remember` and `recall`. In a hosted
-   chat, select the installed plugin with `@` and run the
+   Choose **Tunnel** under **Connection**, enter the ID in **Tunnel ID**
+   and select the matching tunnel button. Confirm the authentication
+   settings for the stdio binding, then create and install the plugin in
+   the intended workspace. Check that discovery lists `remember` and
+   `recall`, and set the plugin's tool permissions to **Always ask**.
+   The observed UI listed all 39 Sill tools without individual enable
+   switches. In a hosted chat, select the installed plugin with `@` and run the
    [first-memory exercise](onboarding/01-install.md#remember-and-recall)
    using a fresh hosted chat for recall.
    [OpenAI custom MCP server guide](https://developers.openai.com/api/docs/guides/custom-mcp-server)
