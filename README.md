@@ -14,6 +14,11 @@ Install Git, Python 3.10 or later, and a Docker engine with Compose.
 Start Docker and sign in to the client you want to use. If you already
 use Sill, follow [Upgrading](#upgrading).
 
+A Mac's own `python3` is 3.9. The installer checks the `python3` on your
+`PATH` first and stops with the path and version it found if that is too
+old; install a newer one (python.org, or `brew install python`) and open
+a new terminal.
+
 For Claude Desktop on macOS, run the commands below. On macOS or Linux,
 use `--client claude-code` for Claude Code or `--client codex` for Codex CLI
 in the install command.
@@ -76,6 +81,22 @@ git pull
 ./upgrade.sh
 ```
 
+Coming from v0.2, the dry run will raise up to two things, and both are
+settled by a flag you add to both commands:
+
+- **Your client entry is a bare `sill-mcp`.** v0.2 registered it without
+  saying which database it meant. Once you have confirmed it uses this
+  one, add `--adopt-legacy`.
+- **The same speaker stored the same content twice.** v0.3 keeps one live
+  copy per speaker, and v0.2 could keep two. The dry run lists each pair
+  and stops. Archive the copies you do not want yourself, or add
+  `--archive-duplicates` to archive the newer copy of each after the
+  backup is taken. Archived memories stay in the database.
+
+A v0.2 install that ran on defaults has no `backend/.env`. The upgrade
+creates an empty private one, which means the same defaults, and records
+the embedding identity in it.
+
 `upgrade.sh` checks the selected instance and writes a validated private
 archive under `backups/preupgrade-*.sql.gz` before changing the runtime.
 It rebuilds the worker, reinstalls the package, applies pending migrations, and
@@ -115,8 +136,12 @@ service with its prior configuration and resolve the reported mismatch. Changing
 embedding spaces requires the explicit [profile migration](docs/EMBEDDING-PROFILES.md),
 not an installer rerun. This records the current service identity; it does not
 attest unknown historical vectors or activate a profile. An omitted revision is
-pinned from the running TEI `/info` immutable `model_sha`, including when the
-old container used `main`. An explicit symbolic revision is left untouched, but
+pinned to the snapshot the running service loaded. TEI `/info` reports that
+hash only when the service was started with one; a v0.2 stack was not, so the
+upgrade reads the hash from the service's model cache, which records the one
+snapshot that `main` resolved to when the model was downloaded. If the cache
+holds several, the message lists them and asks you to set `EMBEDDING_REVISION`
+to the one your vectors came from. An explicit symbolic revision is left untouched, but
 a restart refuses it: a matching label cannot prove the same loaded snapshot.
 To retain that space, explicitly set the reported SHA in `EMBEDDING_REVISION`
 and remove conflicting shell overrides before retrying. A stopped or unavailable
