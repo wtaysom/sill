@@ -85,7 +85,7 @@ the requested Sill tool calls. [Desktop MCP settings](https://learn.chatgpt.com/
 
 | Client | Deliberate MCP memory tools | Automatic recall in prompts | Sill transcript capture | Sill guards | Observed version and mode |
 |---|---|---|---|---|---|
-| Claude Desktop | Local stdio | No Sill hooks | None from this integration | None from this integration | 5.11492.2 remembered and recalled in two chats at `f3233a5` (reported Sill 0.2.1). Final 0.3 round trip pending. |
+| Claude Desktop | Local stdio | No Sill hooks | None from this integration | None from this integration | 5.11492.5 remembered and recalled in two chats with Sill 0.3.0 at `8380f2b`. Codex CLI independently retrieved the same memory and declared production. |
 | Claude Code | Local stdio | Optional Claude Code hook | Local CLI JSONL for hook processing | Optional Claude Code hooks | 2.1.296 remembered and recalled in separate processes with Sill 0.3.0 at `8380f2b`. Prompt, guard, write and independent write callbacks passed across separate fixture runs. |
 | Codex CLI | Local stdio | Optional Codex hook | Local CLI JSONL for hook processing | Optional, reviewed Codex hooks | 0.162.1 retrieved the same Sill 0.3.0 UUID from Claude Code at `8380f2b`. Prompt, guard, write and independent write callbacks passed after normal hook trust. |
 | Desktop local Codex | Local stdio in the app's Codex host | Local hook support in the host. Sill behavior unverified. | Sill capture unverified | Sill enforcement unverified | Sill tool round trip pending. |
@@ -95,11 +95,16 @@ The native CLI checks verified the same synthetic UUID, speaker and full
 declared production across processes. Their measured runtime at `8380f2b`
 is unchanged by the subsequent installer, restore and CI fixes through
 `7facec3`; see the [release rehearsal](RELEASE-REHEARSAL.md) for exact
-revision and platform coverage. The earlier Claude Desktop observation
-remains separate evidence. Worker launcher checks do not establish hook
-delivery or desktop behavior. See [harness adapters](adapters.md) for hook
-scope. The first-memory prompts guide deliberate tool use in any connected
-client.
+revision and platform coverage. Claude Desktop's final two-chat check also
+used `8380f2b`. Relevant fields were transcribed from its expanded native
+tool cards; database readback and an independent raw Codex MCP result
+verified the complete typed production. This proves deliberate memory
+tool use, not automatic recall or other Sill hooks in Claude Desktop.
+The earlier Desktop 5.11492.2 observation at `f3233a5` reported Sill 0.2.1
+and remains separate evidence. Worker launcher checks do not establish
+hook delivery or desktop behavior. See [harness adapters](adapters.md) for
+hook scope. The first-memory prompts guide deliberate tool use in any
+connected client.
 
 ## Hosted ChatGPT Chat and Work via a private tunnel
 

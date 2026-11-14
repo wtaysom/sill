@@ -1,6 +1,6 @@
 # v0.3.0 release candidate
 
-**Status on 2026-11-13.** Candidate `7facec3` reports `0.3.0` in package,
+**Status on 2026-11-14.** Candidate `7facec3` reports `0.3.0` in package,
 plugin and MCP metadata. Publication is pending. The v0.2.0 rehearsal below
 remains unchanged as a historical record.
 
@@ -50,6 +50,21 @@ session. The recalled test value appeared in the callback context and model
 reply, but not in the prompt, note or Read result. Per-result exposure counts
 matched the hook output without refreshing explicit-use timestamps.
 
+Claude Desktop 5.11492.5 passed a deliberate two-chat memory round trip
+with the same `8380f2b` runtime. Each call received an individual tool
+approval. The expanded native tool cards showed the same synthetic UUID,
+content, type, speaker and declared production; read-only database checks
+matched the observations. Codex CLI 0.162.1 independently retrieved the
+same complete typed record. Desktop observations transcribe relevant
+displayed fields rather than exporting raw wire JSON. In particular, the
+UI's empty-array display was resolved against its schema and independently
+verified in the database and raw Codex MCP response. The temporary server
+entry was removed while preserving intervening settings changes, and its
+absence was checked after reopening Claude. This verifies deliberate
+memory tools, not automatic recall or the full Sili startup in Desktop.
+The earlier Desktop 5.11492.2 result at `f3233a5` reported Sill 0.2.1 and
+remains separate evidence.
+
 The installed worker completed one bounded native turn through each CLI.
 Both produced the expected synthetic file and advanced rotation once.
 Separate two-second native timeout checks left rotation unchanged, refused
@@ -61,13 +76,12 @@ schedule was installed.
 
 ## Remaining checks and limits
 
-- Repeat the deliberate two-chat round trip in Claude Desktop with the final
-  0.3 runtime. The earlier Desktop 5.11492.2 result at `f3233a5` reported
-  Sill 0.2.1 and remains separate evidence.
 - Observe the local Codex desktop app round trip manually. CLI success does
   not establish desktop behavior.
-- Complete hosted ChatGPT sign-in, private tunnel/plugin setup and an actual
-  hosted tool round trip. Local tunnel-client checks do not establish it.
+- Complete the private tunnel runtime and ChatGPT plugin setup, then an
+  actual hosted tool round trip. A private tunnel has been created; no
+  authenticated runtime or hosted plugin has yet been tested. Local
+  tunnel-client checks do not establish hosted tool use.
 
 Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
 the existing database container to avoid silently changing its collation
