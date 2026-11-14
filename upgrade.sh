@@ -41,6 +41,7 @@ if (( SCHEMA_ONLY )) && [[ -n "$HOOKS_FOR" ]]; then fail "--schema-only cannot r
 
 refresh_hooks() {
   local target py flags=()
+sill_require_python || exit 1
   target="$(cd "$HOOKS_FOR" && pwd -P)" || return 1
   py="$(sill_python)" || return 1
   if (( FORCE_HOOKS )); then flags[${#flags[@]}]=--force; fi

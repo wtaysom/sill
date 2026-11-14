@@ -749,3 +749,85 @@ def test_orphaned_data_volume_is_not_a_fresh_install(runtime):
     log = Path(runtime[2]["TEST_FIXTURE"]) / "docker-calls"
     commands = [json.loads(line) for line in log.read_text().splitlines()]
     assert not any("build" in c or "up" in c for c in commands)
+
+
+# --- which Python ------------------------------------------------------------
+
+OLD_PYTHON = """#!/bin/sh
+# Stands in for a Mac's system Python 3.9 for the two probes; anything else
+# means a script went on using an interpreter it had just rejected.
+case "$2" in
+  *"version_info >="*) exit 1 ;;
+  *platform*) echo "3.9.6, arm64" ;;
+  *) exit 97 ;;
+esac
+"""
+
+
+def test_old_python_stops_before_anything_is_installed(runtime):
+    checkout, home, env = runtime
+    bin_dir = Path(env["TEST_PYTHON_WRAPPER"]).parent
+    real = Path(env["TEST_PYTHON_WRAPPER"]).read_text()
+    executable(bin_dir / "python3", OLD_PYTHON)
+    result = run(runtime, "install.sh", "--no-seed")
+    assert result.returncode != 0
+    assert "Python 3.10 or newer" in result.stderr and "3.9.6" in result.stderr
+    assert str(bin_dir / "python3") in result.stderr
+    assert "No newer python3.x was found" in result.stderr
+    assert not (Path(env["TEST_FIXTURE"]) / "docker-calls").exists()
+    assert not (home / "xdg data").exists() and not (home / ".local").exists()
+    # A newer interpreter under another name is pointed out by its path.
+    executable(bin_dir / "python3.12", real)
+    result = run(runtime, "install.sh", "--no-seed")
+    assert result.returncode != 0
+    assert f"{bin_dir / 'python3.12'} is new enough" in result.stderr
+
+
+def test_upgrade_and_verify_refuse_an_old_python_too(runtime):
+    checkout, home, env = runtime
+    shutil.copy2(ROOT / "upgrade.sh", checkout / "upgrade.sh")
+    executable(Path(env["TEST_PYTHON_WRAPPER"]), OLD_PYTHON)
+    for script in ("upgrade.sh", "verify.sh"):
+        result = run(runtime, script)
+        assert result.returncode != 0
+        assert "Python 3.10 or newer" in result.stderr
+
+
+def test_pipx_default_interpreter_too_old_is_overridden_for_this_install(runtime):
+    checkout, home, env = runtime
+    bin_dir = Path(env["TEST_PYTHON_WRAPPER"]).parent
+    executable(bin_dir / "old-python", OLD_PYTHON)
+    pipx = bin_dir / "pipx"
+    pipx.write_text(pipx.read_text().replace(
+        "'environment --value PIPX_BIN_DIR')",
+        f"'environment --value PIPX_DEFAULT_PYTHON') printf '%s\\n' '{bin_dir / 'old-python'}' ;;\n"
+        "  'environment --value PIPX_BIN_DIR')").replace(
+        '[ "${TEST_FAILURE:-}" != backend ] || exit 52',
+        '[ "${TEST_FAILURE:-}" != backend ] || exit 52\n    printf \'%s\' "${PIPX_DEFAULT_PYTHON:-unset}" > "$TEST_FIXTURE/pipx-python"'))
+    result = run(runtime, "install.sh", "--no-seed")
+    assert result.returncode == 0, details(result)
+    assert "pipx would build with" in result.stdout and "3.9.6" in result.stdout
+    assert (Path(env["TEST_FIXTURE"]) / "pipx-python").read_text() == str(bin_dir / "python3")
+
+
+def test_pipx_with_a_good_or_unknown_default_is_left_alone(runtime):
+    checkout, home, env = runtime
+    pipx = Path(env["TEST_PYTHON_WRAPPER"]).parent / "pipx"
+    pipx.write_text(pipx.read_text().replace(
+        '[ "${TEST_FAILURE:-}" != backend ] || exit 52',
+        '[ "${TEST_FAILURE:-}" != backend ] || exit 52\n    printf \'%s\' "${PIPX_DEFAULT_PYTHON:-unset}" > "$TEST_FIXTURE/pipx-python"'))
+    result = run(runtime, "install.sh", "--no-seed")
+    assert result.returncode == 0, details(result)
+    assert (Path(env["TEST_FIXTURE"]) / "pipx-python").read_text() == "unset"
+
+
+def test_stale_fallback_environment_is_rebuilt_not_built_over(runtime):
+    checkout, home, env = runtime
+    bin_dir = Path(env["TEST_PYTHON_WRAPPER"]).parent
+    (bin_dir / "pipx").unlink()
+    stale = home / ".local/share/sill-venv/bin"
+    stale.mkdir(parents=True)
+    (stale / "python").symlink_to(home / "removed-by-an-upgrade/python3.9")
+    result = run(runtime, "install.sh", "--no-seed", "--dry-run")
+    assert "Rebuilding" in result.stdout and "not runnable" in result.stdout, details(result)
+    assert "venv --clear" in result.stdout

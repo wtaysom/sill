@@ -27,6 +27,73 @@ sill_run() {
   fi
 }
 
+# --- Python interpreters ------------------------------------------------------
+# Three interpreters can be in play, and on a Mac they often differ: python3
+# on PATH runs these scripts' helpers and builds the fallback venv; pipx may
+# build the package's environment with another; and an environment left by an
+# earlier run may point at a third, or at one that has since been removed.
+# Each is checked where it is used, and each message names the file it means.
+
+sill_python_ok() {
+  "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+sill_python_describe() {
+  "$1" -c 'import platform, sys; print("%d.%d.%d, %s" % (sys.version_info[:3] + (platform.machine(),)))' 2>/dev/null ||
+    printf 'not runnable'
+}
+
+sill_require_python() {
+  local path candidate found=0
+  if ! path="$(command -v python3)"; then
+    printf 'Sill needs Python 3.10 or newer, and there is no python3 on PATH.\n' >&2
+    return 1
+  fi
+  if sill_python_ok "$path"; then
+    printf 'Python: %s (%s)\n' "$path" "$(sill_python_describe "$path")"
+    if [[ "$(uname -s)" == Darwin && "$(sysctl -n hw.optional.arm64 2>/dev/null)" == 1 &&
+          "$(sill_python_describe "$path")" == *x86_64 ]]; then
+      printf '  Note: this is an Intel build of Python running under Rosetta. Sill works with it; a native arm64 Python is faster.\n'
+    fi
+    return 0
+  fi
+  printf 'Sill needs Python 3.10 or newer. python3 on PATH is %s (%s).\n' "$path" "$(sill_python_describe "$path")" >&2
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3.10; do
+    if path="$(command -v "$candidate" 2>/dev/null)" && sill_python_ok "$path"; then
+      printf '  %s is new enough. Put its directory first on PATH so that python3 means it, then rerun.\n' "$path" >&2
+      found=1
+    fi
+  done
+  if (( ! found )); then
+    printf '  No newer python3.x was found on PATH. Install one (python.org, or: brew install python), open a new terminal, then rerun.\n' >&2
+  fi
+  return 1
+}
+
+# pipx builds new environments with its own default interpreter, which is the
+# one pipx itself was installed under unless PIPX_DEFAULT_PYTHON says otherwise.
+sill_pipx_python() {
+  local default
+  default="$(pipx environment --value PIPX_DEFAULT_PYTHON 2>/dev/null)" || return 0
+  [[ -n "$default" ]] || return 0
+  if ! sill_python_ok "$default"; then
+    export PIPX_DEFAULT_PYTHON="$(command -v python3)"
+    printf 'pipx would build with %s (%s); using %s for this install instead.\n' \
+      "$default" "$(sill_python_describe "$default")" "$PIPX_DEFAULT_PYTHON"
+  fi
+}
+
+sill_check_installed_python() {
+  local python="$1"
+  if ! sill_python_ok "$python"; then
+    printf 'The installed Sill environment runs %s (%s); it needs Python 3.10 or newer.\n' \
+      "$python" "$(sill_python_describe "$python")" >&2
+    printf '  Remove that environment (pipx uninstall sill-memory, or delete %s), then rerun.\n' \
+      "$HOME/.local/share/sill-venv" >&2
+    return 1
+  fi
+}
+
 sill_pipx_venvs() {
   local path
   path="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null)" || return 1
@@ -84,6 +151,7 @@ sill_python() {
 sill_install_backend() {
   local dir venv="$HOME/.local/share/sill-venv" localbin="$HOME/.local/bin" name
   if command -v pipx >/dev/null 2>&1; then
+    sill_pipx_python
     sill_run pipx install --force -e "$SILL_BACKEND" || return 1
     if (( ! ${DRY_RUN:-0} )); then
       # Do not accept a stale fallback venv if pipx did not expose this install.
@@ -93,11 +161,22 @@ sill_install_backend() {
         printf 'pipx did not expose the Sill package in its configured environment.\n' >&2
         return 1
       fi
+      sill_check_installed_python "$dir/python" || return 1
     fi
     return
   fi
-  sill_run python3 -m venv "$venv" || return 1
+  if [[ -e "$venv/bin/python" || -L "$venv/bin/python" ]] && ! sill_python_ok "$venv/bin/python"; then
+    # Left by an earlier run under an older Python, or its interpreter has
+    # since been removed. Building over it would keep the old interpreter.
+    printf 'Rebuilding %s: its interpreter is %s.\n' "$venv" "$(sill_python_describe "$venv/bin/python")"
+    sill_run python3 -m venv --clear "$venv" || return 1
+  else
+    sill_run python3 -m venv "$venv" || return 1
+  fi
   sill_run "$venv/bin/python" -m pip install -e "$SILL_BACKEND" || return 1
+  if (( ! ${DRY_RUN:-0} )); then
+    sill_check_installed_python "$venv/bin/python" || return 1
+  fi
   sill_run mkdir -p "$localbin" || return 1
   for name in sill sill-mcp sill-worker; do
     if [[ -e "$localbin/$name" || -L "$localbin/$name" ]] &&

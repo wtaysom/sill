@@ -120,6 +120,7 @@ step_preflight() {
       return 1
     fi
   done
+  sill_require_python
   if (( ${#CLIENTS[@]} == 0 )); then
     if command -v claude >/dev/null 2>&1; then CLIENTS[0]=claude-code; fi
     if command -v codex >/dev/null 2>&1; then CLIENTS[${#CLIENTS[@]}]=codex; fi
