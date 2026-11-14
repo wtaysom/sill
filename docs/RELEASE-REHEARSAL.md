@@ -65,6 +65,18 @@ memory tools, not automatic recall or the full Sili startup in Desktop.
 The earlier Desktop 5.11492.2 result at `f3233a5` reported Sill 0.2.1 and
 remains separate evidence.
 
+Local Codex Desktop also passed with Sill 0.3.0 at `8380f2b`. Two distinct
+desktop chats made one native remember and one recall call. Exact arguments
+and retained raw tool outputs matched the same UUID, content, type, speaker
+and full typed production in independent read-only database checks. The
+recall input omitted the stored location; the unique test record count went
+from zero to one and stayed at one after recall. Native transcript metadata
+identified Codex Desktop and embedded runtime `0.169.0-alpha.11.1`; the app
+bundle version is unknown. Project configuration requested hooks off,
+without independent proof of runtime suppression. These desktop calls
+verify deliberate memory use; full Sili startup, automatic recall, Sill
+transcript capture and hook enforcement remain unverified in that host.
+
 The installed worker completed one bounded native turn through each CLI.
 Both produced the expected synthetic file and advanced rotation once.
 Separate two-second native timeout checks left rotation unchanged, refused
@@ -94,12 +106,13 @@ Actual provider/model identity is unknown. This check establishes
 deliberate memory use, not full Sili startup, automatic recall, hooks or
 transcript capture.
 
-## Remaining checks and limits
+## Limits
 
-- Observe the local Codex desktop app round trip manually. CLI success does
-  not establish desktop behavior.
-- Shut down the temporary hosted test tunnel. Cleanup remains pending;
-  the test client, private plugin and one-day runtime key are still present.
+The planned client memory checks are complete. Their integration limits
+above still apply; Intel Mac installation remains unverified.
+
+The temporary hosted connection is intentionally retained at the operator's
+request, with its test client, private plugin and one-day runtime key.
 
 Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
 the existing database container to avoid silently changing its collation
