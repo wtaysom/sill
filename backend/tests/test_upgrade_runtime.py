@@ -103,6 +103,15 @@ elif args[0] == "exec":
         status = 1 if fail == "missing" else 0
     elif "http://localhost:80/info" in args:
         output = json.dumps({"model_id": "custom/model", "model_sha": None if fail == "unknown-revision" else os.getenv("TEST_OBSERVED_REVISION", "a" * 40)})
+    elif "sill-cached-snapshot" in args:
+        # "<pointer>|<snapshot>,<snapshot>": the service's model download cache.
+        cache = os.getenv("TEST_MODEL_CACHE")
+        if cache is None:
+            status = 1
+        else:
+            assert args[-3:] == ["/data", "models--custom--model", os.getenv("TEST_CACHE_REF", "main")], args
+            pointer, _, snapshots = cache.partition("|")
+            output = pointer + "\n--\n" + "\n".join(x for x in snapshots.split(",") if x)
     elif "pg_dump" in args:
         output = "-- PostgreSQL database dump\n" * 2000
         status = 1 if fail == "dump" else 0
@@ -122,7 +131,11 @@ elif args[0] == "exec":
                 state.write_text(json.dumps(known))
         else:
             sql = args[-1]
-            if "pg_control_system()" in sql:
+            if "HAVING count(*) > 1" in sql:
+                # Once the archive transaction has been applied, nothing repeats.
+                archived = (root / "applied-sql").exists() and "duplicate of" in (root / "applied-sql").read_text()
+                output = "[]" if archived else os.getenv("TEST_DUPLICATES", "[]")
+            elif "pg_control_system()" in sql:
                 output = json.dumps({"system_id": "fixture", "database_oid": 1234, "allow_connections": True, "superuser": True})
             elif "SELECT extname" in sql:
                 output = "vector\nage\nhttp"
@@ -693,3 +706,179 @@ def test_existing_database_dry_run_checks_without_runtime_changes(upgrade, scrip
     assert result.returncode == 0, details(result)
     assert before == (upgrade[0] / "backend/.env").read_bytes()
     assert not any("build" in c or "up" in c or "pg_dump" in c for c in calls(upgrade))
+
+
+# --- states a real v0.2 install is in ----------------------------------------
+
+KEEP, NEWER = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+DUPLICATES = json.dumps([[{"id": KEEP, "created": "2026-08-01T00:00:00Z"},
+                          {"id": NEWER, "created": "2026-09-12T00:00:00Z"}]])
+
+
+@pytest.mark.parametrize("flags", [("--no-verify",), ("--dry-run",)])
+def test_repeated_memories_stop_the_upgrade_before_anything_changes(upgrade, flags):
+    """Migration 010 refuses these at apply time, after the new package is in
+    and two migrations are committed. The same question is asked first."""
+    result = run(upgrade, "upgrade.sh", *flags, TEST_DUPLICATES=DUPLICATES)
+    assert result.returncode != 0
+    assert KEEP in result.stderr and NEWER in result.stderr
+    assert "--archive-duplicates" in result.stderr and "nothing changed" in result.stderr
+    log = calls(upgrade)
+    assert not any("pg_dump" in c or "build" in c or "stop" in c or "up" in c for c in log)
+    assert not (upgrade[0] / "backups").exists()
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+
+
+def test_archive_duplicates_is_explicit_and_follows_the_backup(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", "--archive-duplicates", TEST_DUPLICATES=DUPLICATES)
+    assert result.returncode == 0, details(result)
+    assert NEWER in result.stderr and "after the backup" in result.stderr
+    applied = (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").read_text()
+    archive = applied.index(f"archive_reason='duplicate of {KEEP}' WHERE id='{NEWER}' AND archived_at IS NULL")
+    assert archive < applied.index("schema_migrations")
+    assert f"WHERE id='{KEEP}'" not in applied
+    log = calls(upgrade)
+    dump = next(i for i, c in enumerate(log) if "pg_dump" in c)
+    migrate = next(i for i, c in enumerate(log) if c[0] == "exec" and "psql" in c and "-c" not in c)
+    assert dump < migrate
+
+
+def test_archive_duplicates_dry_run_reports_and_changes_nothing(upgrade):
+    result = run(upgrade, "upgrade.sh", "--dry-run", "--archive-duplicates", TEST_DUPLICATES=DUPLICATES)
+    assert result.returncode == 0, details(result)
+    assert NEWER in result.stderr
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+    assert not (upgrade[0] / "backups").exists()
+
+
+def test_no_duplicate_question_once_migration_010_is_applied(upgrade):
+    result = run(upgrade, "upgrade.sh", "--dry-run", TEST_UPGRADE_FAILURE="current", TEST_DUPLICATES=DUPLICATES)
+    assert result.returncode == 0, details(result)
+    assert not any("HAVING count(*) > 1" in " ".join(c) for c in calls(upgrade))
+
+
+def test_archive_sql_names_only_reviewed_rows_and_rejects_non_uuids():
+    mod = runner()
+    groups = json.loads(DUPLICATES)
+    sql = mod.archive_duplicates_sql(groups)
+    assert sql.startswith("BEGIN;") and "COMMIT;" in sql
+    assert sql.count("UPDATE public.memories") == 1
+    assert mod.archive_duplicates_sql([]) == ""
+    with pytest.raises(ValueError):
+        mod.archive_duplicates_sql([[{"id": KEEP, "created": "x"}, {"id": "x'; DROP TABLE memories; --", "created": "y"}]])
+
+
+def legacy_claude_entry(home):
+    """What v0.2 registered: a bare command, no instance file."""
+    (home / ".claude.json").write_text(json.dumps(
+        {"mcpServers": {"sill": {"type": "stdio", "command": "sill-mcp", "args": [], "env": {}}}}))
+
+
+def test_dry_run_without_an_env_file_previews_and_writes_nothing(upgrade):
+    """v0.2 created no backend/.env; a default install has none."""
+    checkout, home, env = upgrade
+    path = checkout / "backend/.env"
+    path.unlink()
+    legacy_claude_entry(home)
+    registry = (home / ".claude.json").read_bytes()
+    result = run(upgrade, "upgrade.sh", "--client", "claude-code", "--adopt-legacy", "--dry-run")
+    assert result.returncode == 0, details(result)
+    assert "would create an empty private one" in result.stdout
+    assert "would register" in result.stdout
+    assert not path.exists()
+    assert (home / ".claude.json").read_bytes() == registry
+    assert not any("pg_dump" in c or "build" in c or "up" in c for c in calls(upgrade))
+
+
+def test_upgrade_without_an_env_file_creates_a_private_one_and_registers_it(upgrade):
+    checkout, home, env = upgrade
+    path = checkout / "backend/.env"
+    path.unlink()
+    legacy_claude_entry(home)
+    result = run(upgrade, "upgrade.sh", "--client", "claude-code", "--adopt-legacy", "--no-verify")
+    assert result.returncode == 0, details(result)
+    assert "Created an empty private" in result.stdout
+    assert path.stat().st_mode & 0o777 == 0o600
+    from instance_config import load_instance_env
+    assert load_instance_env(path)["EMBEDDING_REVISION"] == "a" * 40
+    entry = json.loads((home / ".claude.json").read_text())["mcpServers"]["sill"]
+    assert entry["args"] == ["--env-file", str(path.resolve())]
+
+
+def test_missing_env_file_still_reports_the_legacy_registration(upgrade):
+    checkout, home, env = upgrade
+    (checkout / "backend/.env").unlink()
+    legacy_claude_entry(home)
+    result = run(upgrade, "upgrade.sh", "--client", "claude-code", "--dry-run")
+    assert result.returncode != 0
+    assert "--adopt-legacy" in result.stderr
+    assert not (checkout / "backend/.env").exists()
+
+
+def test_hooks_only_refresh_creates_the_file_its_commands_name(upgrade, tmp_path):
+    checkout, home, env = upgrade
+    path = checkout / "backend/.env"
+    path.unlink()
+    project = tmp_path / "project"
+    project.mkdir()
+    preview = run(upgrade, "upgrade.sh", "--hooks-for", str(project), "--hooks-only", "--dry-run")
+    assert preview.returncode == 0, details(preview)
+    assert not path.exists()
+    result = run(upgrade, "upgrade.sh", "--hooks-for", str(project), "--hooks-only")
+    assert result.returncode == 0, details(result)
+    assert path.read_bytes() == b"" and path.stat().st_mode & 0o777 == 0o600
+
+
+# TEI's /info repeats the revision the service was started with. A v0.2 stack
+# was started without one, so it reports none; observed on TEI 1.9.4.
+OLD, NEW = "c" * 40, "d" * 40
+
+
+@pytest.mark.parametrize("script", ["upgrade.sh", "install.sh"])
+def test_revision_the_service_does_not_report_is_read_from_its_cache(upgrade, script):
+    path = upgrade[0] / "backend/.env"
+    flags = ("--no-verify",) if script == "upgrade.sh" else ("--no-seed",)
+    result = run(upgrade, script, *flags, TEST_UPGRADE_FAILURE="unknown-revision", TEST_MODEL_CACHE=f"{OLD}|{OLD}")
+    assert result.returncode == 0, details(result)
+    from instance_config import load_instance_env
+    assert load_instance_env(path)["EMBEDDING_REVISION"] == OLD
+    choice = json.loads((Path(upgrade[2]["TEST_FIXTURE"]) / "embedding-choice").read_text())
+    assert choice["EMBEDDING_REVISION"] == OLD
+
+
+def test_symbolic_revision_echoed_by_the_service_is_resolved_from_its_cache(upgrade):
+    result = run(upgrade, "upgrade.sh", "--dry-run", TEST_UPGRADE_FAILURE="symbolic-revision",
+                 TEST_OBSERVED_REVISION="main", TEST_MODEL_CACHE=f"{OLD}|{OLD}")
+    assert result.returncode == 0, details(result)
+
+
+@pytest.mark.parametrize("cache", [f"{NEW}|{OLD},{NEW}", f"|{OLD}", f"{NEW}|{OLD}"])
+def test_ambiguous_cache_is_refused_before_backup_with_a_remedy_that_works(upgrade, cache):
+    path = upgrade[0] / "backend/.env"
+    refused = run(upgrade, "upgrade.sh", "--no-verify", TEST_UPGRADE_FAILURE="unknown-revision", TEST_MODEL_CACHE=cache)
+    assert refused.returncode != 0
+    assert OLD in refused.stderr and "EMBEDDING_REVISION" in refused.stderr
+    assert not any("pg_dump" in c for c in calls(upgrade))
+    # The message's own instruction, followed literally, is accepted.
+    path.write_text(path.read_text() + f"EMBEDDING_REVISION={OLD}\n")
+    accepted = run(upgrade, "upgrade.sh", "--no-verify", TEST_UPGRADE_FAILURE="unknown-revision", TEST_MODEL_CACHE=cache)
+    assert accepted.returncode == 0, details(accepted)
+    choice = json.loads((Path(upgrade[2]["TEST_FIXTURE"]) / "embedding-choice").read_text())
+    assert choice["EMBEDDING_REVISION"] == OLD
+
+
+def test_a_pin_the_cache_does_not_hold_is_refused(upgrade):
+    path = upgrade[0] / "backend/.env"
+    path.write_text(path.read_text() + f"EMBEDDING_REVISION={'e' * 40}\n")
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_UPGRADE_FAILURE="unknown-revision",
+                 TEST_MODEL_CACHE=f"{NEW}|{OLD},{NEW}")
+    assert result.returncode != 0
+    assert not any("pg_dump" in c for c in calls(upgrade))
+
+
+def test_cache_lookup_refuses_names_it_cannot_pass_safely():
+    mod = runtime_validator()
+    for model, env, label in [("../x", {}, None), ("a/b", {"HUGGINGFACE_HUB_CACHE": "/data/../etc"}, None),
+                              ("a/b", {}, "../main"), ("a/b; rm -rf /", {}, None)]:
+        with pytest.raises(ValueError, match="revision"):
+            mod.cached_snapshot("unused", env, model, label, None)

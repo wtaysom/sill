@@ -2,7 +2,10 @@
 # Upgrade this installed Sill runtime and its data in place.
 # Usage: ./upgrade.sh [--client TARGET] [--adopt-legacy] [--hooks-for PATH]
 #        [--force-hooks] [--dry-run] [--no-verify] [--schema-only]
+#        [--archive-duplicates]
 # --hooks-only --hooks-for PATH: refresh hooks without Docker.
+# --archive-duplicates: after the backup, archive the newer copy of each live
+# memory that repeats the same content from the same speaker.
 # --schema-only: raw PostgreSQL fixtures, no Compose or package installation.
 # --no-verify: skip extra smoke checks; still rebuild/recreate and check versions.
 # .codex/hooks.json changes show a diff; --force-hooks applies it while preserving
@@ -16,6 +19,7 @@ HOOKS_ONLY=0
 HOOKS_FOR=""
 FORCE_HOOKS=0
 ADOPT_LEGACY=0
+ARCHIVE_DUPLICATES=0
 CLIENTS=()
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 while (( $# )); do
@@ -26,22 +30,23 @@ while (( $# )); do
     --hooks-only) HOOKS_ONLY=1; shift ;;
     --force-hooks) FORCE_HOOKS=1; shift ;;
     --adopt-legacy) ADOPT_LEGACY=1; shift ;;
+    --archive-duplicates) ARCHIVE_DUPLICATES=1; shift ;;
     --hooks-for) [[ $# -ge 2 ]] || fail "--hooks-for requires a path"; HOOKS_FOR="$2"; shift 2 ;;
     --client)
       [[ $# -ge 2 ]] || fail "--client requires a target"
       case "$2" in claude-code|codex|claude-desktop) ;; *) fail "unsupported client: $2" ;; esac
       CLIENTS[${#CLIENTS[@]}]="$2"; shift 2 ;;
-    --help|-h) sed -n '2,9p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 if (( FORCE_HOOKS || HOOKS_ONLY )) && [[ -z "$HOOKS_FOR" ]]; then fail "--hooks-only/--force-hooks requires --hooks-for"; fi
+sill_require_python || exit 1
 if (( SCHEMA_ONLY )) && (( HOOKS_ONLY || ${#CLIENTS[@]} )); then fail "--schema-only cannot register clients or combine with --hooks-only"; fi
 if (( SCHEMA_ONLY )) && [[ -n "$HOOKS_FOR" ]]; then fail "--schema-only cannot refresh hooks"; fi
 
 refresh_hooks() {
   local target py flags=()
-sill_require_python || exit 1
   target="$(cd "$HOOKS_FOR" && pwd -P)" || return 1
   py="$(sill_python)" || return 1
   if (( FORCE_HOOKS )); then flags[${#flags[@]}]=--force; fi
@@ -51,7 +56,18 @@ sill_require_python || exit 1
   python3 "$SILL_DIR/scripts/install_hooks.py" "$SILL_DIR/plugin/codex.hooks.json.template" \
     "$target/.codex/hooks.json" "$SILL_DIR/plugin" "$py" "$SILL_ENV_FILE" --codex ${flags[@]+"${flags[@]}"} "$@"
 }
-if (( HOOKS_ONLY )); then refresh_hooks; exit 0; fi
+# v0.2 ran on defaults with no backend/.env. Registrations and hook commands
+# name that file, so it must exist; an empty one means the same defaults.
+ensure_env_file() {
+  if [[ -e "$SILL_ENV_FILE" || -L "$SILL_ENV_FILE" ]]; then return 0; fi
+  sill_create_env_file || return 1
+  printf 'Created an empty private %s; this install ran on defaults without one.\n' "$SILL_ENV_FILE"
+}
+if (( HOOKS_ONLY )); then
+  if (( ! DRY_RUN )); then ensure_env_file; fi
+  refresh_hooks
+  exit 0
+fi
 
 load_env_file() {
   local f="$SILL_DIR/backend/.env" line key val
@@ -83,6 +99,7 @@ worker_stopped=0
 migration_started=0
 SILL_PREFLIGHT_TEMP=""
 SILL_PREFLIGHT_DEPS=""
+ENV_FILE_PENDING=0
 cleanup() {
   local code=$?
   sill_cleanup_instance
@@ -98,8 +115,10 @@ cleanup() {
 }
 trap cleanup EXIT
 migration() {
+  local flags=()
+  if (( ARCHIVE_DUPLICATES )); then flags[0]=--archive-duplicates; fi
   python3 "$SILL_BACKEND/scripts/migrate.py" "$1" --container "$CONTAINER" \
-    --user "$DB_USER" --database "$DB_NAME" --migrations "$MIGRATIONS_DIR"
+    --user "$DB_USER" --database "$DB_NAME" --migrations "$MIGRATIONS_DIR" ${flags[@]+"${flags[@]}"}
 }
 prepare_registration_preflight() {
   if (( ${#CLIENTS[@]} == 0 )); then return; fi
@@ -125,6 +144,7 @@ register_clients() {
   if (( ${#CLIENTS[@]} == 0 )); then return; fi
   cli="$(sill_bin sill)"; mcp="$(sill_bin sill-mcp)"
   if (( ADOPT_LEGACY )); then flags[0]=--adopt-legacy; fi
+  if (( ENV_FILE_PENDING )) && [[ "${1:-}" == --dry-run ]]; then flags[${#flags[@]}]=--pending-env-file; fi
   for target in "${CLIENTS[@]}"; do
     if [[ "${1:-}" == --dry-run ]]; then
       "$(sill_python)" -I -c 'import runpy,sys; paths=[sys.argv.pop(1),sys.argv.pop(1)]; sys.path[:0]=[p for p in paths if p]; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")' \
@@ -136,7 +156,7 @@ register_clients() {
 }
 printf 'Read-only preflight for %s.\n' "$CONTAINER"
 docker exec "$CONTAINER" true 2>/dev/null || fail "Database $CONTAINER is stopped or absent. Start the installed instance with its existing configuration; no substitute will be created."
-state="$(migration preflight)" || fail "Unsupported database; nothing changed"
+state="$(migration preflight)" || fail "The database preflight stopped the upgrade; nothing changed"
 pending="$(printf '%s' "$state" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')"
 dimension="$(printf '%s' "$state" | python3 -c 'import json,sys; print(json.load(sys.stdin)["dimension"])')"
 if (( ! SCHEMA_ONLY )); then
@@ -147,6 +167,18 @@ if (( ! SCHEMA_ONLY )); then
   mode=shell
   if (( ${#CLIENTS[@]} )) || [[ -n "$HOOKS_FOR" ]]; then mode=persist; fi
   sill_prepare_instance "$mode"
+  if [[ "$mode" == persist && ! -e "$SILL_ENV_FILE" && ! -L "$SILL_ENV_FILE" ]]; then
+    if (( DRY_RUN )); then
+      # A dry run writes nothing. The persist selection above has already
+      # checked the instance; run the read-only checks against its effective
+      # default settings and preview registration with the file still absent.
+      printf 'DRY: no %s yet; the upgrade would create an empty private one.\n' "$SILL_ENV_FILE"
+      sill_prepare_instance shell
+      ENV_FILE_PENDING=1
+    else
+      ensure_env_file
+    fi
+  fi
   sill_check_running_instance
   settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$dimension")" || fail "Compose instance does not match the installed data"
   sill_capture_database_identity "$settings"
