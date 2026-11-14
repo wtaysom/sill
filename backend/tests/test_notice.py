@@ -20,25 +20,25 @@ _rp_spec.loader.exec_module(rp)
 
 
 def _fake_query(sql, timeout=60):
-    if "create_memory" in sql:
-        return ["11111111-2222-3333-4444-555555555555"]
+    if "mint_memory" in sql:
+        return [("11111111-2222-3333-4444-555555555555", "inserted", None)]
     return ["ok"]
 
 
-def test_notice_emits_force_speaker_patch():
+def test_notice_mints_force_speaker_atomically():
     with mock.patch.object(sill, "_query_db", side_effect=_fake_query) as q:
         sill.notice("a fact", "semantic", speaker="Ada", force="directive")
     sqls = [c.args[0] for c in q.call_args_list]
-    patch = next(s for s in sqls if "UPDATE memories SET" in s)
-    assert "force = 'directive'" in patch and "speaker = 'Ada'" in patch
+    assert len(sqls) == 1
+    assert "public.mint_memory" in sqls[0]
+    assert "p_force => 'directive'" in sqls[0] and "p_speaker => 'Ada'" in sqls[0]
 
 
 def test_notice_escapes_apostrophes_in_speaker():
     with mock.patch.object(sill, "_query_db", side_effect=_fake_query) as q:
         sill.notice("a fact", "semantic", speaker="O'Brien")
-    patch = next(s for s in (c.args[0] for c in q.call_args_list)
-                 if "UPDATE memories SET" in s)
-    assert "O''Brien" in patch
+    assert len(q.call_args_list) == 1
+    assert "O''Brien" in q.call_args.args[0]
 
 
 def test_notice_rejects_bad_force_before_db():
@@ -136,6 +136,23 @@ def test_main_success_prints_receipt_and_returns_zero(capsys):
 
 
 def test_main_failure_returns_one(capsys):
-    with mock.patch.object(sill, "_query_db", return_value=[]):
+    with mock.patch.object(sill, "_query_db", return_value=[]) as q:
         rc = sill.main(["notice", "a fact", "--speaker", "Ada"])
     assert rc == 1 and "Failed to store" in capsys.readouterr().out
+    assert q.call_count == 1  # No unsafe legacy fallback or prefix-content adoption.
+
+
+@pytest.fixture(autouse=True)
+def synthetic_mint_context(monkeypatch):
+    monkeypatch.setattr("sill.mint_context", lambda via: {"session": None, "as": None, "when": "W", "via": via, "model": None})
+
+
+def test_notice_optional_production_and_json_null():
+    with mock.patch.object(sill, '_query_db', side_effect=_fake_query) as q:
+        assert sill.main(['notice','synthetic words','--speaker','Inez','--made-json','null']) == 0
+        assert 'p_production => NULL' in q.call_args.args[0]
+        assert 'p_minted_in =>' in q.call_args.args[0]
+    with mock.patch.object(sill, '_query_db') as q:
+        with pytest.raises(ValueError):
+            sill.notice('invalid declaration', production={'made':'invalid'})
+        q.assert_not_called()

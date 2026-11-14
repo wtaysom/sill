@@ -1,113 +1,40 @@
 # Sill
 
-Persistent memory for AI agents. Postgres + pgvector + Apache AGE behind an
-MCP server, with a Claude Code / Codex plugin that wires spontaneous recall,
-attribution checks, response-pattern detection, and a small set of other
-discipline hooks.
+Sill gives AI assistants a memory store they can use across sessions and
+clients. It runs Postgres with pgvector and Apache AGE locally and exposes
+memory tools through MCP. Optional hooks add automatic recall and checks in
+Claude Code and Codex CLI.
 
-Built for the case where you run Claude Code (or Codex) locally and want
-the model to remember decisions, methodology, and prior conversations
-across sessions — without paying a SaaS for it.
-
-> Status: v0.2.0 — see `CHANGELOG.md` for what changed since the v0.1.0
-> extraction, and `docs/RELEASE-REHEARSAL.md` for what a clean-machine
-> install of this version was and was not observed to do.
->
-> **Upgrading an existing v0.1.0 install?** Four things bite silently if
-> you stop at `git pull` — see "Upgrading" below before you do anything
-> else.
-
----
+This checkout is the v0.3.0 release candidate.
+[Release rehearsal](docs/RELEASE-REHEARSAL.md)
 
 ## Quick start
 
+Install Git, Python 3.10 or later, and a Docker engine with Compose.
+Start Docker and sign in to the client you want to use. If you already
+use Sill, follow [Upgrading](#upgrading).
+
+For Claude Desktop on macOS, run the commands below. On macOS or Linux,
+use `--client claude-code` for Claude Code or `--client codex` for Codex CLI
+in the install command.
+
 ```bash
-git clone <this-repo> sill
+git clone https://github.com/wtaysom/sill.git
 cd sill
-./install.sh
-```
-
-`./install.sh` runs ten preflighted steps. On a clean machine you should
-see, in order:
-
-1. preflight (docker / python3 / pipx on PATH; docker daemon up)
-2. install backend (`sill`, `sill-mcp`, `sill-worker` console scripts)
-3. `docker compose build`; start db + embeddings + rabbitmq + maintenance_worker
-4. wait up to 120s for db + embeddings healthchecks
-5. import the methodology seed (22 procedural/semantic memories)
-6. symlink the plugin into `~/.claude/plugins/local/sill-plugin`
-7. register the `sill` MCP server with Claude Code — `claude mcp add --scope
-   user sill -- sill-mcp` when the `claude` CLI is present, otherwise an
-   idempotent merge into `~/.claude.json` — and with `~/.codex/config.toml`
-   if Codex is installed
-8. hook wiring, per `--scope home|project` (default `project`, see "Install
-   scope" below): `project` wires one project's hooks (`--hooks-for
-   /path/to/project`, optional — nothing happens without it); `home`
-   registers hooks user-scope plus an ambient instructions file
-9. print a `./verify.sh` hint
-10. final next-steps banner
-
-Then:
-
-```bash
+./install.sh --client claude-desktop
 ./verify.sh
 ```
 
-Six smoke checks: db/embeddings healthy, `sill-mcp` answers a real MCP
-`initialize` handshake over stdio, seed loaded (>= 22 memories), one hook
-parses a canned event, schema level current, adapter conformance (the
-four-slot contract — see `docs/adapters.md`). Exits 0 on green.
+Use `--client codex` for a local Codex desktop session too. Repeat the
+flag to connect more than one client. If you omit `--client`, the
+installer connects the Claude Code and Codex CLIs it detects. See the
+[client setup guide](docs/desktop-clients.md) for registries, restart
+and permission steps, and client verification status.
 
-Restart Claude Code (and/or Codex) so the new MCP server entry is picked
-up.
-
-## After installing
-
-`./install.sh` and `./verify.sh` get you working software. Turning that
-into somebody's — a charter in their own words, a name, a first
-deliberate memory minted with a receipt they watch arrive, and a cadence
-they choose with the arithmetic in front of them — is a separate, phased
-runbook:
-
-```
-docs/onboarding/README.md
-```
-
-Walk it with the person present. Everything before its last two phases is
-reversible, and stopping partway leaves a working install rather than a
-half-built one. It deliberately does not tell you what your Sill is for.
-
-## Supported hosts
-
-Sill's plugin (hooks + MCP server) is built and tested against two agent
-harnesses. This table is the honest version — what actually works, not
-what's merely wired:
-
-| Harness | Hooks | MCP memory access | Notes |
-|---|---|---|---|
-| **Claude Code** | All 14 (9 wired by default, 5 opt-in — see `docs/hooks.md`) | Yes, via `~/.claude.json` | Primary, most-exercised surface. |
-| **Codex CLI** | 8 of the 9 default-wired hooks fire and work there; `clear-handoff` registers but silently no-ops (Claude-only transcript shape, by design). The 5 opt-in hooks are outside this release's Codex rewiring and are unverified against Codex payloads. | Yes, via `~/.codex/config.toml` | Tool-name schemas were read from one CLI build (0.144.1); multiple Codex versions coexist in practice — see `docs/adapters.md` for exactly what's version-fragile. |
-| **Cursor** | No | No | Deliberately out of scope for this release (Q16.1) — the session-peer kit was not ported. |
-| **Claude desktop app** | No | No | Conversations stay server-side; there's no local hook or plugin surface to wire into. |
-| **ChatGPT app** | No | No | Same reason — server-side conversations, no local hook surface. |
-
-For the two dark surfaces above (desktop Claude, the ChatGPT app), **the
-memory store is the only cross-surface bridge**: nothing about those
-surfaces talks to Sill automatically, but a memory stored from anywhere
-(including by hand, via `sill notice`) is recallable everywhere else Sill
-is wired. Confirm there's no hidden integration code for any of the three
-unsupported surfaces shipping today:
-
-```bash
-grep -ril "chatgpt\|claude\.desktop\|desktop\.claude" plugin/ install.sh upgrade.sh backend/*.py
-grep -rn "cursor" plugin/*.json plugin/*.template
-# -> no output from either
-```
-
-v0.1.0 documented Codex as a supported host while three of its guards
-(`shell-idiom-guard`, `stored-slot-guard`, `tool-type-witness`) never
-actually fired there — see the CHANGELOG's v0.2.0 "Fixed" section and
-`docs/adapters.md` for the full defect and how the fix is tested.
+**Restart your client**, then use the
+[first-use runbook](docs/onboarding/README.md) to remember a synthetic
+preference and recall the same UUID from a fresh session. The optional
+identity, charter, backfill, and scheduling guides follow that exercise.
 
 ## Install scope
 
@@ -139,159 +66,114 @@ naming the valid ones. Full flag reference: `./install.sh --help`.
 
 ## Upgrading
 
-**Coming from v0.1.0?** Don't stop at `git pull` — three more steps
-matter, and none of them fail loudly if skipped:
+Pause any beat schedule and close connected clients, including any tunnel
+process for this instance. From the existing checkout, update the source
+and preview the upgrade before applying it.
 
 ```bash
 git pull
-./install.sh                                # reinstalls the backend (fixes
-                                             # the MCP server) and fixes MCP
-                                             # registration
-./upgrade.sh --hooks-for /path/to/project   # backs up + migrates the schema,
-                                             # refreshes stale Codex hooks
-```
-
-- **`./install.sh`** is idempotent and safe to re-run. It reinstalls the
-  backend against this release's corrected `mcp<2` pin — v0.2.0's MCP
-  server could fail to start entirely on the unpinned dependency, while
-  `verify.sh` still reported green (see CHANGELOG) — and fixes *where*
-  the server gets registered: `~/.claude.json`, not the
-  `~/.claude/.mcp.json` earlier installs may have written and Claude
-  Code never reads. Confirm with `claude mcp list` → `sill … ✔
-  Connected`.
-- **`./upgrade.sh --hooks-for`** is what refreshes a stale Codex hook
-  set. `.codex/hooks.json` has only ever been written once and left
-  alone on every later run, so a project wired for Codex before this
-  release can still be running the *old* hooks there. Run it per
-  project you'd previously wired; it shows a diff before touching
-  anything (`--force-hooks` to apply).
-
-Full detail on all of this, including why each failure was silent:
-`CHANGELOG.md`'s "Upgrading from v0.1.0" section.
-
----
-
-For a routine upgrade once you're already on v0.2.0 or later:
-
-```bash
-git pull
+./upgrade.sh --dry-run
 ./upgrade.sh
 ```
 
-`upgrade.sh` backs up the database first (to `backups/<db>-preupgrade-<UTC>.sql.gz`),
-applies any pending `backend/migrations/NNN_*.sql` in order (tracked in the
-`schema_migrations` table), then runs `./verify.sh`. Preview with
-`./upgrade.sh --dry-run`. Fresh installs never need it — first boot already
-initializes at the current level (check with `./verify.sh`, check 5).
+`upgrade.sh` checks the selected instance and writes a validated private
+archive under `backups/preupgrade-*.sql.gz` before changing the runtime.
+It rebuilds the worker, reinstalls the package, applies pending migrations, and
+verifies the running version. The migration temporarily fences new
+connections and stops if other clients are still connected. If it stops,
+read the last successful migration stamp and the backup path in the
+output. If it reports a remaining fence, run the recovery command it
+prints from the same checkout. That command checks the selected database
+and restores its connection allowance. Retry after addressing the
+reported failure. A backup can be used for recovery into an empty
+database after confirming the target and keeping the original data.
 
-Restore, if you ever need it — the dump replays into an **empty** database, so
-drop and recreate first, then verify (graph-extension data can be finicky
-across dump/restore, so treat `./verify.sh` as part of the restore):
+Fresh installs build PostgreSQL 16 on Debian Bookworm. Managed upgrades and
+installer reruns retain the existing database container and immutable image,
+checking its identity and Compose/volume ownership before runtime changes and
+at completion. Missing, replaced or stopped databases are refused; start a
+stopped database with its existing container/configuration before retrying.
+The existing PostgreSQL/OS image receives no security updates through this
+application upgrade, and its port bindings and restart policy remain unchanged.
+Older Bullseye PostgreSQL packages are EOL. Moving an existing database to a new
+OS image needs a separate backed-up migration that handles collation changes;
+this command does not perform that migration or refresh collation versions.
+Do not use direct `docker compose build/up` to upgrade an existing database:
+those commands bypass this preservation path and may recreate it on a newer
+OS image while retaining the old data volume. `reset.sh` remains a destructive
+fresh-cluster operation, not an upgrade or an OS migration.
+
+Upgrade and installer reruns preflight the existing embedding service, stored
+vector dimension and any active profile before restarting services. When the
+instance dotenv omits the model, revision or dimension, a successful validation
+pins those fields in `backend/.env` for later invocations and direct Compose use.
+Only omitted fields are appended; explicit values and unrelated bytes remain
+unchanged. A private `.env.embedding-identity.bak-*` preserves the prior file.
+Upgrade writes this pin after the database backup; `--dry-run` only validates.
+If identity cannot be proved or an explicit value conflicts, start the existing
+service with its prior configuration and resolve the reported mismatch. Changing
+embedding spaces requires the explicit [profile migration](docs/EMBEDDING-PROFILES.md),
+not an installer rerun. This records the current service identity; it does not
+attest unknown historical vectors or activate a profile. An omitted revision is
+pinned from the running TEI `/info` immutable `model_sha`, including when the
+old container used `main`. An explicit symbolic revision is left untouched, but
+a restart refuses it: a matching label cannot prove the same loaded snapshot.
+To retain that space, explicitly set the reported SHA in `EMBEDDING_REVISION`
+and remove conflicting shell overrides before retrying. A stopped or unavailable
+existing service must be started with its prior configuration so it can be
+validated; the installer will not replace it on a guessed identity.
+
+Pass the same `--client` targets you want to refresh. If you are coming
+from v0.1.0, check that Claude Code registers Sill in `~/.claude.json`.
+The older `~/.claude/.mcp.json` is a file Claude Code never reads. For a
+bare `sill-mcp` entry in a current registry, confirm its database before
+using `--adopt-legacy`. Restart the clients after upgrading and repeat
+the memory check before resuming the schedule.
+
+### Updating project hooks
 
 ```bash
-docker exec sill_db psql -U sill -d postgres \
-  -c "DROP DATABASE IF EXISTS sill WITH (FORCE);" \
-  -c "CREATE DATABASE sill OWNER sill;"
-gunzip -c backups/<file>.sql.gz | docker exec -i sill_db psql -U sill -d sill
-./verify.sh
+./upgrade.sh --hooks-for /path/to/project
+./upgrade.sh --hooks-for /path/to/project --hooks-only --dry-run
 ```
 
-### Hook upgrades and `--hooks-for`
-
-`./upgrade.sh`'s five numbered steps only migrate the database. Picking
-up hooks added since a project was first wired is a separate,
-independent step — pass `--hooks-for` to `upgrade.sh` itself (this runs
-before, and without needing, any database step):
-
-```bash
-./upgrade.sh --hooks-for /path/to/project              # DB upgrade + hook refresh
-./upgrade.sh --hooks-for /path/to/project --hooks-only  # hook refresh only, no db/docker needed
-```
-
-The two files this touches behave differently, and `upgrade.sh` treats
-them differently on purpose:
-
-- **`.claude/settings.local.json`** always merges idempotently — new
-  hook entries are appended, existing ones untouched. Nothing else to
-  do; this happens automatically.
-- **`.codex/hooks.json`** is the one `install.sh` only ever writes
-  *once*, silently leaving it alone on every later run — a project
-  wired before a hook was added or changed would otherwise miss that
-  update on the Codex side forever. `upgrade.sh --hooks-for` renders
-  the current template and diffs it against what's there. Identical:
-  nothing happens. Different: **the diff is printed** and the file is
-  left untouched unless you also pass `--force-hooks` — never a silent
-  overwrite of a file you may have hand-edited:
-
-```bash
-./upgrade.sh --hooks-for /path/to/project --hooks-only               # shows a diff if stale, changes nothing
-./upgrade.sh --hooks-for /path/to/project --hooks-only --force-hooks # applies it
-```
-
-Codex also SHA-256-pins each hook command, so an overwrite invalidates
-that trust and Codex will re-prompt for approval on its next run — see
-`docs/adapters.md`.
-
----
+Use `--hooks-for` to refresh a project's hook commands. Use
+`--hooks-only` to skip the runtime upgrade. If a Sill command has
+been edited, review the reported changes and add `--force-hooks` to
+replace that command. The hook merge preserves unrelated entries.
+After the change, open `/hooks` in Codex CLI and review and re-approve
+the updated commands. See [harness adapters](docs/adapters.md) for hook
+trust and conformance details.
 
 ## Prerequisites
 
-| Tool        | Why                                            | Notes |
-|-------------|------------------------------------------------|-------|
-| Docker      | Postgres + embeddings + RabbitMQ + workers     | OrbStack works on macOS; native Docker on Linux. The daemon must be running. |
-| Python 3.10+ | Backend package, hooks                        | macOS system Python works; Linux distro Python works. |
-| pipx (or pip) | Installs the `sill`/`sill-mcp`/`sill-worker` console scripts | If pipx isn't on PATH, install falls back to a venv at `~/.local/share/sill-venv` and symlinks into `~/.local/bin`. Make sure `~/.local/bin` is on your `PATH`. |
-| Claude Code | The plugin host                                | Get it from Anthropic. The MCP server and hooks plug in automatically. |
-| Codex CLI   | *(optional)* Second supported host             | Detected automatically; if installed, `~/.codex/config.toml` is updated. |
+| Tool | Role |
+|---|---|
+| Docker with Compose | Runs Postgres, local embeddings, RabbitMQ, and the maintenance worker. Start the engine before installation. |
+| Python 3.10+ | Runs the Sill package and hooks. |
+| pipx (optional) | Installs the Sill console scripts. Otherwise the installer creates a venv in `~/.local/share/sill-venv` with links in `~/.local/bin`. |
+| One connected client | See [client setup](docs/desktop-clients.md) for the CLI and desktop options. |
 
-The embeddings container downloads the default model
-(`unsloth/embeddinggemma-300m`) on first start: **~1.2 GB** of float32
-safetensors — the `300m` is parameters, not megabytes. The upstream repo
-ships no ONNX files, so the server falls back to the Candle backend and
-pulls the full weights.
-
-Plan for a slow first `docker compose up`, and know what "slow" means before
-you decide the install is broken. On an Apple Silicon Mac, where the compose
-file's default `linux/amd64` platform means the image runs emulated, first
-boot took **903 s** from container start to the first healthy probe — past
-`install.sh`'s 600 s wait, so step 4 gives up and exits 1. That is a timeout,
-not a failure: the download continues, and `./install.sh` is idempotent.
-Either wait for `docker compose -f backend/docker-compose.yml ps` to show
-`embeddings` healthy and re-run it, or give it longer up front:
+The installer selects a pinned CPU embeddings image for the Docker
+engine's architecture. The default embedding model
+(`unsloth/embeddinggemma-300m`) downloads its weights on first start
+and reuses the cache on subsequent starts. The default health wait is
+1,800 seconds. If startup times out, check the services and logs for the
+named failure. Rerun the same install command after fixing the problem
+or once the cold download finishes.
 
 ```bash
-SILL_INSTALL_WAIT_HEALTHY_S=1800 ./install.sh
+docker compose -f backend/docker-compose.yml ps
 ```
 
-### Apple Silicon: the native image
+For explicit embedding image/platform overrides and direct Compose use,
+see [the instance settings example](backend/.env.example). Keep the
+embedding model and dimension consistent with the existing data.
 
-The image and its platform are both overridable, so an arm64 host can skip
-the emulation entirely. In `backend/.env`:
-
-```bash
-EMBEDDING_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest
-EMBEDDING_PLATFORM=linux/arm64
-```
-
-Three things to know before you do:
-
-- **You give up version pinning.** There is no `cpu-arm64-1.8`. Upstream
-  builds the arm64 line from main rather than from tagged releases, so
-  `cpu-arm64-latest` moves under you. Pin an immutable `cpu-arm64-sha-<sha>`
-  tag if reproducibility matters more than staying current.
-- **It does not get you the GPU.** Containers on macOS have no Metal access,
-  so both images are CPU-only there; what you save is the emulation tax, not
-  the absence of acceleration. For Metal, run the server on the host
-  (`brew install text-embeddings-inference`) and point
-  `embedding_config.service_url` at it — it speaks the same `/embed` API, so
-  no schema change is needed. Be aware that `verify.sh` check 1 asserts every
-  Compose service is healthy, and will go red if you stop the container.
-- **Switching between the two images is safe for an existing store** — same
-  model, same float32 weights, same vector space, nothing to re-embed.
-  Switching to a different model or quantization is not; see
-  `docs/concepts.md`.
-
----
+A new install uses raw embedding inputs by default. To opt in to search
+prompts on a new store with the pinned default model, add
+`--embedding-profile embeddinggemma-search-v1` to the install command.
+[Embedding profile requirements](docs/EMBEDDING-PROFILES.md#explicit-fresh-installation)
 
 ## What gets installed
 
@@ -312,10 +194,9 @@ until you turn it on.
 `~/.local/bin` if pipx isn't available):
 
 - `sill` — top-level CLI (`sill seed import`, `sill notice` — the mint
-  path, see below — `sill db psql`, `sill verify`; not all
-  subcommands are wired yet).
-- `sill-mcp` — the MCP server. Claude Code spawns this from
-  `~/.claude.json`.
+  path, see below — and `sill connect` for client registration).
+- `sill-mcp` — the MCP server. Local clients spawn it using an absolute
+  executable and env-file path.
 - `sill-worker` — the worker entry point used inside the Docker containers.
 
 **Plugin** (`plugin/`):
@@ -334,15 +215,16 @@ it up.
 
 ## Configuration
 
-Copy `backend/.env.example` to `backend/.env` and edit if you need
-non-defaults:
+To prepare a new checkout with custom settings, create a private
+`backend/.env` from the example before installing:
 
 ```bash
-cp backend/.env.example backend/.env
+umask 077
+cp -n backend/.env.example backend/.env
 ```
 
-The defaults work for a single-host single-user install. Common reasons
-to edit:
+The installer creates a private `backend/.env` if it is missing. The
+defaults work for a single-host single-user install. Common reasons to edit:
 
 - **Port collision**: bump `POSTGRES_PORT` if 5432 is already taken.
 - **Run a second Sill side by side**: see below — `SILL_DB_CONTAINER`
@@ -374,9 +256,10 @@ RABBITMQ_MANAGEMENT_PORT=45672                 # must be <= 65535
 
 `verify.sh` and `upgrade.sh` read `backend/.env` themselves, so they act
 on the stack that file describes; an exported shell variable still wins,
-matching Compose's own precedence. (Before v0.2.0 they did not, and a
-non-default `SILL_DB_CONTAINER` sent `verify.sh`'s database checks at
-whatever container happened to be named `sill_db`.)
+matching Compose's own precedence for runtime operations. Persist the
+matching instance settings in `backend/.env` before registering clients.
+The MCP launcher and configured hooks read the selected dotenv file for
+database access. See [client configuration](docs/desktop-clients.md).
 
 Embedding model and dimension are **locked at install time** — changing
 them later requires a schema rebuild. See `docs/concepts.md`.
@@ -454,17 +337,8 @@ This writes two files:
 - `/path/to/your/project/.claude/settings.local.json` — same hooks
   merged into the existing `hooks` block (created if absent).
 
-Re-running `install.sh --hooks-for` is safe on both sides, but only the
-Claude Code side is idempotent in the useful sense of also picking up
-new hooks — existing entries are preserved and Sill's are deduplicated,
-and a later Sill version's new hooks get merged in on the next run. The
-Codex side is all-or-nothing: once `.codex/hooks.json` exists,
-re-running `install.sh --hooks-for` leaves it exactly as it was, on
-purpose — `install.sh` only ever does *first* wiring. See "Hook
-upgrades and `--hooks-for`" under Upgrading above for `upgrade.sh
---hooks-for`, which is the re-render path: it diffs the existing file
-against the current template and shows you what changed instead of
-silently doing nothing.
+For existing hooks, use [the hook upgrade commands](#updating-project-hooks).
+They report changes for review and preserve unrelated commands.
 
 This is per-project wiring — `--scope project`, the default. See
 "Install scope" above for `--scope home`, which registers hooks
@@ -481,9 +355,9 @@ user-wide instead of per-project.
 ./uninstall.sh --keep-data   # same, but keep the volumes
 ```
 
-`uninstall.sh` deliberately does **not** edit `~/.claude.json` or
-`~/.codex/config.toml` — those may contain other servers it shouldn't
-disturb. It prints instructions for the hand-edit.
+`uninstall.sh` leaves the client registries in place and prints instructions
+for removing the Sill entries. See the [client guide](docs/desktop-clients.md)
+for the registry paths.
 
 For background on what's in the database, what shape memories should
 take, and how recall is meant to flow, see `docs/concepts.md`.
@@ -505,6 +379,8 @@ detects it on each call.
 
 ## Documentation
 
+- [Client setup](docs/desktop-clients.md) covers local app and CLI setup,
+  a client capability and verification table, and the private hosted route.
 - `docs/concepts.md` — what's in the database, memory shape rules,
   embedding dimension, recall patterns, workers, the AGE graph layer.
 - `docs/hooks.md` — one section per shipped hook (event, env vars,

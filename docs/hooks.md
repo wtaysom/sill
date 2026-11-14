@@ -42,6 +42,12 @@ Codex and Claude Code config locations when you run
 default template; each section below says so and gives what to wire
 alongside it if it needs a partner.
 
+Codex enables hooks by default. To disable them, set `hooks = false` under
+`[features]` in `config.toml`. Codex also honors the older `codex_hooks`
+alias. `sill connect codex` registers the MCP server and preserves these
+settings. Use the installer’s hook options when you want Sill callbacks.
+[Codex hooks documentation](https://learn.chatgpt.com/docs/hooks#turn-hooks-off)
+
 **Database defaults.** Every DB-touching hook defaults to the same
 values `backend/docker-compose.yml` and `backend/.env.example` use —
 `SILL_DB_CONTAINER=sill_db`, `SILL_DB_USER`/`POSTGRES_USER=sill`,
@@ -146,6 +152,28 @@ non-interactive `--print` invocations.
   `CLAUDE_CODE_ENTRYPOINT` (an `sdk*` entrypoint reads as headless),
   `CLAUDE_PROJECT_DIR` / `CLAUDE_CODE_SESSION_ID` (preferred over the
   payload's `cwd` / `session_id` for stable project/session identity).
+
+| Recall setting | Default | Accepted values and effect |
+|---|---:|---|
+| `SILL_RECALL_MAX_MEMORIES` | `5` | Integer from 0 through 50. Zero skips store recall. |
+| `SILL_RECALL_MAX_CONVERSATIONS` | `2` | Integer from 0 through 50. Zero skips the optional conversation search. |
+| `SILL_RECALL_MIN_QUERY_LENGTH` | `20` | Integer from 0 through 10,000. Zero removes the minimum length. The 2,000-character maximum and topical keyword check still apply. |
+| `SILL_RECALL_MIN_SIMILARITY` | `0.25` | Finite number from 0 through 1. Filters actual query cosine similarity in fast recall, independently of its blended score. Zero disables this filter. Hybrid recall uses its own reciprocal rank fusion scores. |
+| `SILL_RECALL_QUIET` | off | Set to `1`, `true` or `yes` to hide the displayed result list. The time header, store recall failure notices and model context still appear. |
+
+Invalid numeric values use the defaults. A failed store recall points to
+`spontaneous-recall.log` under `SILL_LOG_DIR`. The prompt continues and can
+still receive conversation results.
+
+The hook reads these settings from its process environment. Terminal
+launches of Claude Code or Codex CLI can inherit exported variables.
+For a GUI that runs the configured hooks, set values on the
+`UserPromptSubmit` command itself so they reach the hook regardless of
+how the GUI starts. For example, prefix the existing command with
+`env SILL_RECALL_QUIET=1 SILL_RECALL_MAX_MEMORIES=3`. Edit the command
+in the Claude Code settings or Codex `hooks.json` where it is registered.
+Codex may ask you to approve the edited command again. Compose reads
+`backend/.env` for the backend. The hook does not load that file.
 
 **The headless gate.** `claude --print` (SDK/headless) invocations
 have no human on the other end — they must not get recall injected,

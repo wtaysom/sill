@@ -3,6 +3,86 @@
 All notable changes to Sill are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.3.0 — 2026-11-13
+
+Release candidate. See the [release rehearsal](docs/RELEASE-REHEARSAL.md)
+for observed results and outstanding checks.
+
+### Added
+
+- **Install and connect a selected instance.** Register Claude Code,
+  Codex, or Claude Desktop on macOS with `--client`, or connect a client
+  later with `sill connect`. Each local entry uses the selected instance's
+  env file. The [first-use runbook](docs/onboarding/README.md) starts with
+  remembering and retrieving the same synthetic memory from separate
+  sessions.
+- **Preserve more context about memory writes.** Atomic creation records
+  speaker, declared production and supersession metadata when supplied.
+  Recall can filter by speaker before ranking. Goal transitions and commitment
+  release have dedicated database operations.
+- **Opt in to an embedding search profile.** New stores can choose
+  `--embedding-profile embeddinggemma-search-v1` with the pinned default
+  model. Raw inputs remain the default. The profile migration stages
+  vectors with resumable batches, an atomic activation and a rollback
+  path. [Embedding profiles](docs/EMBEDDING-PROFILES.md)
+- **Supervise Claude and Codex beat attempts.** One worker owns a rotation
+  at a time. `sill-worker --mode beat --once` records a bounded attempt
+  with a receipt and cleans up its agent process group on timeout or
+  interruption. Standalone receipt, dateline and link checks audit
+  selected Markdown files. [Beat worker](docs/beats.md)
+- **Verify AGE graphs after logical restore.** An explicit procedure for
+  isolated PostgreSQL 16 / AGE 1.6 restore targets repairs retained source
+  catalog OIDs, then checks every graph row through a fresh Cypher session.
+  Source-data comparison is still required before recovery is accepted.
+  [Isolated restore runbook](docs/RESTORE.md)
+
+- **Configure spontaneous recall through the hook environment.** Set result
+  counts, minimum prompt length and a fast recall score floor. Quiet mode
+  hides the result list while preserving the time header, failure notices
+  and model context. See [Hooks](docs/hooks.md#spontaneous-recall) for settings
+  and ranges.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `feat/recall-noise-controls`.
+
+### Changed
+
+- **Upgrade the selected runtime.** `upgrade.sh` previews the plan,
+  validates a backup and applies pending migrations, including 008–015,
+  to the selected database. It reinstalls the package and recreates the
+  maintenance worker. [Upgrade steps](README.md#upgrading)
+- **Published ports bind to loopback by default.** An explicit
+  `SILL_BIND_ADDR` selects a different bind address. Managed installs
+  select a pinned embeddings image for the Docker engine architecture.
+- **Use Bookworm for fresh database builds.** Managed upgrades and installer
+  reruns preserve the validated existing database container and image to
+  avoid an implicit collation change. Its OS/security state and container
+  settings remain until a separate backed-up migration; direct Compose
+  operations can bypass this preservation. [Upgrade steps](README.md#upgrading)
+- **Track recall exposure and explicit use separately.** Search results
+  record exposure, while explicit retrieval by ID records use. Recall
+  results continue to report the Reciprocal Rank Fusion `score`.
+
+### Fixed
+
+- **Failed store recall is visible.** The hook reports query errors, a missing
+  Docker executable and timeouts in the host's status message, with details in
+  the local log. The turn continues and any conversation results remain available.
+  Successful queries with no results produce no failure warning.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `fix/visible-store-outage`.
+
+- **Compose services resume after the container engine restarts.** The
+  database, embeddings, RabbitMQ and maintenance worker use `unless-stopped`
+  and honor a deliberate `docker compose stop`. Set `SILL_RESTART_POLICY=no` to
+  start the stack manually. The container engine must be running.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `feat/restart-policy`.
+
+- **Keep the root `beats.json` local.** Git ignores the operator's copy. The
+  tracked template is still available at `backend/beats.example.json`.
+
+  Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)).
+
 ## v0.2.1 — 2026-08-06
 
 ### Upgrading from v0.2.0

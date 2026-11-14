@@ -1,5 +1,5 @@
 {
-  "_comment": "Example voice configuration for the beat worker (backend/beat_worker.py). JSON has no comment syntax, so this key holds the explanation. Copy this file to beats.json at the project root (or point SILL_BEAT_CONFIG at a copy living anywhere else) and edit the prompts, transcript directories, and output globs to fit your own voices. See docs/beats.md for the full field reference and env surface.",
+  "_comment": "Example voice configuration for the beat worker (backend/beat_worker.py). JSON has no comment syntax, so this key holds the explanation. Copy this file to beats.json at the project root (or point SILL_BEAT_CONFIG at a copy living anywhere else) and edit the prompts, transcript directories, and output globs to fit your own voices. Both voices default to Claude Code. See docs/beats.md for a Codex voice example and the full field reference.",
   "voices": [
     {
       "name": "analyst",

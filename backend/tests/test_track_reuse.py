@@ -76,7 +76,7 @@ def test_sidecar_reader_time_gates_per_session_too(tmp_path, monkeypatch):
                      "memories": [{"id": "11111111-1111-1111-1111-111111111111",
                                    "content": "fresh per-session entry"}]}),
     ]
-    (tmp_path / "recall-sidecar-sessA.jsonl").write_text("\n".join(lines) + "\n")
+    (tmp_path / "recall-sidecar-sha256-95f1697502db2b8afa53499e60cd8d9b34de26fb5708861ef2dc843457f5f0f7.jsonl").write_text("\n".join(lines) + "\n")
     out = tr.read_recall_sidecars("sessA")
     ids = {m["id"] for m in out}
     assert ids == {"11111111-1111-1111-1111-111111111111"}
@@ -92,3 +92,13 @@ def test_burst_limit_fires_alone_when_guard2_passes():
     assert len(tr.detect_reuse([mem(i) for i in range(3)], resp3.lower())) == 3
     resp4 = " ... ".join(f"distinct{i} marker{i} phrase{i}" for i in range(4))
     assert tr.detect_reuse([mem(i) for i in range(4)], resp4.lower()) == []
+
+
+def test_fresh_global_recent_never_becomes_another_sessions_context(tmp_path,monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setenv('SILL_LOG_DIR',str(tmp_path))
+    (tmp_path/'recall-sidecar-recent.jsonl').write_text(json.dumps({
+        'ts':datetime.now(timezone.utc).isoformat(),'source':'spontaneous-recall',
+        'memories':[{'id':'unrelated','content':'Other session context'}]})+'\n')
+    assert tr.read_recall_sidecars(None) == []
+    assert tr.read_recall_sidecars('known-session') == []

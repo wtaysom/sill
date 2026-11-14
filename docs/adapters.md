@@ -1,6 +1,6 @@
 # Harness Adapters
 
-Sill's hooks run on two agent harnesses today — Claude Code and Codex —
+Sill's CLI hook adapters target two agent harnesses — Claude Code and Codex —
 and are built to make room for more. This document is the contract that
 makes "supports harness X" a checkable claim instead of a hope: four
 slots, what each requires of a harness, the normalization vocabulary that
@@ -98,7 +98,7 @@ to walk — and a shell that can run the configured `$SILL_CLI` (default
 Neither hand-copies the other's assertions; see each test's own docstring
 for the boundary.
 
-### 3. capture — the conversation reaches a searchable archive
+### 3. capture — hooks can read local transcript records
 
 **Mechanism:** `plugin/hooks/_harness.py`'s `iter_transcript_tool_uses(path)`
 — reads a session transcript file and yields `{id, name, input}` for every
@@ -204,13 +204,29 @@ to confirm, not a given.
 | Transcript envelope | `{type, timestamp, sessionId, cwd, message: {role, content: [...]}}` | `{timestamp, type, payload}`, where `payload.type` is `"response_item"`'s inner kind (`function_call`, `function_call_output`, `custom_tool_call`, `message`) | `iter_transcript_tool_uses` |
 | Transcript tool-call record | `type=="assistant"` → `message.content[]` blocks with `type=="tool_use"` (`id`, `name`, `input` already flat) | `type=="response_item"`, `payload.type=="function_call"` (`id` from `call_id`, `name` via `join_mcp_name`, `input` from a JSON-**encoded-string** `arguments` field) **or** `payload.type=="custom_tool_call"` (`id` from `call_id`, `name`, `input` taken as-is — field shape confirmed by the v0.2.1 census; some records also carry `id`/`status`, ignored) | `iter_transcript_tool_uses` |
 | Tool-result record | `type=="user"` → `message.content[]` blocks with `type=="tool_result"` (`tool_use_id`, `content`) | `type=="response_item"`, `payload.type=="function_call_output"` (`call_id`, `output`) | `track-reuse.py`'s own walker (not `_harness.py` — it needs results, not just uses) |
-| `apply_patch` path encoding | n/a | no `file_path` field — the path is the first `*** Update File: <path>` / `*** Add File: <path>` line inside `tool_input.input`'s patch body text | `written_path`'s `_parse_patch_path` |
+| `apply_patch` path encoding | n/a | no `file_path` field — the path is the first `*** Update File: <path>` / `*** Add File: <path>` line inside the patch body: the first nonblank string of `tool_input.command` (current captured hooks) and `tool_input.input` (legacy fallback), in that order | `written_path`'s `_parse_patch_path` |
 | Assistant text on `Stop` | requires a transcript read (`get_response_text` walks the file) | handed directly as `last_assistant_message` | `assistant_text`; also read ad hoc by `response-patterns.py`/`track-reuse.py` |
-| Events available | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `PreCompact` (the ones some hook in this repo targets — `PostToolUse`/`PreCompact` are opt-in, not in the default template; see `docs/hooks.md`) | superset — adds `PostCompact`, `PermissionRequest`, `SubagentStart`, `SubagentStop`; wire is Claude-compatible at the top level | n/a — no hook in this repo currently targets a Codex-only event |
+| Events available | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `PreCompact` (the ones some hook in this repo targets — `PostToolUse` includes write recall in the default template; `PreCompact` remains opt-in; see `docs/hooks.md`) | superset — adds `PostCompact`, `PermissionRequest`, `SubagentStart`, `SubagentStop`; wire is Claude-compatible at the top level | n/a — no hook in this repo currently targets a Codex-only event |
 | Harness self-identification | no positive marker found | `turn_id` present on every event | `detect` |
-| MCP server registration | `~/.claude.json` (global, one entry: `mcpServers.sill`; written by `claude mcp add --scope user` when the CLI is on `PATH`, else merged directly) | `~/.codex/config.toml` (global, `[mcp_servers.sill]` + `[features].hooks = true`) | `install.sh` step 7 writes both |
-| Hook wiring | `<project>/.claude/settings.local.json` (merges idempotently on every `--hooks-for` re-run); also `~/.claude/settings.json` under `--scope home` | `<project>/.codex/hooks.json` under `install.sh` (written once; **skipped** if it already exists, by design — first wiring only); also `~/.codex/hooks.json` under `--scope home`. Re-rendering an existing file is `upgrade.sh --hooks-for`'s job, not `install.sh`'s — it diffs against the current template and requires `--force-hooks` to overwrite (fixed the gap this row used to describe as unconditional; see `docs/hooks.md`'s "Adding hooks to a project") | `install.sh` step 8, from `plugin/codex.hooks.json.template`; `upgrade.sh --hooks-for` for re-rendering |
+| MCP server registration | `~/.claude.json` (user scope, `mcpServers.sill`) | `${CODEX_HOME:-$HOME/.codex}/config.toml` (user scope, `[mcp_servers.sill]`) | `sill connect`, also used by the installer and upgrader |
+| Hook wiring | `<project>/.claude/settings.local.json` (merges idempotently on every `--hooks-for` re-run); also `~/.claude/settings.json` under `--scope home` | `<project>/.codex/hooks.json` under `install.sh` (written once; **skipped** if it already exists, by design — first wiring only); also `~/.codex/hooks.json` under `--scope home`. Re-rendering an existing file is `upgrade.sh --hooks-for`'s job, not `install.sh`'s — it previews changes to Sill commands, preserves unrelated hooks, and requires `--force-hooks` to replace an edited Sill command | `install.sh` step 9, from `plugin/codex.hooks.json.template`; `upgrade.sh --hooks-for` for re-rendering |
 | Hook command trust | none — commands run as configured | **SHA-256-pinned** per command in `config.toml`'s `[hooks.state]` — see the warning below | n/a — operational, not code |
+
+To register a specific instance directly, run `sill connect claude-code`
+or `sill connect codex` with `--env-file /absolute/path/to/backend/.env`.
+Use `sill connect claude-desktop` for Claude Desktop on macOS. Add
+`--dry-run` to check the merge before writing. The client launches the
+installed `sill-mcp` using the absolute env-file path. Set database
+coordinates or `SILL_DB_DSN` in that file. Values are read literally and
+take precedence over ambient PostgreSQL settings. Rendered CLI hooks
+select the file via `SILL_INSTANCE_ENV_FILE`. See [client setup and
+verification](desktop-clients.md) for desktop local Codex, Claude Desktop,
+and the hosted ChatGPT route.
+
+A previous installer may have registered the bare `sill-mcp` command.
+Check which instance it was using before replacing that entry with
+`--adopt-legacy`. Review any entry with custom arguments, environment
+variables, or transport settings yourself.
 
 Confirm the tool-name mapping yourself against the live source rather
 than trusting this table indefinitely:
@@ -432,3 +448,17 @@ A harness adapter this contract calls "conformant" is one that behaves
 correctly on the shapes this document and its fixtures describe. Treat a
 green run as evidence, not as a substitute for occasionally re-deriving
 those shapes against a live session (see "How to re-derive" above).
+
+
+### Current hook capture limits (0.3)
+
+The sanitized `fixtures/{claude,codex}-hook-events.jsonl` projections in the
+backend tests were captured from isolated Claude Code 2.1.296 and Codex CLI
+0.162.1 sessions. They establish the event fields for UserPromptSubmit,
+PreToolUse and PostToolUse, including Codex's `tool_input.command` patch body.
+The recorder omitted prompt text. Prompt-recall tests therefore supply
+synthetic text; the fixtures do not establish captured prompt contents or
+successful context delivery. Transcript fixtures remain hand-written.
+Native prompt/write/guard callback proof is recorded separately in the
+release rehearsal. MCP connectivity establishes no hook coverage in desktop
+or hosted conversations.

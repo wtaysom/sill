@@ -21,11 +21,9 @@ matched. An agent reading a field called `similarity` with a value of 0.016
 concludes the store found nothing useful and discards a bullseye. Worse, two
 results of very different quality at the same rank are indistinguishable.
 
-The repo already knew the distinction where it mattered least and missed it
-where it mattered most: `plugin/hooks/spontaneous-recall.py` carries
-`HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not
-cosine similarity`, and `format_context()` already printed the value as
-"score". Only the field the model reads was mislabelled.
+The prompt hook distinguishes hybrid rank fusion from fast recall, and
+`format_context()` already printed the hybrid value as "score". The MCP
+result field needed the same name.
 
 These tests pin the name, the description's honesty, and — most importantly —
 that the description tells a reader the scale, since the number alone is
@@ -170,3 +168,27 @@ def test_context_formatter_keeps_enough_precision_to_discriminate():
         f"score printed to {m.group('places')} decimal places; RRF values "
         "0.0164/0.0161/0.0159 collapse to the same string below 4"
     )
+
+
+def test_public_score_survives_provenance_port():
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from sill_mcp_server import _jsonable
+    memory = api.Memory(uuid4(), api.MemoryType.SEMANTIC, 'Synthetic declaration', .7,
+                        score=1/61, speaker='Inez', production=None, minted_in={'model':None})
+    assert _jsonable(memory)['score'] == 1/61
+    assert 'similarity' not in _jsonable(memory)
+    context = api.HydratedContext([memory], [], [], [], None, None, [])
+    text = api.format_context_for_prompt(context)
+    assert 'score: 0.0164' in text and 'made: undeclared' in text
+    assert {'production', 'minted_in', 'speaker', 'force', 'restates_id'} <= field_names(api.MemoryPreview)
+
+
+
+def test_raw_batch_mcp_schema_accepts_optional_profile_fingerprint():
+    import sill_mcp_server
+    tool = next(tool for tool in sill_mcp_server._tools() if tool.name == 'remember_batch_raw')
+    schema = tool.inputSchema
+    assert schema['properties']['embedding_profile']['type'] == 'string'
+    assert 'embedding_profile' not in schema['required']
+    assert 'prompted' in tool.description

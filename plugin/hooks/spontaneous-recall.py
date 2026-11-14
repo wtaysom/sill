@@ -17,39 +17,49 @@ import sys
 import re
 import subprocess
 import os
+import time
 from datetime import datetime
 from pathlib import Path
+from _store import core
+import _store
+from _harness import hook_session_id, hook_session_path_key
+from _recall_state import record_shown
+
+# The shipped hook command has a 45-second host timeout. Reserve five
+# seconds for process startup and cleanup, result formatting and delivery.
+_SUBPROCESS_DEADLINE = time.monotonic() + 40
+
+
+def _run_with_budget(args, *, timeout: float, **kwargs):
+    remaining = _SUBPROCESS_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(args, 0)
+    return subprocess.run(args, timeout=min(timeout, remaining), **kwargs)
+
 
 _SILL_LOG_DIR = Path(os.environ.get("SILL_LOG_DIR", "/tmp"))
 LOG_FILE = _SILL_LOG_DIR / "spontaneous-recall.log"
-MAX_MEMORIES = 5
-MAX_CONVERSATIONS = 2
-MIN_QUERY_LENGTH = 20  # Don't query for very short messages
-FAST_MIN_SIMILARITY = 0.25
-HYBRID_MIN_SIMILARITY = 0.0  # hybrid_recall returns small RRF scores, not cosine similarity
+
+
+def _env_int(name: str, default: int, maximum: int) -> int:
+    """Read a bounded integer setting, using the default for invalid values."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if 0 <= value <= maximum else default
+
+
+MAX_MEMORIES = _env_int("SILL_RECALL_MAX_MEMORIES", 5, 50)
+MAX_CONVERSATIONS = _env_int("SILL_RECALL_MAX_CONVERSATIONS", 2, 50)
+MIN_QUERY_LENGTH = _env_int("SILL_RECALL_MIN_QUERY_LENGTH", 20, 10_000)
+FAST_MIN_SCORE = _store.recall_min_similarity()
+
+# Quiet mode hides the visible result list. The time header, failure warning,
+# and model context still appear.
+QUIET_TUI = os.environ.get("SILL_RECALL_QUIET", "").strip().lower() in ("1", "true", "yes")
+
 MIN_TOPICAL_KEYWORDS = 3  # Lever 1: skip process-only messages
-OPERATIONAL_TERMS = {
-    "cli",
-    "codex",
-    "config",
-    "episodic-memory",
-    "hook",
-    "hooks",
-    "json",
-    "mcp",
-    "pretooluse",
-    "server",
-    "spontaneous",
-    "sync",
-    "toml",
-    "userpromptsubmit",
-}
-
-# DB connection (overridable via env vars)
-DB_CONTAINER = os.environ.get("SILL_DB_CONTAINER", "sill_db")
-DB_USER = os.environ.get("SILL_DB_USER", "sill")
-DB_NAME = os.environ.get("SILL_DB_NAME", "sill")
-
 # Episodic memory archive (optional integration)
 EPISODIC_CLI_ENV = os.environ.get("SILL_EPISODIC_MEMORY_PATH", "").strip()
 EPISODIC_CLI = Path(EPISODIC_CLI_ENV) if EPISODIC_CLI_ENV else None
@@ -71,224 +81,30 @@ def log(message: str):
     except Exception:
         pass
 
-def should_use_hybrid_recall(prompt: str, keywords: list[str] | None = None) -> bool:
-    """Use hybrid recall for operational/config prompts where exact terms matter."""
-    terms = set(re.findall(r"[a-z0-9-]+", prompt.lower()))
-    if keywords:
-        terms.update(k.lower() for k in keywords)
-    return len(terms & OPERATIONAL_TERMS) >= 2
-
-def build_query_text(prompt: str, keywords: list[str], use_hybrid: bool) -> str:
-    """Build a recall query shaped for the selected retrieval mode."""
-    if not use_hybrid:
-        if keywords:
-            return ' '.join(keywords) + '. ' + prompt[:500]
-        return prompt[:500]
-
-    focus = []
-    seen = set()
-    for kw in keywords:
-        low = kw.lower()
-        if low in OPERATIONAL_TERMS and low not in seen:
-            seen.add(low)
-            focus.append(kw)
-
-    expansions = []
-    if "codex" in seen and ("hook" in seen or "hooks" in seen):
-        expansions.extend(["hook", "parity", "setup", "UserPromptSubmit", "Stop", "PreToolUse", "config"])
-    if "episodic-memory" in seen:
-        expansions.extend(["MCP", "sync"])
-
-    for term in expansions:
-        low = term.lower()
-        if low not in seen:
-            seen.add(low)
-            focus.append(term)
-
-    if focus:
-        return ' '.join(focus)
-    return prompt[:500]
-
-def query_memories_vector(prompt: str, keywords: list[str] | None = None) -> list[dict]:
-    """Query Postgres using the recall path best suited to the prompt.
-
-    If keywords are provided, prepends them to the prompt to steer
-    recall toward topical content rather than surface tone.
-    """
-    use_hybrid = should_use_hybrid_recall(prompt, keywords)
-    query_text = build_query_text(prompt, keywords or [], use_hybrid)
-    log(f"Recall mode: {'hybrid' if use_hybrid else 'fast'}, query: {query_text[:120]}")
-
-    # Escape single quotes for SQL
-    escaped = query_text.replace("'", "''")
-
-    # content LAST so delimiter collisions only mangle content, not metadata
-    if use_hybrid:
-        # hybrid_recall is helpful for operational/config prompts with exact
-        # tool names, but its RRF score is not a cosine similarity.
-        query = f"""
-        SELECT memory_id::text, memory_type::text,
-               round(score::numeric, 4) as similarity,
-               round(importance::numeric, 2) as imp,
-               created_at::text,
-               source,
-               COALESCE(ref, ''),
-               LEFT(content, 500)
-        FROM (
-            SELECT hr.memory_id, hr.content, hr.memory_type,
-                   hr.score, hr.source, m.importance, m.created_at,
-                   m.source_attribution->>'ref' AS ref
-            FROM hybrid_recall('{escaped}', {MAX_MEMORIES}, 60) hr
-            JOIN memories m ON hr.memory_id = m.id
-        ) sub
-        WHERE score >= {HYBRID_MIN_SIMILARITY}
-        ORDER BY score DESC
-        LIMIT {MAX_MEMORIES};
-        """
-    else:
-        query = f"""
-        SELECT memory_id::text, memory_type::text,
-               round((score * 0.7 + importance * 0.3)::numeric, 3) as similarity,
-               round(importance::numeric, 2) as imp,
-               created_at::text,
-               source,
-               COALESCE(ref, ''),
-               LEFT(content, 500)
-        FROM (
-            SELECT fr.memory_id, m.content, m.type as memory_type,
-                   fr.score, fr.source, m.importance, m.created_at,
-                   m.source_attribution->>'ref' AS ref
-            FROM fast_recall('{escaped}', {MAX_MEMORIES * 3}) fr
-            JOIN memories m ON fr.memory_id = m.id
-            WHERE fr.score >= {FAST_MIN_SIMILARITY}
-        ) sub
-        ORDER BY (score * 0.7 + importance * 0.3) DESC
-        LIMIT {MAX_MEMORIES};
-        """
-
+# Retrieval and ranking belong to the shared core; hooks select and display.
+def query_memories_vector(prompt, keywords=None):
+    if MAX_MEMORIES <= 0:
+        return []
     try:
-        result = subprocess.run(
-            ['docker', 'exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', DB_NAME,
-             '-t', '-A', '-F', '|||', '-c', query],
-            capture_output=True, text=True, timeout=15  # Longer timeout for embedding
-        )
+        rows = core.fused_recall(prompt, core.previous_turn(input_data.get('transcript_path', '')),
+            keywords=keywords, limit=MAX_MEMORIES, fast_min_similarity=FAST_MIN_SCORE,
+            deadline=min(_SUBPROCESS_DEADLINE-7, time.monotonic()+15))[:MAX_MEMORIES]
+        contents = core.full_contents([r['id'] for r in rows], deadline=_SUBPROCESS_DEADLINE-4)
+        return [dict(row, content=core.focus_snippet(contents.get(row['id'],row['content']), keywords or [])) for row in rows]
+    except core.RecallUnavailable:
+        log('Recall store unavailable')
+        return None
 
-        if result.returncode != 0:
-            log(f"Query failed: {result.stderr}")
-            return []
 
-        memories = []
-        for line in result.stdout.strip().split('\n'):
-            if line and '|||' in line:
-                parts = line.split('|||')
-                if len(parts) >= 8:
-                    # content is last — rejoin in case it contained |||
-                    memories.append({
-                        'id': parts[0],
-                        'type': parts[1],
-                        'similarity': parts[2],
-                        'importance': parts[3],
-                        'created_at': parts[4],
-                        'source': parts[5],
-                        'ref': parts[6],
-                        'content': '|||'.join(parts[7:])[:500],
-                    })
+extract_keywords = core.extract_keywords
 
-        return memories
-
-    except subprocess.TimeoutExpired:
-        log("Query timed out")
-        return []
-    except Exception as e:
-        log(f"Error querying memories: {e}")
-        return []
-
-def extract_keywords(prompt: str) -> list[str]:
-    """Extract meaningful keywords from prompt for memory search.
-
-    Prioritizes: proper nouns > technical terms > hyphenated compounds > other.
-    This matters because 'Aaron' (5 chars) is more useful for recall than
-    'regularities' (13 chars).
-    """
-    stop_words = {
-        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-        'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
-        'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as',
-        'into', 'through', 'during', 'before', 'after', 'above', 'below',
-        'between', 'under', 'again', 'further', 'then', 'once', 'here',
-        'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few',
-        'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not',
-        'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just',
-        'and', 'but', 'if', 'or', 'because', 'until', 'while', 'about',
-        'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
-        'am', 'it', 'its', 'they', 'them', 'their', 'we', 'us', 'our',
-        'you', 'your', 'he', 'him', 'his', 'she', 'her', 'i', 'me', 'my',
-        'also', 'like', 'think', 'know', 'want', 'see', 'look', 'make',
-        'get', 'go', 'come', 'take', 'use', 'find', 'give', 'tell', 'say',
-        'try', 'let', 'keep', 'put', 'seem', 'help', 'show', 'hear', 'play',
-        'run', 'move', 'live', 'believe', 'hold', 'bring', 'happen', 'write',
-        'provide', 'sit', 'stand', 'lose', 'pay', 'meet', 'include', 'continue',
-        'set', 'learn', 'change', 'lead', 'understand', 'watch', 'follow',
-        'really', 'actually', 'something', 'anything', 'everything', 'nothing',
-        'already', 'still', 'even', 'much', 'well', 'back', 'now', 'going',
-        'right', 'sure', 'yeah', 'okay', 'good', 'great', 'first', 'last',
-        'things', 'stuff', 'way', 'kind', 'sort', 'bit', 'lot', 'part',
-        'thing', 'done', 'start', 'work', 'working', 'check', 'commit',
-        'fix', 'update', 'add', 'remove', 'test', 'debug', 'push', 'pull',
-        'read', 'don', 'doesn', 'didn', 'won', 'isn', 'aren', 'wasn',
-        'haven', 'hasn', 'hadn', 'wouldn', 'couldn', 'shouldn',
-        'break', 'breaks', 'broke', 'restart', 'stop', 'file', 'files',
-        'better', 'worse', 'maybe', 'probably', 'definitely', 'basically',
-        'whole', 'hog', 'order', 'instead', 'rather', 'simply', 'exactly',
-        'making', 'says', 'said', 'called', 'need', 'needs', 'needed',
-        'looks', 'looking', 'getting', 'doing', 'having', 'being',
-        'using', 'trying', 'running', 'going', 'coming', 'taking',
-    }
-
-    # Find proper nouns (capitalized words not at sentence start)
-    proper_nouns = set()
-    sentences = re.split(r'[.!?]\s+', prompt)
-    for sent in sentences:
-        words_in_sent = sent.split()
-        for j, w in enumerate(words_in_sent):
-            if j > 0 and w[0:1].isupper() and w.lower() not in stop_words:
-                clean = re.sub(r'[^a-zA-Z0-9-]', '', w)
-                if len(clean) > 1:
-                    proper_nouns.add(clean)
-
-    # Find hyphenated compounds and acronyms (high signal)
-    compounds = re.findall(r'\b[a-zA-Z]+-[a-zA-Z]+(?:-[a-zA-Z]+)*\b', prompt)
-    acronyms = re.findall(r'\b[A-Z]{2,}\b', prompt)
-
-    # Extract all words for regular keyword filtering
-    all_words = re.findall(r'\b[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b', prompt.lower())
-    regular = [w for w in all_words if w not in stop_words and len(w) > 2]
-
-    # Build priority-ordered list: proper nouns first, then compounds/acronyms, then rest
-    result = []
-    seen = set()
-
-    for group in [proper_nouns, set(acronyms), set(compounds)]:
-        for w in group:
-            low = w.lower()
-            if low not in seen and low not in stop_words:
-                seen.add(low)
-                result.append(w)
-
-    for w in regular:
-        if w not in seen:
-            seen.add(w)
-            result.append(w)
-
-    return result[:8]  # More keywords for richer queries
 
 def search_episodic_memory(query: str) -> list[dict]:
     """Search conversation archive using episodic-memory CLI (semantic search with indexing).
 
-    No-op when SILL_EPISODIC_MEMORY_PATH is unset or points to a missing file.
+    Skip the search when disabled or the episodic CLI is unavailable.
     """
-    if EPISODIC_CLI is None or not EPISODIC_CLI.exists():
+    if MAX_CONVERSATIONS == 0 or EPISODIC_CLI is None or not EPISODIC_CLI.exists():
         return []
 
     try:
@@ -296,7 +112,7 @@ def search_episodic_memory(query: str) -> list[dict]:
         env["EPISODIC_MEMORY_CONFIG_DIR"] = str(SUPERPOWERS_DIR)
         env["EPISODIC_MEMORY_READONLY"] = "1"
 
-        result = subprocess.run(
+        result = _run_with_budget(
             [str(EPISODIC_CLI), 'search', query, '--limit', str(MAX_CONVERSATIONS)],
             capture_output=True,
             text=True,
@@ -359,7 +175,7 @@ def format_results(memories: list[dict], conversations: list[dict]) -> str:
         lines.append("[SPONTANEOUS RECALL] Relevant memories:")
         for i, mem in enumerate(memories, 1):
             content = mem['content'].replace('\n', ' ')
-            sim = mem.get('similarity', '?')
+            sim = f"{mem['score']:.4f}" if isinstance(mem.get('score'), (int,float)) else '?'
             imp = mem.get('importance', '?')
             mid = mem.get('id', '')[:8]
             # The address, when the memory has one: a recalled paraphrase can
@@ -369,7 +185,8 @@ def format_results(memories: list[dict], conversations: list[dict]) -> str:
             # content.
             ref = (mem.get('ref') or '').strip()
             src = f" src={ref}" if ref else ""
-            lines.append(f"  {i}. [{mem['type']}, sim={sim}, imp={imp}, id={mid}{src}] {content}")
+            src += "".join(f" {key}={mem[key]}" for key in ("speaker", "production", "source_store", "force") if mem.get(key))
+            lines.append(f"  {i}. [{mem['type']}, score={sim}, imp={imp}, id={mid}{src}] {content}")
 
     if conversations:
         lines.append("[CONVERSATION HISTORY] Related past discussions:")
@@ -480,22 +297,15 @@ def track_session_time(session_id: str, project: str) -> dict | None:
                                 THEN session_activity.prompt_count + 1 ELSE 1 END
         RETURNING prompt_count
     )
-    SELECT COALESCE((SELECT ps FROM prev), ''),
-           COALESCE(EXTRACT(EPOCH FROM (now() - (SELECT pt FROM prev)))::bigint, -1),
-           (SELECT prompt_count FROM up);
+    SELECT row_to_json(timing) FROM (SELECT COALESCE((SELECT ps FROM prev), '') AS previous_session,
+           COALESCE(EXTRACT(EPOCH FROM (now() - (SELECT pt FROM prev)))::bigint, -1) AS gap_seconds,
+           (SELECT prompt_count FROM up) AS count) timing;
     """
     try:
-        r = subprocess.run(
-            ['docker', 'exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', DB_NAME,
-             '-t', '-A', '-F', '|||', '-c', q],
-            capture_output=True, text=True, timeout=8,
-        )
-        if r.returncode != 0:
+        rows = _store.query(q, timeout=5, deadline=_SUBPROCESS_DEADLINE, json_output=True)
+        if not rows:
             return None
-        line = r.stdout.strip().split('\n')[0]
-        parts = line.split('|||')
-        if len(parts) < 3:
-            return None
+        parts = list(rows[0].values())
         return {"prev_session": parts[0], "gap_seconds": int(parts[1]), "count": int(parts[2])}
     except Exception:
         return None
@@ -531,6 +341,9 @@ if not isinstance(input_data, dict):
     # AttributeError on a list.
     sys.exit(0)
 
+if input_data.get('hook_event_name', 'UserPromptSubmit') != 'UserPromptSubmit':
+    sys.exit(0)
+
 # `claude --print` (SDK/headless) invocations are non-conversational — no human
 # on the other end. They must not get recall injected into their prompt, nor
 # advance the interactive activity clock. Every `--print` fire — a scheduled
@@ -561,12 +374,12 @@ _entrypoint = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "cli")
 _interactive = bool(os.environ.get("SILL_INTERACTIVE"))
 _headless_entrypoint = _entrypoint.startswith("sdk")
 _detached_beat = bool(os.environ.get("SILL_DETACHED_BEAT"))
-if os.environ.get("SILL_HEADLESS_TOOL") or (
+if _detached_beat or os.environ.get("SILL_HEADLESS_TOOL") or (
         not _interactive and (_headless_entrypoint or _detached_beat)):
     sys.exit(0)
 
 prompt = input_data.get("prompt", "")
-if not prompt.strip():
+if not isinstance(prompt, str) or not prompt.strip():
     sys.exit(0)
 
 # A "System:"-tagged prompt is not a person talking — no header, no recall.
@@ -587,8 +400,8 @@ def _stable_project(raw: str) -> str:
     so prefer CLAUDE_PROJECT_DIR (the launch dir, immune to cd) and fold any
     path inside a repo to the repo root."""
     try:
-        r = subprocess.run(["git", "-C", raw, "rev-parse", "--show-toplevel"],
-                           capture_output=True, text=True, timeout=3)
+        r = _run_with_budget(["git", "-C", raw, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=3)
         top = r.stdout.strip()
         if r.returncode == 0 and top:
             return top
@@ -599,8 +412,12 @@ def _stable_project(raw: str) -> str:
 
 _project = _stable_project(os.environ.get("CLAUDE_PROJECT_DIR")
                            or input_data.get("cwd") or os.getcwd())
-_sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or input_data.get("session_id", "")
+_sid = hook_session_id(input_data, env=os.environ)
 time_header = build_time_header(_sid, _project)
+try:
+    _store.selected_dsn()
+except Exception:
+    time_header += ' · [sill] Selected store unavailable; timing unchecked.'
 
 
 def _read_pattern_carry_forward(session_id: str) -> str:
@@ -611,7 +428,7 @@ def _read_pattern_carry_forward(session_id: str) -> str:
     hook surfaces them at the top of the next turn, before any token is
     generated. Deleted on read so a warning is delivered exactly once.
     """
-    sid = (session_id or os.environ.get("CLAUDE_SESSION_ID", "")).strip()
+    sid = hook_session_path_key(session_id)
     if not sid:
         return ""
     path = _SILL_LOG_DIR / f"response-patterns-last-{sid}.json"
@@ -680,72 +497,13 @@ if len(keywords) < MIN_TOPICAL_KEYWORDS:
 log(f"Query for: {prompt[:100]}...")
 
 # 1. sill vector search (Lever 2: keywords steer the embedding)
-memories = query_memories_vector(prompt, keywords=keywords)
+store_memories = query_memories_vector(prompt, keywords=keywords)
+memories = store_memories or []
 log(f"Found {len(memories)} memories")
 
 # 2. episodic-memory semantic search (optional)
 conversations = search_episodic_memory(prompt)
 log(f"Found {len(conversations)} conversations")
-
-# Write surfaced-memory-IDs to the reuse-tracking sidecar so a Stop hook can
-# detect reuse on this recall path (which produces no MCP tool call to scan).
-# Session-keyed when CLAUDE_SESSION_ID env is set; falls back to a 'recent' file.
-def _write_recall_sidecar(memories_list, session_id):
-    if not memories_list:
-        return
-    try:
-        from datetime import datetime, timezone
-        sid = (session_id or os.environ.get("CLAUDE_SESSION_ID", "")).strip()
-        path = _SILL_LOG_DIR / (f"recall-sidecar-{sid}.jsonl" if sid else "recall-sidecar-recent.jsonl")
-        entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "source": "spontaneous-recall",
-            "memories": [
-                {"id": str(m.get("id", "")), "content": (m.get("content") or "")[:400]}
-                for m in memories_list if m.get("id")
-            ],
-        }
-        if not entry["memories"]:
-            return
-        with open(path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-
-
-def _touch_access(memories_list):
-    """Record only memories emitted into this prompt's model-visible context."""
-    ids = list(dict.fromkeys(
-        str(memory.get("id", ""))
-        for memory in memories_list
-        if re.fullmatch(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-            str(memory.get("id", "")),
-        )
-    ))
-    if not ids:
-        return
-    idlist = ",".join(f"'{memory_id}'::uuid" for memory_id in ids)
-    query = (
-        "UPDATE memories "
-        "SET access_count = access_count + 1, last_accessed = CURRENT_TIMESTAMP "
-        f"WHERE id IN ({idlist});"
-    )
-    try:
-        result = subprocess.run(
-            ["docker", "exec", DB_CONTAINER, "psql", "-U", DB_USER, "-d", DB_NAME,
-             "-q", "-c", query],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            log(f"Access tracking failed: {result.stderr.strip()}")
-    except Exception as exc:
-        log(f"Access tracking failed: {type(exc).__name__}: {exc}")
-
-
-_touch_access(memories)
-_write_recall_sidecar(memories, input_data.get("session_id", ""))
 
 # Output if anything found (or we at least have a time header to inject)
 if memories or conversations or time_header:
@@ -756,10 +514,12 @@ if memories or conversations or time_header:
 
     # Build detailed summary for TUI
     tui_lines = [time_header] if time_header else []
-    if memories or conversations:
+    if store_memories is None:
+        tui_lines.append(f"[sill] Store recall failed. See {LOG_FILE} for details.")
+    if (memories or conversations) and not QUIET_TUI:
         tui_lines.append("[sill] Recalled:")
 
-    if memories:
+    if memories and not QUIET_TUI:
         for mem in memories:
             # First sentence as summary (split on . ! ? or newline)
             content = mem.get('content', '')
@@ -767,7 +527,7 @@ if memories or conversations or time_header:
             if len(first_sent) > 100:
                 first_sent = first_sent[:97] + "..."
 
-            sim = mem.get('similarity', '?')
+            sim = f"{mem['score']:.4f}" if isinstance(mem.get('score'), (int,float)) else '?'
             mtype = mem.get('type', '?')[:4]  # sema, epis, proc, stra
             mid = mem.get('id', '')[:8]
 
@@ -795,7 +555,7 @@ if memories or conversations or time_header:
             age_str = f", {age}" if age else ""
             tui_lines.append(f"  {mtype} ({sim}{age_str}) {first_sent}")
 
-    if conversations:
+    if conversations and not QUIET_TUI:
         for conv in conversations:
             snippet = conv.get('content', '')[:80].replace('\n', ' ')
             date = conv.get('date', '?')
@@ -816,6 +576,19 @@ if memories or conversations or time_header:
             "additionalContext": context
         }
     }
-    print(json.dumps(output))
+    emitted = False
+    def emit(rows):
+        global emitted
+        if not emitted:
+            print(json.dumps(output), flush=True)
+            emitted = True
+    try:
+        record_shown(_sid, memories, 'spontaneous-recall', emit=emit)
+    except (OSError, ValueError, TimeoutError):
+        emit(memories)
+    try:
+        core.record_exposure([row['id'] for row in memories], deadline=_SUBPROCESS_DEADLINE)
+    except core.RecallUnavailable:
+        log('Recall exposure accounting unavailable')
 
 sys.exit(0)

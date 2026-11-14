@@ -7,8 +7,10 @@ Subcommands wired so far:
                             (Task 15)
   sill db psql              Drop into a psql shell against the db container
                             (wired in a later task)
+  sill connect <client>     Register this instance with a local MCP client.
   sill verify               Run the standard smoke-check suite
                             (wired in a later task)
+  sill show <memory-id>     Read full content and record explicit use.
   sill notice ...           Store one deliberate memory (the mint path);
                             delegates to sill.py's own parser so this
                             subcommand's argv shape lives in exactly one
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
 
 
@@ -38,7 +41,17 @@ def _cmd_seed_import(args: argparse.Namespace, _extra: list[str]) -> int:
     # Lazy import so `sill --help` works even if psycopg2 isn't installed yet.
     from scripts.seed_import import main as _seed_import_main
 
-    summary = _seed_import_main(args.path)
+    if args.env_file is None:
+        summary = _seed_import_main(args.path)
+    else:
+        from instance_config import InstanceConfigError, instance_dsn, load_instance_env
+
+        try:
+            dsn = instance_dsn(load_instance_env(args.env_file))
+        except InstanceConfigError as exc:
+            print(f"sill seed import: {exc}", file=sys.stderr)
+            return 1
+        summary = _seed_import_main(args.path, dsn=dsn)
     return 0 if summary.errors == 0 else 1
 
 
@@ -46,6 +59,27 @@ def _cmd_db_psql(_args: argparse.Namespace, _extra: list[str]) -> int:
     raise NotImplementedError(
         "db psql — wired in a later task (drops into psql against $SILL_DB_CONTAINER)"
     )
+
+
+def _cmd_connect(args: argparse.Namespace, _extra: list[str]) -> int:
+    from client_config import ClientConfigError, client_config_path, register_client
+
+    command = args.mcp_command
+    if command is None:
+        # pipx may expose sill as a symlink. Prefer the entry point's own
+        # bin directory and fall back to the interpreter's environment.
+        launcher = Path(sys.argv[0]).resolve().with_name("sill-mcp")
+        command = launcher if launcher.is_file() else Path(sys.executable).with_name("sill-mcp")
+    try:
+        status = register_client(
+            args.client, args.env_file, command,
+            dry_run=args.dry_run, adopt_legacy=args.adopt_legacy,
+        )
+    except ClientConfigError as exc:
+        print(f"sill connect: {exc}", file=sys.stderr)
+        return 1
+    print(f"sill connect: {status} in {client_config_path(args.client)}")
+    return 0
 
 
 def _cmd_verify(_args: argparse.Namespace, _extra: list[str]) -> int:
@@ -60,6 +94,34 @@ def _cmd_notice(args: argparse.Namespace, extra: list[str]) -> int:
     import sill
 
     return sill.main(["notice", *extra])
+
+
+def _cmd_show(args: argparse.Namespace, _extra: list[str]) -> int:
+    """Explicit by-ID use through the same API as MCP; print lossless content."""
+    import asyncio
+    import os
+    from contextlib import nullcontext
+    from cognitive_memory_api import CognitiveMemory
+    from instance_config import instance_dsn, load_instance_env
+    from sill_mcp_server import _without_pg_environment
+
+    selected = args.env_file if args.env_file is not None else os.environ.get("SILL_INSTANCE_ENV_FILE")
+    async def show(dsn):
+        async with CognitiveMemory.connect(dsn, min_size=1, max_size=1,
+                                           timeout=5, command_timeout=10) as client:
+            return await client.recall_by_id(args.memory_id)
+    try:
+        dsn = instance_dsn(load_instance_env(Path(selected))) if selected is not None else instance_dsn(dict(os.environ))
+        with _without_pg_environment() if selected is not None else nullcontext():
+            memory = asyncio.run(show(dsn))
+        if memory is None:
+            print("sill show: memory not found", file=sys.stderr)
+            return 1
+        print(memory.content)
+        return 0
+    except Exception as exc:
+        print(f"sill show: request failed ({type(exc).__name__})", file=sys.stderr)
+        return 1
 
 
 def _cmd_identity(args: argparse.Namespace, extra: list[str]) -> int:
@@ -93,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Import a JSONL methodology seed into the running db",
     )
     seed_import.add_argument("path", help="Path to a JSONL seed file")
+    seed_import.add_argument("--env-file", type=Path, help="Absolute path to the instance dotenv file")
     seed_import.set_defaults(func=_cmd_seed_import)
 
     # db
@@ -100,6 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
     db_sub = db.add_subparsers(dest="subcommand", required=True, metavar="<subcommand>")
     db_psql = db_sub.add_parser("psql", help="Open a psql shell against the db container")
     db_psql.set_defaults(func=_cmd_db_psql)
+
+    connect = sub.add_parser("connect", help="Register this instance with a local MCP client")
+    connect.add_argument("client", choices=("claude-code", "codex", "claude-desktop"))
+    connect.add_argument("--env-file", type=Path, required=True, help="Absolute path to the instance dotenv file")
+    connect.add_argument("--mcp-command", type=Path, help="Absolute path to the sill-mcp executable")
+    connect.add_argument("--dry-run", action="store_true", help="Validate registration without changing files")
+    connect.add_argument("--adopt-legacy", action="store_true", help="Replace an ambiguous bare sill-mcp entry")
+    connect.set_defaults(func=_cmd_connect)
+
+    from uuid import UUID
+    show = sub.add_parser("show", help="Read a memory by ID and record explicit use")
+    show.add_argument("memory_id", type=UUID)
+    show.add_argument("--env-file", type=Path, help="Absolute path to the instance dotenv file")
+    show.set_defaults(func=_cmd_show)
 
     # verify
     verify = sub.add_parser("verify", help="Run the smoke-check suite")

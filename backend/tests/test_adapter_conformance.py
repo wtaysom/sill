@@ -25,12 +25,14 @@ Slot -> where its proof lives:
   4. track   — here (test_track_*): track-reuse.py's get_recalled_memories +
      detect_reuse against the same two fixtures.
 
-Honesty note (see docs/adapters.md, "What this contract does and doesn't
-prove"): the two fixtures are HAND-WRITTEN to match schemas ground-truthed
+Honesty note: transcript fixtures below are HAND-WRITTEN to match schemas ground-truthed
 against one Codex build, not captured from a live Codex session. This file
 proves the CONTRACT (both harnesses' fixture shapes normalize/behave
 identically to each other); it does not prove either fixture is byte-
-accurate to what a real session of that harness would produce.
+accurate to what a real session of that harness would produce. The separate
+hook-event fixtures now contain sanitized projections captured from isolated
+Claude Code 2.1.296 / Codex CLI 0.162.1 sessions. Their recorder omitted prompt
+text: synthetic prompt injection tests do not establish native delivery.
 
 custom_tool_call's field shape, carried as unverified from Task 1's report
 through v0.2.0, was CONFIRMED by the v0.2.1 census of 309 real rollouts
@@ -191,8 +193,8 @@ def test_mint_slot_argv_parses_through_the_full_cli_chain(tmp_path, monkeypatch)
     assert cmd[0] == response_patterns.SILL_CLI
 
     def fake_query_db(sql, timeout=60):
-        if "create_memory" in sql:
-            return [["11111111-2222-3333-4444-555555555555"]]
+        if "mint_memory" in sql:
+            return [["11111111-2222-3333-4444-555555555555", "inserted", None]]
         return [["ok"]]
 
     with mock.patch.object(sill, "_query_db", side_effect=fake_query_db):

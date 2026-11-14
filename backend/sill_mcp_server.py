@@ -17,10 +17,12 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -34,6 +36,7 @@ from cognitive_memory_api import (
     RelationshipInput,
     RelationshipType,
 )
+from instance_config import InstanceConfigError, instance_dsn, load_instance_env, validate_dsn
 
 
 def _print_err(msg: str) -> None:
@@ -78,6 +81,22 @@ def _require(args: dict[str, Any], key: str, tool: str) -> Any:
     if key not in args:
         raise ValueError(f"Missing required argument '{key}' for tool '{tool}'")
     return args[key]
+
+
+from session_identity import mint_context
+
+
+def _stage_callable():
+    """One policy for discovery and direct dispatch; no optional providers by default."""
+    if os.environ.get("SILL_ENABLE_STAGE") != "1":
+        raise ValueError("stage is disabled; set SILL_ENABLE_STAGE=1 to opt into Chorus file writes and external models")
+    try:
+        from chorus.stage import run_beat
+    except ImportError as exc:
+        raise ValueError("stage requires optional Chorus and its provider dependencies; install them separately or unset SILL_ENABLE_STAGE") from exc
+    if not callable(run_beat):
+        raise ValueError("optional Chorus must provide callable chorus.stage.run_beat")
+    return run_beat
 
 
 async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any]) -> Any:
@@ -127,7 +146,11 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             memory_types=parsed_types,
             min_importance=float(args.get("min_importance", 0.0)),
             include_partial=include_partial,
+            speaker=args.get("speaker"),
         )
+
+    if name == "speakers":
+        return await client.speakers(min_count=int(args.get("min_count", 1)), limit=int(args.get("limit", 100)))
 
     if name == "recall_by_id":
         memory_id = UUID(_require(args, "memory_id", name))
@@ -175,12 +198,15 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             emotional_valence=float(args.get("emotional_valence", 0.0)),
             context=args.get("context"),
             concepts=args.get("concepts"),
+            force=args.get("force"), speaker=args.get("speaker"),
+            production=args.get("production"), minted_in=args.get("minted_in") if args.get("minted_in") is not None else mint_context("mcp:remember"),
         )
 
     if name == "remember_batch":
         items = _require(args, "memories", name)
         if not isinstance(items, list):
             raise ValueError("memories must be an array")
+        stamp = mint_context("mcp:remember_batch")
         memories: list[MemoryInput] = []
         for item in items:
             if not isinstance(item, dict):
@@ -193,6 +219,8 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
                     emotional_valence=float(item.get("emotional_valence", 0.0)),
                     context=item.get("context"),
                     concepts=item.get("concepts"),
+                    force=item.get("force"), speaker=item.get("speaker"),
+                    production=item.get("production"), minted_in=item.get("minted_in") if item.get("minted_in") is not None else stamp,
                 )
             )
         return await client.remember_batch(memories)
@@ -208,6 +236,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
             embeddings,
             type=MemoryType(type_raw),
             importance=float(args.get("importance", 0.5)),
+            embedding_profile=args.get("embedding_profile"),
         )
 
     if name == "connect":
@@ -340,6 +369,18 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
         gp: GoalPriority | None = GoalPriority(pri) if pri else None
         return await client.get_goals(priority=gp)
 
+    if name == "link_commitment":
+        memory_id = UUID(_require(args, "memory_id", name))
+        goal_id = UUID(_require(args, "goal_id", name))
+        await client.link_commitment(memory_id, goal_id)
+        return {"memory_id": str(memory_id), "goal_id": str(goal_id)}
+
+    if name == "change_goal_priority":
+        goal_id = UUID(_require(args, "goal_id", name))
+        priority = GoalPriority(_require(args, "priority", name))
+        await client.change_goal_priority(goal_id, priority, args.get("reason"))
+        return {"goal_id": str(goal_id), "priority": priority.value}
+
     if name == "batch":
         ops = _require(args, "operations", name) or []
         continue_on_error = bool(args.get("continue_on_error", False))
@@ -400,7 +441,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
     # =========================================================================
 
     if name == "stage":
-        from chorus.stage import run_beat
+        run_beat = _stage_callable()
 
         transcript_path = _require(args, "transcript_path", name)
         beat = _require(args, "beat", name)
@@ -412,7 +453,7 @@ async def _dispatch_tool(client: CognitiveMemory, name: str, args: dict[str, Any
 
 
 def _tools() -> list[Any]:
-    return [
+    tools = [
         _tool(
             "hydrate",
             "Hydrate a query with relevant memories + (optional) identity/worldview/drives/emotion.",
@@ -580,12 +621,13 @@ def _tools() -> list[Any]:
         ),
         _tool(
             "remember_batch_raw",
-            "Store many memories using precomputed embeddings (bypasses get_embedding).",
+            "Store many memories using precomputed embeddings (bypasses get_embedding). Supply the active embedding_profile fingerprint for prompted profiles; optional in raw mode.",
             {
                 "type": "object",
                 "properties": {
                     "contents": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "embeddings": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "embedding_profile": {"type": "string", "description": "Active embedding profile fingerprint for these vectors; required for prompted profiles."},
                     "type": {"type": "string", "enum": [t.value for t in MemoryType], "default": MemoryType.EPISODIC.value},
                     "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5},
                 },
@@ -813,6 +855,23 @@ def _tools() -> list[Any]:
             },
         ),
         _tool(
+            "link_commitment",
+            "Link a memory to its one explicit home goal. Reopen a closed goal before adding a new link; same-home retries are harmless.",
+            {"type": "object", "properties": {
+                "memory_id": {"type": "string", "format": "uuid"},
+                "goal_id": {"type": "string", "format": "uuid"}},
+             "required": ["memory_id", "goal_id"], "additionalProperties": False},
+        ),
+        _tool(
+            "change_goal_priority",
+            "Change goal priority. Closing releases its live home commitments; reopening restores only its own unreplaced releases.",
+            {"type": "object", "properties": {
+                "goal_id": {"type": "string", "format": "uuid"},
+                "priority": {"type": "string", "enum": [g.value for g in GoalPriority]},
+                "reason": {"type": ["string", "null"]}},
+             "required": ["goal_id", "priority"], "additionalProperties": False},
+        ),
+        _tool(
             "batch",
             "Run multiple tool calls sequentially (use batch_* tools where available).",
             {
@@ -951,6 +1010,31 @@ def _tools() -> list[Any]:
         ),
     ]
 
+    # Stage is outside this wheel. Explicit opt-in and importable support are
+    # both required, including for callers who bypass tool discovery.
+    try:
+        _stage_callable()
+    except ValueError:
+        tools = [tool for tool in tools if tool.name != "stage"]
+    attribution = {
+        "force": {"type": ["string", "null"], "description": "Illocutionary force of this act."},
+        "speaker": {"type": ["string", "null"], "description": "Whose act this records; no author is inferred."},
+        "production": {"type": ["object", "string", "null"], "description": "Optional declared intellectual contributors. Full typed object, or who [as Voice]: work [@ address] [basis]. Compact self requires a supplied session. Null means undeclared."},
+        "minted_in": {"type": ["object", "null"], "description": "Explicit mint context; otherwise gathered from supplied runtime evidence, with unknown fields null."},
+    }
+    for tool in tools:
+        if tool.name == "remember":
+            tool.inputSchema["properties"].update(attribution)
+        elif tool.name == "remember_batch":
+            tool.inputSchema["properties"]["memories"]["items"]["properties"].update(attribution)
+        elif tool.name == "recall":
+            tool.inputSchema["properties"]["speaker"] = {
+                "type": ["string", "null"], "description": "Restrict candidates to this speaker before ranking. #Nobody selects NULL speaker; omit for all perspectives."}
+    tools.append(_tool("speakers", "Declared speakers and act counts; excludes reserved names and archived rows. Speaker is distinct from production.", {
+        "type": "object", "properties": {"min_count": {"type": "integer", "minimum": 1, "default": 1},
+        "limit": {"type": "integer", "minimum": 1, "default": 100}}, "additionalProperties": False}))
+    return tools
+
 
 async def _run_server(dsn: str) -> None:
     try:
@@ -1006,7 +1090,8 @@ def _server_version() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sill-mcp", description="MCP server exposing CognitiveMemory tools over stdio.")
-    p.add_argument("--dsn", default=os.getenv("SILL_DB_DSN") or None, help="Postgres DSN; defaults to POSTGRES_* env vars")
+    p.add_argument("--env-file", type=Path, help="Absolute path to the instance dotenv file")
+    p.add_argument("--dsn", help="PostgreSQL URI; overrides SILL_DB_DSN and POSTGRES_* settings")
     p.add_argument(
         "--version", action="version", version=f"%(prog)s {_server_version()}",
         help="Print the installed sill-mcp version and exit.",
@@ -1014,17 +1099,45 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
-    args = build_parser().parse_args(argv)
-    dsn = args.dsn or _env_dsn()
+@contextmanager
+def _without_pg_environment():
+    # Asyncpg can read PGPORT even when the URI contains an explicit port.
+    # Keep its libpq-style environment from changing explicit instance mode.
+    inherited = {key: value for key, value in os.environ.items() if key.startswith("PG")}
+    for key in inherited:
+        del os.environ[key]
     try:
-        asyncio.run(_run_server(dsn))
+        yield
+    finally:
+        os.environ.update(inherited)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.env_file is None:
+            load_dotenv()
+            dsn = args.dsn or os.getenv("SILL_DB_DSN") or _env_dsn()
+            asyncio.run(_run_server(dsn))
+        else:
+            settings = load_instance_env(args.env_file)
+            dsn = instance_dsn(settings) if args.dsn is None else validate_dsn(args.dsn)
+            with _without_pg_environment():
+                asyncio.run(_run_server(dsn))
         return 0
     except KeyboardInterrupt:
         return 130
-    except Exception as e:
-        _print_err(str(e))
+    except InstanceConfigError as exc:
+        _print_err(f"sill-mcp: {exc}")
+        return 1
+    except Exception as exc:
+        if args.env_file is None:
+            _print_err(str(exc))
+        else:
+            _print_err(
+                f"sill-mcp: {args.env_file}: could not start the server ({type(exc).__name__}). "
+                "Check the database and selected settings."
+            )
         return 1
 
 

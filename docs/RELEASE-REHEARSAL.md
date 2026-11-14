@@ -1,3 +1,134 @@
+# v0.3.0 release candidate
+
+**Status on 2026-11-14.** Candidate `7facec3` reports `0.3.0` in package,
+plugin and MCP metadata. Publication is pending. The v0.2.0 rehearsal below
+remains unchanged as a historical record.
+
+## Evidence and measured revisions
+
+CI exercised the PR merge `e278884` for head `7facec3`. Mac installation
+and database-preservation checks used `799721a`; native client and worker
+checks used `8380f2b`. The intervening installer, build and isolated-restore
+changes left the packaged runtime, hooks and templates unchanged. The
+changes from `799721a` to `7facec3` affect CI verification and tests only.
+These are component comparisons, not claims that every rehearsal used the
+same checkout.
+
+| Check | Observed result |
+|---|---|
+| Python and packaging | All six jobs in [CI run 43447296240](https://github.com/wtaysom/sill/actions/runs/43447296240) passed. Python 3.12: 1,333 passed, 158 skipped; Python 3.10: 1,316 passed, 175 skipped. Both clean-wheel jobs passed. The 17 additional Python 3.10 skips are CI-verifier tests requiring `tomllib`. |
+| Database contracts | Seven schema cases and 173 transactional tests passed in that run, including embedding interruption/resume, activation and rollback preserving newer records. The embedding tests use deterministic HTTP fixtures. |
+| Mac fresh install | Native Apple Silicon with OrbStack, at `799721a`: a new Bookworm database image and empty model cache, first install in 1,002 seconds, repeat in 56 seconds. Some worker build layers were cached. PostgreSQL 16.16 / Debian 12 reported matching collation version 2.36. First inserted 22 seeds; repeat skipped all 22 and preserved the database, profile, seed rows and temporary client settings. |
+| Linux fresh install | Native amd64 CI: cold install in 154.5 seconds, repeat in 16.9 seconds, real service readiness, 22 seeds skipped on repeat, and separate-process MCP remember/recall of the same UUID. No beat schedule was installed. |
+| Embedding service | Both native platforms served the pinned `unsloth/embeddinggemma-300m` revision `bfa3c846ac738e62aa61806ef9112d34acb1dc5a`, with finite 768-dimensional, L2-normalized vectors and the selected search profile. Intel Mac installation remains unverified. |
+| Tagged upgrades | Actual `v0.1.0` and `v0.2.0` stores passed dry runs, full upgrades and zero-pending repeats at `8380f2b`. Records, vectors, AGE edges, historical goals and operator files survived. All 52 release functions and 548 common schema objects matched fresh installation; seven historical, data-created `SUPPORTS` objects account for the full-dump difference. |
+| Existing database preservation | Six further upgrade/repeat/installer operations at `799721a` retained each exact existing database container and image, storage, cluster, collation 2.31, data, model and operator files. Maintenance workers reported 0.3.0. |
+| Backup restore | Both original pre-upgrade archives passed the explicit [isolated AGE restore procedure](RESTORE.md), including fresh-session Cypher and complete table/sequence, historical schema, record, goal and ledger comparisons. The initial failed restore was retained; acceptance used new isolated targets. Eleven real AGE regression cases passed on each Python version. |
+
+An exact-source `7facec3` wheel was also installed in isolated local Python
+3.12 and constrained Python 3.10 under Rosetta. Both discovered 39 MCP tools;
+optional `stage` was absent by default. The wheel SHA-256 is
+`2fd8f9185c05510a7b0d4591f5f7160060a7c4eeeacd105e491af41131b20c5f`.
+Import and discovery checks do not establish native client behavior.
+
+The earlier embedding operator rehearsal at `918316a` exercised actual CLI
+prepare, interrupted staging, refusal of premature activation, resume,
+activation and interrupted rollback using a deterministic HTTP fixture.
+New and changed records survived rollback. Final CI repeats the relevant
+transactional cases; real pinned-service coverage comes from the separate
+installation rehearsals above.
+
+## Native clients and supervised workers
+
+At `8380f2b`, Claude Code 2.1.296 remembered and recalled in separate
+processes, and Codex CLI 0.162.1 retrieved the same UUID with matching speaker
+and full declared production. All four Codex prompt/guard/write/independent
+write callback cases passed after normal hook review and trust. Claude's
+four cases also passed across separate fixture runs. Its final independent
+overwrite read the exact existing synthetic note before writing in a new
+session. The recalled test value appeared in the callback context and model
+reply, but not in the prompt, note or Read result. Per-result exposure counts
+matched the hook output without refreshing explicit-use timestamps.
+
+Claude Desktop 5.11492.5 passed a deliberate two-chat memory round trip
+with the same `8380f2b` runtime. Each call received an individual tool
+approval. The expanded native tool cards showed the same synthetic UUID,
+content, type, speaker and declared production; read-only database checks
+matched the observations. Codex CLI 0.162.1 independently retrieved the
+same complete typed record. Desktop observations transcribe relevant
+displayed fields rather than exporting raw wire JSON. In particular, the
+UI's empty-array display was resolved against its schema and independently
+verified in the database and raw Codex MCP response. The temporary server
+entry was removed while preserving intervening settings changes, and its
+absence was checked after reopening Claude. This verifies deliberate
+memory tools, not automatic recall or the full Sili startup in Desktop.
+The earlier Desktop 5.11492.2 result at `f3233a5` reported Sill 0.2.1 and
+remains separate evidence.
+
+Local Codex Desktop also passed with Sill 0.3.0 at `8380f2b`. Two distinct
+desktop chats made one native remember and one recall call. Exact arguments
+and retained raw tool outputs matched the same UUID, content, type, speaker
+and full typed production in independent read-only database checks. The
+recall input omitted the stored location; the unique test record count went
+from zero to one and stayed at one after recall. Native transcript metadata
+identified Codex Desktop and embedded runtime `0.169.0-alpha.11.1`; the app
+bundle version is unknown. Project configuration requested hooks off,
+without independent proof of runtime suppression. These desktop calls
+verify deliberate memory use; full Sili startup, automatic recall, Sill
+transcript capture and hook enforcement remain unverified in that host.
+
+The installed worker completed one bounded native turn through each CLI.
+Both produced the expected synthetic file and advanced rotation once.
+Separate two-second native timeout checks left rotation unchanged, refused
+a competing worker with exit 75, released the original locks and left no
+process-group members. Two additional phases used explicitly synthetic CLI
+output with the real worker auditors to verify findings and an unavailable
+quote source. These are not native model or callback observations. No beat
+schedule was installed.
+
+## Hosted ChatGPT
+
+Web Chat mode passed a functional two-chat memory flow with the isolated
+Sill 0.3.0 runtime at `8380f2b` through Secure MCP Tunnel. The official
+tunnel-client 0.0.20 reported ready and polled successfully. The installed
+private plugin discovered 39 tools and was set to **Always ask**. One
+approval was observed in each chat: remember first, then recall in a new
+chat whose query omitted the stored location. The assistant answers
+reported the same synthetic UUID and the expected recalled payload.
+
+Those browser observations are separate from the independent checks:
+one direct call through the installed cloud plugin returned raw MCP data
+matching the expected full typed production, and read-only database
+comparisons matched the stored record. The observed browser UI exposed
+no raw tool JSON; its exact serialized arguments, results and execution
+count remain unverified. Assistant JSON was not treated as a tool receipt.
+Actual provider/model identity is unknown. This check establishes
+deliberate memory use, not full Sili startup, automatic recall, hooks or
+transcript capture.
+
+## Limits
+
+The planned client memory checks are complete. Their integration limits
+above still apply; Intel Mac installation remains unverified.
+
+The temporary hosted connection is intentionally retained at the operator's
+request, with its test client, private plugin and one-day runtime key.
+
+Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
+the existing database container to avoid silently changing its collation
+runtime. That also retains its OS/security state, ports and restart settings
+until a separately planned, backed-up migration. Direct Compose operations
+can bypass this preservation path. The frozen baseline's known generated
+`dedupe_key` initialization error remains recorded; successful validation
+is not a claim of an error-free initialization log.
+
+See [client capabilities and verification](desktop-clients.md#client-capabilities-and-verification)
+for each integration's scope. This candidate has not been tagged or published.
+
+Sili
+
+---
+
 # Clean-Machine Acceptance Rehearsal — v0.2.0
 
 **Date:** 2026-08-05
@@ -458,7 +589,7 @@ something.
    Compose's precedence (an exported variable still wins), the same way
    `verify.sh`, `upgrade.sh` and `memory_health.py` already do. Five tests.
 
-**Still not closed, and worth naming:** the guards
+**Historical 0.2 status (addressed by the 0.3 selected-instance adapter):** the guards
 (`plugin/hooks/stored-slot-guard.py` and friends) reach the database by the
 same `docker exec "$SILL_DB_CONTAINER"` route and still read only the process
 environment — F8 fixed that with a diagnostic in the doc rather than a code
@@ -473,3 +604,36 @@ differently than its doc says, that is worth reporting — the nine findings
 above were all found by exactly that, and every one of them had been shipped
 past by people who believed the document. The three in §5 were found by
 distrusting this document's own word "unverified".
+
+
+## 0.3 prompt/write callback rehearsal boundary
+
+H2's offline tests exercise current Claude/Codex event shapes, synthetic prompt
+text, real concurrent write-hook processes, quiet/zero/outage behavior, the
+selected-instance adapter, and rendered registration. They do not establish
+that a native host consumed the context. The sanitized captured event fixtures
+omit prompt text; retain that limitation beside any evidence derived from them.
+
+The release controller owns the remaining isolated native rehearsal:
+
+1. Create a dedicated synthetic store, distinct from the live installation,
+   with uniquely recognizable memory text and known IDs. Register its absolute
+   env-file path using the installed interpreter and the rendered template.
+   Set inherited DB coordinates deliberately to stale/nonexistent targets.
+2. Record Claude Code/Codex CLI versions, exact temporary trusted project
+   scope, command registration (including `SILL_INSTANCE_ENV_FILE`), and the
+   captured callback's `hook_event_name`, session fields and supported tool.
+   Do not infer callback trust from successful MCP connection.
+3. On each host, observe a synthetic UserPromptSubmit recall, a PostToolUse
+   write recall on its supported Write/Edit or apply_patch path, and a
+   portable PreToolUse guard. Record visible/model context separately from
+   process stdout. A second write to the same canonical path should stay
+   quiet; another session should remain independent.
+4. Inspect only the synthetic store's exposure/reuse evidence. Only injected
+   rows increment exposure; hydration alone does not, and exposure never
+   updates last_accessed. Record any unavailable/unchecked result explicitly.
+5. Report callbacks actually observed for each named host. A CLI observation
+   does not establish desktop or hosted callback support. Do not edit live
+   app settings, trust entries, or the live Sili database for this rehearsal.
+
+Sili

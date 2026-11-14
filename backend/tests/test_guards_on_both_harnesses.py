@@ -85,9 +85,8 @@ def _fake_docker_env(tmp_path, reply="0"):
 # Claude/Codex pairs above. stored-slot-guard, attribution-check,
 # state-language-check, and track-reuse were verified by hand in the task-2
 # report but had no automated tripwire — and state-language-check's
-# apply_patch key already broke silently once (it read tool_input["command"],
-# which apply_patch never sets, until that report's fix). These four close
-# the gap so all six hooks task 2 rewired are pinned.
+# apply_patch key already broke silently once when only one payload shape
+# was handled. The tests below cover those four hooks.
 #
 # response-patterns.py was rewired later (its two deliberate-mint checks
 # walked Claude's transcript shape only) and is the seventh _harness
@@ -226,53 +225,39 @@ def test_track_reuse_detects_the_same_reuse_on_both_harnesses(transcript_text, t
 # all three to iterate _harness.written_files and judge each (path, text)
 # pair on its own path — see _harness.py's written_files docstring.
 
-def _two_file_patch(second_path: str, second_text: str) -> dict:
-    """An out-of-scope first file (src/unrelated.py) followed by an
-    in-scope second file — the exact shape of the bypass."""
-    return {
-        "tool_name": "apply_patch", "turn_id": "t1",
-        "tool_input": {"input": (
+@pytest.mark.parametrize("patch_key", ["command", "input"], ids=["current", "legacy"])
+@pytest.mark.parametrize(
+    ("hook", "second_text"),
+    [
+        pytest.param("stored-slot-guard.py", RECEIPT_TEXT, id="receipt"),
+        pytest.param("tool-type-witness.py", "The receipt arrived by Edit.", id="witness"),
+        pytest.param("state-language-check.py", STATE_CONTENT, id="state"),
+    ],
+)
+def test_codex_second_file_reaches_existing_guards_with_current_payload(
+    hook, second_text, patch_key, tmp_path,
+):
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "session_id": "00000000-0000-4000-8000-000000000002",
+        "turn_id": "00000000-0000-4000-8000-000000000003",
+        "tool_name": "apply_patch",
+        "tool_input": {patch_key: (
+            "*** Begin Patch\n"
             "*** Update File: src/unrelated.py\n+irrelevant change\n"
-            f"*** Update File: {second_path}\n+{second_text}\n"
+            f"*** Update File: journal/r-1.md\n+{second_text}\n"
+            "*** End Patch"
         )},
     }
-
-
-def test_stored_slot_guard_inspects_the_second_file_of_a_multi_file_patch(tmp_path):
-    payload = _two_file_patch("journal/r-1.md", "Stored: deadbeef-1111-2222-3333-444455556666")
-    r = run("stored-slot-guard.py", payload, env_extra=_fake_docker_env(tmp_path))
+    env_extra = _fake_docker_env(tmp_path) if hook == "stored-slot-guard.py" else None
+    r = run(hook, payload, env_extra=env_extra)
     assert r.returncode == 0
-    assert r.stdout.strip() != "", (
-        "guard produced no output for a patch whose SECOND file has a "
-        "forged receipt — the multi-file scope bypass: written_path "
-        "reported only the out-of-scope first file, so the second file's "
-        "text was never read"
-    )
+    assert r.stdout.strip(), f"{hook} missed the second file in the {patch_key} patch"
     out = json.loads(r.stdout)
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "deadbeef" in out["hookSpecificOutput"]["permissionDecisionReason"]
-
-
-def test_tool_type_witness_inspects_the_second_file_of_a_multi_file_patch():
-    payload = _two_file_patch("journal/r-1.md", "The receipt arrived by Edit.")
-    r = run("tool-type-witness.py", payload)
-    assert r.returncode == 0
-    assert r.stdout.strip() != "", (
-        "guard produced no output for a patch whose SECOND file carries an "
-        "unquoted carrying-act claim — the multi-file scope bypass"
-    )
-    out = json.loads(r.stdout)
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_state_language_check_inspects_the_second_file_of_a_multi_file_patch():
-    payload = _two_file_patch(
-        "journal/r-1.md", "I am feeling tired and need a break after this long session.")
-    r = run("state-language-check.py", payload)
-    assert r.returncode == 0
-    assert r.stdout.strip() != "", (
-        "guard produced no output for a patch whose SECOND file carries "
-        "state language — the multi-file scope bypass"
-    )
-    out = json.loads(r.stdout)
-    assert "state-language-check" in out["systemMessage"]
+    if hook == "state-language-check.py":
+        assert out["systemMessage"] == "[state-language-check] 2 match(es)"
+    else:
+        decision = out["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        if hook == "stored-slot-guard.py":
+            assert "deadbeef" in decision["permissionDecisionReason"]
