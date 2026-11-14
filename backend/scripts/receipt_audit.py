@@ -252,7 +252,7 @@ def lookup_rows(keys: set[str]) -> Rows:
         for key, memory_id, created in wire:
             if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", memory_id):
                 raise ValueError
-            timestamp = datetime.fromisoformat(created)
+            timestamp = _timestamp(created)
             if timestamp.utcoffset() is None or not memory_id.startswith(key):
                 raise ValueError
             rows[key].append((memory_id, timestamp))
@@ -261,6 +261,29 @@ def lookup_rows(keys: set[str]) -> Rows:
         raise StoreUnreachable(f"Selected instance configuration is unavailable: {exc}") from None
     except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, csv.Error):
         raise StoreUnreachable("Receipt lookup could not complete or returned invalid rows") from None
+
+
+_STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}(?::?\d{2})?)")
+
+
+def _timestamp(text: str) -> datetime:
+    """Parse the store's timestamp text on every supported Python.
+
+    psql prints `2026-11-14 01:02:03.12+00`: an hour-only offset and a
+    fraction of any length. Python 3.10's fromisoformat takes neither, so on
+    3.10 every Docker-route lookup was reported as an unreachable store.
+    """
+    match = _STAMP.fullmatch(text.strip())
+    if match is None:
+        raise ValueError
+    day, clock, fraction, offset = match.groups()
+    if offset == "Z":
+        offset = "+00:00"
+    elif len(offset) == 3:
+        offset += ":00"
+    elif ":" not in offset:
+        offset = offset[:3] + ":" + offset[3:]
+    return datetime.fromisoformat(f"{day}T{clock}.{(fraction or '').ljust(6, '0')}{offset}")
 
 
 def audit(

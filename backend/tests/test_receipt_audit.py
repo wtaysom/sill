@@ -339,3 +339,27 @@ def test_multiline_inline_code_cannot_supply_a_supersedes_cue():
     result = receipts.audit({}, after, WINDOW, lookup=lookup)
     assert result.status == "checked"
     assert result.findings == []
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("2026-11-14 01:02:03.123456+00", "2026-11-14T01:02:03.123456+00:00"),   # psql --csv, the Docker route
+    ("2026-11-14 01:02:03.12+00", "2026-11-14T01:02:03.120000+00:00"),       # psql trims trailing zeros
+    ("2026-11-14 01:02:03+00", "2026-11-14T01:02:03+00:00"),
+    ("2026-11-14 09:02:03.5+08", "2026-11-14T09:02:03.500000+08:00"),
+    ("2026-11-14 06:32:03-0530", "2026-11-14T06:32:03-05:30"),
+    ("2026-11-14T01:02:03.123456+00:00", "2026-11-14T01:02:03.123456+00:00"),  # the selected-instance route
+    ("2026-11-14T01:02:03Z", "2026-11-14T01:02:03+00:00"),
+])
+def test_store_timestamps_parse_on_every_supported_python(text, expected):
+    """Python 3.10's fromisoformat rejects the first five; they are what psql prints."""
+    from scripts.receipt_audit import _timestamp
+    parsed = _timestamp(text)
+    assert parsed == datetime.fromisoformat(expected)
+    assert parsed.utcoffset() is not None
+
+
+@pytest.mark.parametrize("text", ["", "2026-11-14", "2026-11-14 01:02:03", "yesterday", "2026-11-14 01:02:03+00 extra"])
+def test_store_timestamps_without_a_date_time_and_offset_are_refused(text):
+    from scripts.receipt_audit import _timestamp
+    with pytest.raises(ValueError):
+        _timestamp(text)
