@@ -41,7 +41,7 @@ cd backend && python3 -c "from scripts import identity_card as ic; print(ic.defa
 | `charter_path` | Path to the charter document written during christening (the human's own words on what this instance is for). Not validated for existence by `set` — the charter may be written before or after this call. |
 | `born_at` | UTC ISO-8601 timestamp of `init` — when this identity file was first created. Immutable: re-running `init` never moves it. |
 | `engine` | The agent CLI/model this instance runs on, e.g. `claude`, `codex`. Free text, set via `sill identity set --engine`. |
-| `scope` | The install scope this instance runs at — `project` or `home`, matching `install.sh --scope` (see the README's "Install scope" section). Free text here too; this field records the fact, it doesn't enforce the vocabulary. |
+| `scope` | The install scope this instance runs at — `project` or `home`, matching `install.sh --scope` (see "Hooks for Claude Code and Codex" in the README). Free text here too; this field records the fact, it doesn't enforce the vocabulary. |
 | `harnesses` | Which harnesses are wired for this instance, e.g. `["claude", "codex"]`. Set via `sill identity set --harnesses claude,codex` (comma-separated on the command line, a JSON array on disk). |
 | `christened_at` | UTC ISO-8601 timestamp of the *first* `set --name`. Set once; a later rename does not move it — christening is an originating event, not a re-nameable property. |
 
