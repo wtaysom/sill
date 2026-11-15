@@ -3,7 +3,7 @@
 All notable changes to Sill are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.3.0 — 2026-11-13
+## v0.3.0 — 2026-11-15
 
 See the [release rehearsal](docs/RELEASE-REHEARSAL.md) for what was tested
 and what was not.
