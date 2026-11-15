@@ -214,7 +214,12 @@ def rehearse(source, temporary, evidence, report):
     def version():
         return re.search(r'^version = "([^"]+)"', (backend / "pyproject.toml").read_text(), re.M).group(1)
 
-    def runtime():
+    def runtime(settled=False):
+        # v0.2 calls its database healthy while initdb's socket-only server is
+        # still loading the schema, starts the worker against it, and has no
+        # restart policy: after a first install the worker may have exited.
+        # That is a state the upgrade has to accept, so it is recorded, and
+        # only an upgraded runtime is required to have its worker running.
         state = {}
         for service, name in CONTAINERS.items():
             info, = json.loads(docker("container", "inspect", name))
@@ -222,9 +227,11 @@ def rehearse(source, temporary, evidence, report):
             require(labels.get(LABEL + "project") == PROJECT and labels.get(LABEL + "service") == service
                     and labels.get(LABEL + "project.working_dir") == str(backend),
                     f"{name} does not belong to this checkout's default Compose project")
-            require(info["State"]["Status"] == "running", f"{name} is not running")
+            require(info["State"]["Status"] == "running" or (service == "maintenance_worker" and not settled),
+                    f"{name} is {info['State']['Status']}, not running")
             state[service] = dict(
                 id=info["Id"], image=info["Image"], image_ref=info["Config"]["Image"],
+                status=info["State"]["Status"], exit_code=info["State"]["ExitCode"],
                 command=info["Config"]["Cmd"], restart=info["HostConfig"]["RestartPolicy"]["Name"],
                 environment=sorted(e for e in info["Config"]["Env"] if e.startswith(("REVISION=", "EMBEDDING_"))),
                 # Named project volumes only; an image may declare anonymous ones of its own.
@@ -315,6 +322,7 @@ def rehearse(source, temporary, evidence, report):
         require(psql("SELECT json_agg(migration_id ORDER BY migration_id) FROM schema_migrations") == OLD_LEDGER,
                 "the v0.2 store is not at migration 007")
         report["old"] = dict(install_seconds=seconds, runtime=old_runtime, embeddings=old_embeddings,
+                             maintenance_worker=old_runtime["maintenance_worker"]["status"],
                              cached_revision=revision, env_file="absent", client_entry=LEGACY)
 
         phase("ordinary v0.2 use through its MCP server")
@@ -360,8 +368,9 @@ def rehearse(source, temporary, evidence, report):
             require(registry.read_bytes() == registry_before, f"the client entry changed {when}")
             require(not backups(), f"a backup was written {when}")
             require(store() == before, f"the store changed {when}")
-            require({s: r["id"] for s, r in runtime().items()} == {s: r["id"] for s, r in old_runtime.items()},
-                    f"a container was replaced {when}")
+            require({s: (r["id"], r["status"]) for s, r in runtime().items()}
+                    == {s: (r["id"], r["status"]) for s, r in old_runtime.items()},
+                    f"a container was replaced, started or stopped {when}")
 
         phase("dry run: stops on the repeated memories")
         code, text, _ = upgrade("upgrade-1-dry-run.log", "--dry-run")
@@ -403,7 +412,7 @@ def rehearse(source, temporary, evidence, report):
         dump = gzip.decompress(archive.read_bytes()).decode("utf-8", "replace")
         require(stat.S_IMODE(archive.stat().st_mode) == 0o600 and keep in dump and newer in dump
                 and repeated in dump, "the backup is not private or was not taken before the archive")
-        new_runtime, new_embeddings = runtime(), embeddings()
+        new_runtime, new_embeddings = runtime(settled=True), embeddings()
         require(new_runtime["db"]["id"] == old_runtime["db"]["id"]
                 and new_runtime["db"]["image"] == old_runtime["db"]["image"],
                 "the upgrade replaced the database container")
@@ -460,7 +469,8 @@ def rehearse(source, temporary, evidence, report):
                 and f"Upgrade complete: version {new_version}; 0 migrations applied." in text,
                 f"the repeated upgrade exited {code}; see upgrade-5-repeat.log")
         require(store() == settled and env_file.read_bytes() == env_bytes
-                and registry.read_bytes() == registry_after and runtime()["db"]["id"] == old_runtime["db"]["id"],
+                and registry.read_bytes() == registry_after
+                and runtime(settled=True)["db"]["id"] == old_runtime["db"]["id"],
                 "the repeated upgrade changed the store, backend/.env, the client entry or the database container")
         report["repeat"] = dict(seconds=seconds, backups=[path.name for path in backups()])
     finally:
