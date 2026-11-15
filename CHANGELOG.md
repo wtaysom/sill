@@ -5,8 +5,8 @@ All notable changes to Sill are recorded here. Format loosely follows
 
 ## v0.3.0 — 2026-11-13
 
-Release candidate. See the [release rehearsal](docs/RELEASE-REHEARSAL.md)
-for observed results and outstanding checks.
+See the [release rehearsal](docs/RELEASE-REHEARSAL.md) for what was tested
+and what was not.
 
 ### Added
 
@@ -56,6 +56,9 @@ for observed results and outstanding checks.
 
 ### Changed
 
+- **A README for a first-time reader.** It now starts with what Sill is,
+  what you need and a first memory to try. The step-by-step upgrade detail
+  moved to the [upgrade guide](docs/UPGRADING.md).
 - **Upgrade the selected runtime.** `upgrade.sh` previews the plan,
   validates a backup and applies pending migrations, including 008–016,
   to the selected database. It reinstalls the package and recreates the
@@ -105,7 +108,7 @@ for observed results and outstanding checks.
   of its data volume, and starts a new container from the same image on the
   same volume, published on `127.0.0.1` only and restarting unless stopped.
   Set `SILL_BIND_ADDR=0.0.0.0` first to keep it reachable from other
-  machines. [Closing the database port](README.md#closing-the-database-port)
+  machines. [Closing the database port](docs/UPGRADING.md#closing-the-database-port)
 - **Compose services resume after the container engine restarts.** The
   database, embeddings, RabbitMQ and maintenance worker use `unless-stopped`
   and honor a deliberate `docker compose stop`. Set `SILL_RESTART_POLICY=no` to

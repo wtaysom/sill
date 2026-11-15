@@ -541,7 +541,7 @@ sill_database_notice() {
           "$(sill_plan_field "$plan" bind)" "$(sill_plan_field "$plan" restart)"
         printf '  To keep it reachable from other machines, set SILL_BIND_ADDR=0.0.0.0 in %s before upgrading.\n' "$SILL_ENV_FILE"
       else
-        printf '  The upgrade will leave it that way: it could not prove that %s is the image this database runs on, so a new container might not be an equivalent one. See "Closing the database port" in README.md.\n' "$(sill_plan_field "$plan" tag)"
+        printf '  The upgrade will leave it that way: it could not prove that %s is the image this database runs on, so a new container might not be an equivalent one. See "Closing the database port" in docs/UPGRADING.md.\n' "$(sill_plan_field "$plan" tag)"
       fi
       ;;
     restart)
@@ -605,7 +605,7 @@ sill_secure_database() {
         printf 'Database container %s now restarts %s.\n' "$container" "$restart"
       fi
       if [[ "$action" == blocked ]]; then
-        printf 'WARNING: %s still publishes port 5432 on every network interface without a password. See "Closing the database port" in README.md.\n' "$container" >&2
+        printf 'WARNING: %s still publishes port 5432 on every network interface without a password. See "Closing the database port" in docs/UPGRADING.md.\n' "$container" >&2
       fi
       return 0
       ;;
