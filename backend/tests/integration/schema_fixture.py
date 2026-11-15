@@ -219,7 +219,12 @@ def routes(directory):
                     text=True, capture_output=True, check=True)
                 logs = result.stdout + result.stderr
                 (directory / (lane + '-init.log')).write_text(logs)
-                if 'PostgreSQL init process complete' in logs:
+                # Probe only once the final server says it is ready. A connection
+                # made while it is still starting is refused with "FATAL: the
+                # database system is starting up", and that line would then be
+                # in the very log the contract test reads for errors.
+                _, complete, final = logs.partition('PostgreSQL init process complete')
+                if complete and 'database system is ready to accept connections' in final:
                     try:
                         sql(container, 'SELECT 1;')
                         break
