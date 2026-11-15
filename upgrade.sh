@@ -215,7 +215,7 @@ if (( ! SCHEMA_ONLY )); then
   # that first, as a step of its own: if it fails, the old container is
   # started again and the package, images and schema are still the old ones.
   stamp="${backup##*/preupgrade-}"
-  if [[ "$(sill_plan_field "$(sill_database_plan)" action)" == recreate ]]; then
+  if [[ -n "$SILL_DATABASE_IDENTITY" && "$(sill_plan_field "$(sill_database_plan)" action)" == recreate ]]; then
     printf 'Close connected clients now: the database is about to restart.\n'
     sill_compose stop maintenance_worker
     worker_stopped=1

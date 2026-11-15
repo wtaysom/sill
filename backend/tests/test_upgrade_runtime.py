@@ -918,7 +918,7 @@ def compose_calls(upgrade):
 
 def touches_database(upgrade):
     return [c for c in calls(upgrade) if c[0] in ("run", "update")] + [
-        c for c in compose_calls(upgrade) if c[:2] in (["stop", "db"], ["start", "db"]) or (c[0] == "up" and "db" in c)]
+        c for c in compose_calls(upgrade) if c[0] in ("stop", "start", "up") and "db" in c]
 
 
 def test_open_database_port_is_reported_by_the_dry_run_and_left_alone(upgrade):
@@ -941,7 +941,7 @@ def test_open_database_port_is_closed_after_the_backup_and_before_anything_else(
 
     dump = at(lambda c: "pg_dump" in c)
     stop_worker = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "maintenance_worker"])
-    stop_db = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "db"])
+    stop_db = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "-t", "120", "db"])
     copy = at(lambda c: c[0] == "run")
     start_db = at(lambda c: c[0] == "compose" and c[7:] == RECREATE)
     build = at(lambda c: c[0] == "compose" and c[7] == "build")

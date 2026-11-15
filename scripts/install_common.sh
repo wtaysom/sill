@@ -537,7 +537,7 @@ sill_database_notice() {
 # After the backup and before migrations. $1 names this run (the backup's stamp).
 sill_secure_database() {
   local stamp="$1" plan action container image volume copy restart id status adopted
-  local started="$SECONDS" timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  local started timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
   [[ -n "$SILL_DATABASE_IDENTITY" ]] || return 0
   plan="$(sill_database_plan)" || return 1
   action="$(sill_plan_field "$plan" action)" || return 1
@@ -560,7 +560,8 @@ sill_secure_database() {
   volume="$(sill_plan_field "$plan" volume)" || return 1
   copy="${volume}_before_${stamp}"
   printf 'Closing the database port. Stopping %s.\n' "$container"
-  sill_compose stop db || return 1
+  # Compose's default is ten seconds and then SIGKILL; a shutdown checkpoint can take longer.
+  sill_compose stop -t 120 db || return 1
   # The second copy is made with the database stopped, by the image it runs
   # on, so it is the same files with the same owner and modes.
   printf 'Copying its data volume %s to %s.\n' "$volume" "$copy"
@@ -577,6 +578,7 @@ sill_secure_database() {
     return 1
   fi
   # The ledger is still the old one, so sill_wait_healthy would refuse it.
+  started="$SECONDS"
   while :; do
     status=missing
     if id="$(sill_compose ps -a -q db 2>/dev/null)" && [[ -n "$id" ]]; then
