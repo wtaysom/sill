@@ -105,9 +105,14 @@ cleanup() {
   sill_cleanup_instance
   if [[ -n "$SILL_PREFLIGHT_TEMP" ]]; then rm -rf -- "$SILL_PREFLIGHT_TEMP"; fi
   if [[ -n "$partial" ]]; then rm -f -- "$partial"; fi
+  if (( code )); then sill_interrupted_database_step; fi
   if (( code && worker_stopped && ! migration_started )); then
-    # start uses the prior existing container, never a newly built image.
-    sill_check_database_identity && sill_compose start maintenance_worker || true
+    if [[ -n "$SILL_DATABASE_STEP" ]]; then
+      printf 'The maintenance worker was left stopped.\n' >&2
+    else
+      # start uses the prior existing container, never a newly built image.
+      sill_check_database_identity && sill_compose start maintenance_worker || true
+    fi
   fi
   if (( code )) && [[ -n "$backup" ]]; then
     printf 'Upgrade stopped. Valid pre-upgrade backup: %s\n' "$backup" >&2
@@ -211,17 +216,27 @@ mv -- "$partial" "$backup"
 partial=""
 printf 'Valid private backup: %s\n' "$backup"
 if (( ! SCHEMA_ONLY )); then
-  # A v0.2 database container publishes its port on every interface. Close
-  # that first, as a step of its own: if it fails, the old container is
-  # started again and the package, images and schema are still the old ones.
-  stamp="${backup##*/preupgrade-}"
-  if [[ -n "$SILL_DATABASE_IDENTITY" && "$(sill_plan_field "$(sill_database_plan)" action)" == recreate ]]; then
-    printf 'Close connected clients now: the database is about to restart.\n'
-    sill_compose stop maintenance_worker
-    worker_stopped=1
-  fi
-  sill_secure_database "${stamp%%-*}" || fail "The database port was not closed; nothing was migrated"
+  # First, so that backend/.env alone starts every service as this run does.
   sill_preserve_embedding_identity "$dimension"
+  # A v0.2 database container publishes its port on every interface. Close
+  # that as a step of its own, while the package, images and schema are
+  # still the old ones.
+  if [[ -n "$SILL_DATABASE_IDENTITY" ]]; then
+    plan="$(sill_database_plan)" || fail "Could not read the database container's settings; no service was changed"
+    if [[ "$(sill_plan_field "$plan" action)" == recreate ]]; then
+      printf 'Close connected clients now: the database is about to restart.\n'
+      sill_compose stop maintenance_worker
+      worker_stopped=1
+    fi
+    stamp="${backup##*/preupgrade-}"
+    secured=0
+    sill_secure_database "${stamp%%-*}" "$plan" || secured=$?
+    case "$secured" in
+      0) ;;
+      1) fail "The database is as it was; nothing was migrated" ;;
+      *) fail "The database needs attention before the upgrade can continue; nothing was migrated" ;;
+    esac
+  fi
   # No services are changed until backup succeeds. Build/install failure
   # leaves the prior worker container available and running.
   sill_build_runtime

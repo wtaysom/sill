@@ -79,21 +79,26 @@ def database_plan(config, identity):
                         (host.get("PortBindings") or {}).get("5432/tcp") or []})
     wanted = [port for port in service.get("ports", []) if port.get("target") == 5432]
     bind = wanted[0].get("host_ip") or "0.0.0.0" if len(wanted) == 1 else None
-    restart = (host.get("RestartPolicy") or {}).get("Name") or "no"
+    policy = host.get("RestartPolicy") or {}
+    restart = policy.get("Name") or "no"
+    if restart == "on-failure" and policy.get("MaximumRetryCount"):
+        # Compose writes the count into the policy; Docker reports it beside the name.
+        restart = f'on-failure:{policy["MaximumRetryCount"]}'
     wanted_restart = service.get("restart") or "no"
-    plan = {"action": "keep", "container": service["container_name"], "image": identity["image_id"],
-            "volume": identity["volume_name"], "bind": bind, "restart": wanted_restart,
+    # The name Compose v2 gives the image it builds for a service with no `image:`.
+    tag = service.get("image") or f'{config["name"]}-db'
+    plan = {"action": "keep", "container": service["container_name"], "container_id": identity["container_id"],
+            "image": identity["image_id"], "tag": tag, "volume": identity["volume_name"], "bind": bind,
+            "restart": wanted_restart, "restart_now": restart, "restart_differs": restart != wanted_restart,
             "published": [address or "0.0.0.0" for address in published]}
     if bind is not None and bind not in EVERY_INTERFACE and EVERY_INTERFACE.intersection(published):
-        tag = service.get("image") or f'{config["name"]}-db'
         try:
             tagged = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", tag],
                                              text=True, stderr=subprocess.DEVNULL).strip()
         except subprocess.CalledProcessError:
             tagged = ""
         plan["action"] = "recreate" if tagged == identity["image_id"] else "blocked"
-        plan["tag"] = tag
-    elif restart != wanted_restart:
+    elif plan["restart_differs"]:
         plan["action"] = "restart"
     return plan
 

@@ -87,14 +87,16 @@ elif args[:2] == ["container", "inspect"]:
     if state == "missing":
         raise SystemExit(1)
     recreated = (root / "db-recreated").exists()
-    opened = service == "db" and os.getenv("TEST_DB_OPEN") and not recreated
-    lax = service == "db" and not recreated and not (root / "db-restart-updated").exists() and (
-        os.getenv("TEST_DB_OPEN") or os.getenv("TEST_DB_RESTART") == "no")
+    as_planned = recreated and os.getenv("TEST_RECREATED_AS") != "open"
+    opened = service == "db" and os.getenv("TEST_DB_OPEN") and not as_planned
+    lax = service == "db" and not as_planned and not (root / "db-restart-updated").exists() and (
+        os.getenv("TEST_DB_RESTART") == "no" or (os.getenv("TEST_DB_OPEN") and os.getenv("TEST_DB_RESTART") != "same"))
+    policy = {"Name": "no" if lax else "unless-stopped"}
     output = json.dumps([{"Id": ("e" if state == "container" else "f" if recreated and service == "db" else "c") * 64,
       "HostConfig": {"PortBindings": {"5432/tcp": [{"HostIp": "" if opened else "127.0.0.1", "HostPort": "5432"}]},
-                     "RestartPolicy": {"Name": "no" if lax else "unless-stopped"}},
+                     "RestartPolicy": policy},
       "Image": "" if state == "unknown-image" else "sha256:" + ("e" if state == "image" else "d") * 64,
-      "State": {"Running": state != "stopped"}, "Config": {"Labels": {
+      "State": {"Running": state != "stopped" and not (service == "db" and (root / "db-stopped").exists())}, "Config": {"Labels": {
       "com.docker.compose.project": "wrong" if fail == "project" or state == "project" else "backend", "com.docker.compose.service": service},
       "Cmd": ["--model-id", "custom/model"], "Env": (["EMBEDDING_DIMENSION=768"] if fail in ("legacy-revision", "unknown-revision") else ["REVISION=" + ("main" if fail == "symbolic-revision" else "a" * 40), "EMBEDDING_DIMENSION=768"])},
       "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "other_volume" if state == "mount" else "backend_postgres_data"}]}])
@@ -102,20 +104,44 @@ elif args[:2] == ["volume", "inspect"]:
     output = json.dumps([{"Labels": {"com.docker.compose.project": "other" if (root / "changed-volume-owner").exists() else "backend", "com.docker.compose.volume": "postgres_data"}}])
 elif args[:2] == ["image", "inspect"]:
     # The image Compose would start for db is the running one, unless something rebuilt the tag.
-    output = "sha256:" + "d" * 64 if args[-1] == "backend-db" and os.getenv("TEST_DB_TAG") != "rebuilt" else "sha256:new"
+    output = "sha256:" + "d" * 64 if args[-1] == "backend-db" and os.getenv("TEST_DB_TAG") != "rebuilt" and not (root / "db-tag-moved").exists() else "sha256:new"
     status = 1 if args[-1] == "backend-db" and os.getenv("TEST_DB_TAG") == "missing" else 0
 elif args[0] == "run":
     # The second copy of the data volume, made by the database's own image.
     status = 1 if fail == "copy" else 0
+    if fail == "retag":
+        (root / "db-tag-moved").touch()
 elif args[0] == "update":
-    (root / "db-restart-updated").touch()
+    status = 1 if fail == "update" else 0
+    if not status:
+        (root / "db-restart-updated").touch()
 elif args[:2] == ["volume", "rm"]:
+    status = 1 if os.getenv("TEST_VOLUME_RM_FAILS") else 0
+elif args[:2] == ["rm", "-f"]:
     pass
+elif args[0] == "inspect" and args[1] == "--format" and args[2] == "{{.State.Running}}":
+    output = "false" if (root / "db-stopped").exists() else "true"
+elif args[0] == "inspect" and args[1] == "--format" and args[2] == "{{.Id}}":
+    output = ("f" if (root / "db-recreated").exists() or fail == "recreate-removed" else "c") * 64
+elif args[0] == "inspect" and args[1] == "--format" and args[-1] == "db" and (root / "db-recreated").exists() and os.getenv("TEST_RECREATED_STATUS"):
+    # What the replacement reports while the step waits for it.
+    output = os.environ["TEST_RECREATED_STATUS"]
 elif args[0] == "compose" and args[7] == "up" and "db" in args[8:]:
-    if fail == "recreate":
+    if fail in ("recreate", "recreate-removed"):
         status = 1
     else:
         (root / "db-recreated").touch()
+        (root / "db-stopped").unlink(missing_ok=True)
+elif args[0] == "compose" and args[7] == "stop" and args[-1] == "db":
+    if fail == "stop-db" and not (root / "db-stopped").exists():
+        status = 1
+    else:
+        (root / "db-stopped").touch()
+elif args[0] == "compose" and args[7:] == ["start", "db"]:
+    if os.getenv("TEST_DB_START_FAILS"):
+        status = 1
+    else:
+        (root / "db-stopped").unlink(missing_ok=True)
 elif args[0] == "inspect" and args[2] == "{{.Image}}":
     output = "sha256:old" if fail == "stale-worker" else "sha256:new"
 elif args[0] == "exec":
@@ -199,7 +225,7 @@ elif args[0] == "exec":
         raise AssertionError(args)
 elif args[0] == "compose" and args[7] == "config" and "--format" in args:
     output = json.dumps({"name": "backend", "services": {
-        "db": {"container_name": "sill_db", "environment": {"POSTGRES_USER": "sill", "POSTGRES_PASSWORD": "sill_password", "POSTGRES_DB": "sill"}, "restart": "unless-stopped", "ports": [{"published": "5432", "target": 5432, "host_ip": os.getenv("TEST_BIND", "127.0.0.1")}], "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
+        "db": {"container_name": "sill_db", "environment": {"POSTGRES_USER": "sill", "POSTGRES_PASSWORD": "sill_password", "POSTGRES_DB": "sill"}, "restart": os.getenv("TEST_WANTED_RESTART", "unless-stopped"), "ports": [{"published": "5432", "target": 5432, "host_ip": os.getenv("TEST_BIND", "127.0.0.1")}], "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
         "embeddings": {"container_name": "sill_embeddings"},
         "maintenance_worker": {"container_name": "sill_maintenance_worker"}}, "volumes": {"postgres_data": {"name": "backend_postgres_data"}}})
 elif args[0] == "compose" and args[7] in ("stop", "start"):
@@ -906,10 +932,13 @@ def test_cache_lookup_refuses_names_it_cannot_pass_safely():
 
 # --- a database container from before v0.3's port and restart settings ---------
 # v0.2 published PostgreSQL on every interface, with trust authentication and
-# no restart policy. TEST_DB_OPEN presents that container.
+# no restart policy. TEST_DB_OPEN presents that container. The stand-in knows
+# whether the database is running, so a test sees what the scripts would see.
 
 RECREATE = ["up", "-d", "--no-build", "--no-deps", "db"]
+STOP_DB = ["stop", "-t", "120", "db"]
 OLD_IMAGE = "sha256:" + "d" * 64
+SET_RESTART = ["update", "--restart", "unless-stopped", "sill_db"]
 
 
 def compose_calls(upgrade):
@@ -919,6 +948,37 @@ def compose_calls(upgrade):
 def touches_database(upgrade):
     return [c for c in calls(upgrade) if c[0] in ("run", "update")] + [
         c for c in compose_calls(upgrade) if c[0] in ("stop", "start", "up") and "db" in c]
+
+
+def database_left_alone(upgrade, result):
+    """A failed attempt: nothing built, installed or migrated."""
+    assert result.returncode != 0 and "Upgrade complete" not in result.stdout, details(result)
+    assert not any(c[0] == "build" for c in compose_calls(upgrade))
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+    assert list((upgrade[0] / "backups").glob("*.gz"))
+
+
+def restored(upgrade, result):
+    """The old container runs again, and so does the worker this run stopped."""
+    database_left_alone(upgrade, result)
+    assert "The database was started again as it was." in result.stderr
+    assert "The database is as it was; nothing was migrated" in result.stderr
+    commands = compose_calls(upgrade)
+    assert commands.index(["start", "db"]) < commands.index(["start", "maintenance_worker"])
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "db-stopped").exists()
+
+
+def abandoned(upgrade, result):
+    """The replacement is stopped, the worker stays stopped, and the text says only that."""
+    database_left_alone(upgrade, result)
+    assert "The database is stopped. No migration has run" in result.stderr
+    assert re.search(r"is in the Docker volume backend_postgres_data_before_\d{8}T\d{6}Z\.", result.stderr)
+    assert "docker logs sill_db" in result.stderr and "up -d --no-build --no-deps db" in result.stderr
+    assert "The database needs attention before the upgrade can continue" in result.stderr
+    assert "The maintenance worker was left stopped." in result.stderr
+    assert "intact" not in result.stderr and "started again" not in result.stderr
+    commands = compose_calls(upgrade)
+    assert commands[-1] == STOP_DB and ["start", "maintenance_worker"] not in commands
 
 
 def test_open_database_port_is_reported_by_the_dry_run_and_left_alone(upgrade):
@@ -931,6 +991,14 @@ def test_open_database_port_is_reported_by_the_dry_run_and_left_alone(upgrade):
     assert not any(c[0] in ("stop", "up", "start", "build") for c in compose_calls(upgrade))
 
 
+def test_installer_rerun_says_the_port_is_open_and_who_closes_it(upgrade):
+    result = run(upgrade, "install.sh", "--no-seed", TEST_DB_OPEN="1")
+    assert result.returncode == 0, details(result)
+    assert "every network interface (0.0.0.0)" in result.stdout
+    assert "install.sh leaves it that way. Run ./upgrade.sh to close the port." in result.stdout
+    assert touches_database(upgrade) == []
+
+
 def test_open_database_port_is_closed_after_the_backup_and_before_anything_else(upgrade):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1")
     assert result.returncode == 0, details(result)
@@ -941,7 +1009,7 @@ def test_open_database_port_is_closed_after_the_backup_and_before_anything_else(
 
     dump = at(lambda c: "pg_dump" in c)
     stop_worker = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "maintenance_worker"])
-    stop_db = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "-t", "120", "db"])
+    stop_db = at(lambda c: c[0] == "compose" and c[7:] == STOP_DB)
     copy = at(lambda c: c[0] == "run")
     start_db = at(lambda c: c[0] == "compose" and c[7:] == RECREATE)
     build = at(lambda c: c[0] == "compose" and c[7] == "build")
@@ -949,18 +1017,24 @@ def test_open_database_port_is_closed_after_the_backup_and_before_anything_else(
     assert dump < stop_worker < stop_db < copy < start_db < build < migrate
     # The second copy: made offline by the database's own image, named after this run's backup.
     backup, = (upgrade[0] / "backups").glob("*.gz")
-    kept = "backend_postgres_data_before_" + backup.name.split("-")[1]
+    stamp = backup.name.split("-")[1]
+    kept = "backend_postgres_data_before_" + stamp
     assert re.fullmatch(r"backend_postgres_data_before_\d{8}T\d{6}Z", kept)
-    assert log[copy][:4] == ["run", "--rm", "--network", "none"] and OLD_IMAGE in log[copy]
+    assert log[copy][:6] == ["run", "--rm", "--name", "sill_copy_" + stamp, "--network", "none"]
+    assert log[copy][-4:-2] == [OLD_IMAGE, "sh"]
+    assert log[copy][-1] == "cp -a /from/. /to/ && chown --reference=/from /to && chmod --reference=/from /to"
     assert "backend_postgres_data:/from:ro" in log[copy] and f"{kept}:/to" in log[copy]
     assert f"kept in the Docker volume {kept}" in result.stdout
+    assert "[0s] db: healthy" in result.stdout
     assert "published on 127.0.0.1 only, restarting unless-stopped" in result.stdout
     assert "Upgrade complete" in result.stdout
+    # backend/.env already holds what Compose needs before the database is touched.
+    assert "EMBEDDING_DIMENSION=768" in (upgrade[0] / "backend/.env").read_text()
     # Compose is offered the database exactly once, and is never asked to build it.
     commands = compose_calls(upgrade)
     assert [c for c in commands if c[0] == "up" and "db" in c] == [RECREATE]
     assert [c for c in commands if c[0] == "build"] == [["build", "maintenance_worker"]]
-    assert not any(c[0] == "update" for c in log)
+    assert not any(c[0] in ("update", "rm") or c[:2] == ["volume", "rm"] for c in log)
 
 
 def test_a_second_upgrade_leaves_the_closed_database_alone(upgrade):
@@ -972,78 +1046,246 @@ def test_a_second_upgrade_leaves_the_closed_database_alone(upgrade):
     assert touches_database(upgrade) == [] and "every network interface" not in again.stdout
 
 
+def test_a_database_that_will_not_stop_is_started_again(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="stop-db")
+    assert "Could not stop the database." in result.stderr
+    restored(upgrade, result)
+    assert not any(c[0] == "run" for c in calls(upgrade))
+
+
 def test_a_failed_volume_copy_starts_the_old_database_again_and_stops(upgrade):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="copy")
-    assert result.returncode != 0 and "Upgrade complete" not in result.stdout
-    assert "started again as it was; nothing changed" in result.stderr
-    commands = compose_calls(upgrade)
-    assert ["start", "db"] in commands and ["start", "maintenance_worker"] in commands
-    assert not any(c[0] in ("up", "build") for c in commands)
-    assert any(c[:2] == ["volume", "rm"] and c[-1].startswith("backend_postgres_data_before_") for c in calls(upgrade))
-    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
-    assert list((upgrade[0] / "backups").glob("*.gz"))
+    assert "Could not copy the database volume." in result.stderr
+    restored(upgrade, result)
+    log = calls(upgrade)
+    # The helper is removed by name, then the partial volume, before the database comes back.
+    helper = next(i for i, c in enumerate(log) if c[:2] == ["rm", "-f"] and c[2].startswith("sill_copy_"))
+    partial = next(i for i, c in enumerate(log) if c[:2] == ["volume", "rm"] and c[2].startswith("backend_postgres_data_before_"))
+    start = next(i for i, c in enumerate(log) if c[0] == "compose" and c[7:] == ["start", "db"])
+    assert helper < partial < start
+    assert not any(c[0] == "up" for c in compose_calls(upgrade))
+    assert "could not be removed" not in result.stderr
 
 
-def test_a_database_that_does_not_come_back_stops_before_any_migration(upgrade):
+def test_a_partial_copy_that_cannot_be_removed_is_named_as_unusable(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="copy",
+                 TEST_VOLUME_RM_FAILS="1")
+    restored(upgrade, result)
+    assert re.search(r"incomplete copy in the Docker volume backend_postgres_data_before_\S+ could not be removed. "
+                     r"Do not rely on it", result.stderr)
+
+
+def test_a_database_that_cannot_be_started_again_is_reported_as_stopped(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="copy",
+                 TEST_DB_START_FAILS="1")
+    database_left_alone(upgrade, result)
+    assert "sill_db is stopped and could not be started again" in result.stderr
+    assert "docker start sill_db" in result.stderr and "started again as it was" not in result.stderr
+    assert "The database needs attention before the upgrade can continue" in result.stderr
+    assert "The maintenance worker was left stopped." in result.stderr
+    assert ["start", "maintenance_worker"] not in compose_calls(upgrade)
+
+
+def test_an_image_tag_moved_during_the_copy_stops_the_replacement(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="retag")
+    assert "backend-db no longer names the image this database runs on" in result.stderr
+    assert "is complete and can be removed" in result.stderr
+    restored(upgrade, result)
+    assert not any(c[0] == "up" for c in compose_calls(upgrade))
+    assert not any(c[:2] == ["volume", "rm"] for c in calls(upgrade))
+
+
+def test_compose_refusing_to_replace_the_container_starts_the_old_one_again(upgrade):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="recreate")
-    assert result.returncode != 0 and "Upgrade complete" not in result.stdout
-    assert "backend_postgres_data is intact" in result.stderr and "holds a copy made before this change" in result.stderr
-    assert "up -d --no-build --no-deps db" in result.stderr and "nothing was migrated" in result.stderr
-    assert not any(c[0] == "build" for c in compose_calls(upgrade))
-    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+    assert "Compose did not replace the container." in result.stderr
+    restored(upgrade, result)
+
+
+def test_a_replacement_that_compose_could_not_start_is_stopped_and_reported(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="recreate-removed")
+    abandoned(upgrade, result)
+
+
+@pytest.mark.parametrize("status", ["restarting", "exited", "running unhealthy", "dead"])
+def test_a_replacement_that_does_not_stay_up_is_stopped_at_once(upgrade, status):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_RECREATED_STATUS=status)
+    assert f"The recreated database reached state: {status}." in result.stderr
+    abandoned(upgrade, result)
+
+
+def test_a_replacement_that_never_becomes_healthy_times_out_and_says_so_while_waiting(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_RECREATED_STATUS="running starting",
+                 SILL_INSTALL_WAIT_HEALTHY_S="2")
+    assert "[0s] db: starting" in result.stdout
+    assert "The recreated database was not healthy after 2s (running starting)." in result.stderr
+    abandoned(upgrade, result)
+
+
+@pytest.mark.parametrize("timeout", ["0", "08", "soon"])
+def test_an_unusable_readiness_timeout_is_refused_before_the_database_is_stopped(upgrade, timeout):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", SILL_INSTALL_WAIT_HEALTHY_S=timeout)
+    database_left_alone(upgrade, result)
+    assert "Readiness timeout must be a positive integer" in result.stderr
+    assert "The database is as it was; nothing was migrated" in result.stderr
+    assert touches_database(upgrade) == []
+    assert ["start", "maintenance_worker"] in compose_calls(upgrade)
+
+
+def test_a_replacement_with_other_settings_is_not_adopted(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_RECREATED_AS="open")
+    assert "The new container is not the same image on the same volume with the planned settings." in result.stderr
+    abandoned(upgrade, result)
 
 
 @pytest.mark.parametrize("tag", ["rebuilt", "missing"])
 def test_database_is_left_alone_when_its_image_can_no_longer_be_proved(upgrade, tag):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_DB_TAG=tag)
     assert result.returncode == 0, details(result)
-    assert "will leave it that way" in result.stdout and "backend-db" in result.stdout
+    assert "will leave it that way" in result.stdout
+    assert "could not prove that backend-db is the image this database runs on" in result.stdout
     assert "WARNING: sill_db still publishes port 5432" in result.stderr
-    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+    assert touches_database(upgrade) == [SET_RESTART]
+
+
+def test_a_blocked_database_whose_restart_policy_already_matches_is_not_updated(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_DB_TAG="rebuilt", TEST_DB_RESTART="same")
+    assert result.returncode == 0, details(result)
+    assert "WARNING: sill_db still publishes port 5432" in result.stderr
+    assert touches_database(upgrade) == [] and "now restarts" not in result.stdout
 
 
 def test_asking_for_every_interface_keeps_the_container(upgrade):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_BIND="0.0.0.0")
     assert result.returncode == 0, details(result)
     assert "every network interface" not in result.stdout
-    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+    assert touches_database(upgrade) == [SET_RESTART]
 
 
 def test_missing_restart_policy_is_set_in_place(upgrade):
     result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_RESTART="no")
     assert result.returncode == 0, details(result)
-    assert "will set it to unless-stopped in place" in result.stdout
+    assert 'restarts "no"; the upgrade will set that to unless-stopped in place' in result.stdout
     assert "sill_db now restarts unless-stopped" in result.stdout
-    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+    assert touches_database(upgrade) == [SET_RESTART]
 
 
-def test_recreated_database_is_adopted_only_as_the_same_image_and_volume(monkeypatch):
-    mod = runtime_validator()
+def test_a_restart_policy_that_cannot_be_set_stops_the_upgrade(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_RESTART="no", TEST_UPGRADE_FAILURE="update")
+    database_left_alone(upgrade, result)
+    assert "Could not set the restart policy of sill_db." in result.stderr
+    assert "The database is as it was; nothing was migrated" in result.stderr
+
+
+INTERRUPT = """#!/bin/bash
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
+SILL_DATABASE_STEP="$1"
+SILL_DATABASE_STEP_CONTAINER=sill_db
+SILL_DATABASE_COPY="${2:-}"
+SILL_DATABASE_COPY_HELPER="${3:-}"
+sill_interrupted_database_step
+printf 'step=[%s] copy=[%s]\\n' "$SILL_DATABASE_STEP" "$SILL_DATABASE_COPY"
+"""
+
+
+def test_an_interrupt_during_the_copy_removes_it_and_starts_the_database_again(upgrade):
+    executable(upgrade[0] / "interrupt.sh", INTERRUPT)
+    (Path(upgrade[2]["TEST_FIXTURE"]) / "db-stopped").touch()
+    result = run(upgrade, "interrupt.sh", "stopped", "backend_postgres_data_before_x", "sill_copy_x")
+    assert result.returncode == 0, details(result)
+    assert "Interrupted while the database was stopped" in result.stderr
+    assert "The database was started again as it was." in result.stderr
+    assert "step=[] copy=[]" in result.stdout
+    log = calls(upgrade)
+    assert ["rm", "-f", "sill_copy_x"] in log and ["volume", "rm", "backend_postgres_data_before_x"] in log
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "db-stopped").exists()
+
+
+def test_an_interrupt_after_a_finished_copy_keeps_the_copy(upgrade):
+    executable(upgrade[0] / "interrupt.sh", INTERRUPT)
+    (Path(upgrade[2]["TEST_FIXTURE"]) / "db-stopped").touch()
+    result = run(upgrade, "interrupt.sh", "stopped")
+    assert "The database was started again as it was." in result.stderr and "step=[]" in result.stdout
+    assert not any(c[:2] in (["rm", "-f"], ["volume", "rm"]) for c in calls(upgrade))
+
+
+def test_an_interrupt_during_the_replacement_says_where_to_look(upgrade):
+    executable(upgrade[0] / "interrupt.sh", INTERRUPT)
+    result = run(upgrade, "interrupt.sh", "replacing")
+    assert "Interrupted while the database container was being replaced" in result.stderr
+    assert "docker ps -a --filter name=sill_db" in result.stderr and "step=[failed]" in result.stdout
+    # It only reports: nothing is asked of Docker at all.
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "docker-calls").exists()
+
+
+def database_fixture(monkeypatch, mod, **now):
+    """A config, a recorded identity, and a stand-in for what Docker reports now."""
     config = {"name": "backend", "volumes": {"postgres_data": {"name": "backend_postgres_data"}}, "services": {"db": {
-        "container_name": "sill_db", "restart": "unless-stopped",
-        "ports": [{"target": 5432, "host_ip": "127.0.0.1"}],
+        "container_name": "sill_db", "restart": now.pop("wanted_restart", "unless-stopped"),
+        "ports": [{"target": 5432, "host_ip": now.pop("bind", "127.0.0.1")}],
         "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]}}}
     previous = {"project": "backend", "container_name": "sill_db", "container_id": "c" * 64, "image_id": OLD_IMAGE,
                 "volume_name": "backend_postgres_data", "volume_source": "postgres_data"}
+    tagged = now.pop("tagged", OLD_IMAGE)
 
-    def docker(container_id="f" * 64, image=OLD_IMAGE, host_ip="127.0.0.1", restart="unless-stopped"):
+    def docker(container_id="f" * 64, image=OLD_IMAGE, bindings=("127.0.0.1",), restart=None):
         def inspect(kind, name):
             if kind == "volume":
                 return {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.volume": "postgres_data"}}
             return {"Id": container_id, "Image": image, "State": {"Running": True},
                     "Config": {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.service": "db"}},
                     "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}],
-                    "HostConfig": {"PortBindings": {"5432/tcp": [{"HostIp": host_ip, "HostPort": "5432"}]},
-                                   "RestartPolicy": {"Name": restart}}}
+                    "HostConfig": {"PortBindings": {"5432/tcp": [{"HostIp": ip, "HostPort": "5432"} for ip in bindings]},
+                                   "RestartPolicy": restart or {"Name": "unless-stopped", "MaximumRetryCount": 0}}}
         monkeypatch.setattr(mod, "inspect", inspect)
 
-    monkeypatch.setattr(mod.subprocess, "check_output", lambda *args, **kwargs: OLD_IMAGE + "\n")
+    def image_id(command, **kwargs):
+        if not tagged:
+            raise subprocess.CalledProcessError(1, command)
+        return tagged + "\n"
+    monkeypatch.setattr(mod.subprocess, "check_output", image_id)
+    return config, previous, docker
+
+
+@pytest.mark.parametrize("bindings", [("",), ("0.0.0.0",), ("::",), ("0.0.0.0", "::"), ("127.0.0.1", "")])
+def test_any_binding_on_every_interface_is_planned_for_replacement(monkeypatch, bindings):
+    mod = runtime_validator()
+    config, previous, docker = database_fixture(monkeypatch, mod)
+    docker(container_id="c" * 64, bindings=bindings)
+    plan = mod.database_plan(config, previous)
+    assert plan["action"] == "recreate" and plan["tag"] == "backend-db" and plan["container_id"] == "c" * 64
+    assert plan["bind"] == "127.0.0.1" and plan["image"] == OLD_IMAGE and plan["volume"] == "backend_postgres_data"
+
+
+@pytest.mark.parametrize("tagged", ["sha256:" + "e" * 64, ""])
+def test_replacement_is_blocked_unless_the_tag_is_the_running_image(monkeypatch, tagged):
+    mod = runtime_validator()
+    config, previous, docker = database_fixture(monkeypatch, mod, tagged=tagged)
+    docker(container_id="c" * 64, bindings=("",))
+    assert mod.database_plan(config, previous)["action"] == "blocked"
+
+
+def test_a_restart_policy_with_a_retry_count_is_compared_as_compose_writes_it(monkeypatch):
+    mod = runtime_validator()
+    config, previous, docker = database_fixture(monkeypatch, mod, wanted_restart="on-failure:3")
+    docker(restart={"Name": "on-failure", "MaximumRetryCount": 3})
+    plan = mod.database_plan(config, previous)
+    assert plan["action"] == "keep" and plan["restart_now"] == "on-failure:3" and plan["restart_differs"] is False
+    assert mod.adopt_recreated(config, previous)["container_id"] == "f" * 64
+    docker(restart={"Name": "on-failure", "MaximumRetryCount": 5})
+    plan = mod.database_plan(config, previous)
+    assert plan["action"] == "restart" and plan["restart_now"] == "on-failure:5"
+
+
+def test_recreated_database_is_adopted_only_as_the_same_image_and_volume(monkeypatch):
+    mod = runtime_validator()
+    config, previous, docker = database_fixture(monkeypatch, mod)
     docker()
     assert mod.adopt_recreated(config, previous) == {**previous, "container_id": "f" * 64}
     for change, message in [(dict(container_id="c" * 64), "not the same image"),
                             (dict(image="sha256:" + "e" * 64), "not the same image"),
-                            (dict(host_ip=""), "port and restart settings"),
-                            (dict(restart="no"), "port and restart settings")]:
+                            (dict(bindings=("",)), "port and restart settings"),
+                            (dict(restart={"Name": "no", "MaximumRetryCount": 0}), "port and restart settings")]:
         docker(**change)
         with pytest.raises(ValueError, match=message):
             mod.adopt_recreated(config, previous)

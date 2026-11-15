@@ -178,8 +178,13 @@ will. After the backup, and before the package, images or schema change, it:
    checkout's port and restart settings, and waits for it to be healthy.
 
 It does this only when the image Compose would start is the one the database
-already runs on. If the copy fails, the old container is started again and
-the upgrade stops with nothing changed.
+already runs on, and it checks that again after the copy. If the database
+cannot be stopped or copied, or Compose does not replace the container, the
+old container is started again and the upgrade stops. If a new container
+was created but does not come up healthy with the planned settings, the
+upgrade stops it and says where the copy is and how to start the database.
+In every case no migration has run, and the package and worker image are
+still the old ones.
 
 The second volume is the complete database as it was before the upgrade,
 at the old schema. The upgrade never reads it again. Keep it until you
@@ -205,7 +210,8 @@ policy in place:
   ./upgrade.sh
   ```
 
-Installer reruns do not do this; only `upgrade.sh` does.
+Installer reruns do not do this. They say that the port is open and leave
+the container as it is; only `upgrade.sh` closes it.
 
 ### Updating project hooks
 
