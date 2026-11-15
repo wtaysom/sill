@@ -64,9 +64,9 @@ for observed results and outstanding checks.
   `SILL_BIND_ADDR` selects a different bind address. Managed installs
   select a pinned embeddings image for the Docker engine architecture.
 - **Use Bookworm for fresh database builds.** Managed upgrades and installer
-  reruns preserve the validated existing database container and image to
-  avoid an implicit collation change. Its OS/security state and container
-  settings remain until a separate backed-up migration; direct Compose
+  reruns preserve the validated existing database image and data volume to
+  avoid an implicit collation change. Its OS/security state remains until a
+  separate backed-up migration; direct Compose
   operations can bypass this preservation. [Upgrade steps](README.md#upgrading)
 - **Track recall exposure and explicit use separately.** Search results
   record exposure, while explicit retrieval by ID records use. Recall
@@ -98,6 +98,14 @@ for observed results and outstanding checks.
 
   Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `fix/visible-store-outage`.
 
+- **Close the database port an older install left open.** v0.2 published
+  PostgreSQL on every network interface with trust authentication and no
+  restart policy, and an upgraded store kept that container. `upgrade.sh`
+  now says so in the dry run, then stops the database, keeps a second copy
+  of its data volume, and starts a new container from the same image on the
+  same volume, published on `127.0.0.1` only and restarting unless stopped.
+  Set `SILL_BIND_ADDR=0.0.0.0` first to keep it reachable from other
+  machines. [Closing the database port](README.md#closing-the-database-port)
 - **Compose services resume after the container engine restarts.** The
   database, embeddings, RabbitMQ and maintenance worker use `unless-stopped`
   and honor a deliberate `docker compose stop`. Set `SILL_RESTART_POLICY=no` to

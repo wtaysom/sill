@@ -86,7 +86,13 @@ elif args[:2] == ["container", "inspect"]:
         (root / "changed-volume-owner").touch()
     if state == "missing":
         raise SystemExit(1)
-    output = json.dumps([{"Id": ("e" if state == "container" else "c") * 64,
+    recreated = (root / "db-recreated").exists()
+    opened = service == "db" and os.getenv("TEST_DB_OPEN") and not recreated
+    lax = service == "db" and not recreated and not (root / "db-restart-updated").exists() and (
+        os.getenv("TEST_DB_OPEN") or os.getenv("TEST_DB_RESTART") == "no")
+    output = json.dumps([{"Id": ("e" if state == "container" else "f" if recreated and service == "db" else "c") * 64,
+      "HostConfig": {"PortBindings": {"5432/tcp": [{"HostIp": "" if opened else "127.0.0.1", "HostPort": "5432"}]},
+                     "RestartPolicy": {"Name": "no" if lax else "unless-stopped"}},
       "Image": "" if state == "unknown-image" else "sha256:" + ("e" if state == "image" else "d") * 64,
       "State": {"Running": state != "stopped"}, "Config": {"Labels": {
       "com.docker.compose.project": "wrong" if fail == "project" or state == "project" else "backend", "com.docker.compose.service": service},
@@ -95,7 +101,21 @@ elif args[:2] == ["container", "inspect"]:
 elif args[:2] == ["volume", "inspect"]:
     output = json.dumps([{"Labels": {"com.docker.compose.project": "other" if (root / "changed-volume-owner").exists() else "backend", "com.docker.compose.volume": "postgres_data"}}])
 elif args[:2] == ["image", "inspect"]:
-    output = "sha256:new"
+    # The image Compose would start for db is the running one, unless something rebuilt the tag.
+    output = "sha256:" + "d" * 64 if args[-1] == "backend-db" and os.getenv("TEST_DB_TAG") != "rebuilt" else "sha256:new"
+    status = 1 if args[-1] == "backend-db" and os.getenv("TEST_DB_TAG") == "missing" else 0
+elif args[0] == "run":
+    # The second copy of the data volume, made by the database's own image.
+    status = 1 if fail == "copy" else 0
+elif args[0] == "update":
+    (root / "db-restart-updated").touch()
+elif args[:2] == ["volume", "rm"]:
+    pass
+elif args[0] == "compose" and args[7] == "up" and "db" in args[8:]:
+    if fail == "recreate":
+        status = 1
+    else:
+        (root / "db-recreated").touch()
 elif args[0] == "inspect" and args[2] == "{{.Image}}":
     output = "sha256:old" if fail == "stale-worker" else "sha256:new"
 elif args[0] == "exec":
@@ -179,7 +199,7 @@ elif args[0] == "exec":
         raise AssertionError(args)
 elif args[0] == "compose" and args[7] == "config" and "--format" in args:
     output = json.dumps({"name": "backend", "services": {
-        "db": {"container_name": "sill_db", "environment": {"POSTGRES_USER": "sill", "POSTGRES_PASSWORD": "sill_password", "POSTGRES_DB": "sill"}, "ports": [{"published": "5432", "target": 5432, "host_ip": "127.0.0.1"}], "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
+        "db": {"container_name": "sill_db", "environment": {"POSTGRES_USER": "sill", "POSTGRES_PASSWORD": "sill_password", "POSTGRES_DB": "sill"}, "restart": "unless-stopped", "ports": [{"published": "5432", "target": 5432, "host_ip": os.getenv("TEST_BIND", "127.0.0.1")}], "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
         "embeddings": {"container_name": "sill_embeddings"},
         "maintenance_worker": {"container_name": "sill_maintenance_worker"}}, "volumes": {"postgres_data": {"name": "backend_postgres_data"}}})
 elif args[0] == "compose" and args[7] in ("stop", "start"):
@@ -882,3 +902,148 @@ def test_cache_lookup_refuses_names_it_cannot_pass_safely():
                               ("a/b", {}, "../main"), ("a/b; rm -rf /", {}, None)]:
         with pytest.raises(ValueError, match="revision"):
             mod.cached_snapshot("unused", env, model, label, None)
+
+
+# --- a database container from before v0.3's port and restart settings ---------
+# v0.2 published PostgreSQL on every interface, with trust authentication and
+# no restart policy. TEST_DB_OPEN presents that container.
+
+RECREATE = ["up", "-d", "--no-build", "--no-deps", "db"]
+OLD_IMAGE = "sha256:" + "d" * 64
+
+
+def compose_calls(upgrade):
+    return [c[7:] for c in calls(upgrade) if c[0] == "compose"]
+
+
+def touches_database(upgrade):
+    return [c for c in calls(upgrade) if c[0] in ("run", "update")] + [
+        c for c in compose_calls(upgrade) if c[:2] in (["stop", "db"], ["start", "db"]) or (c[0] == "up" and "db" in c)]
+
+
+def test_open_database_port_is_reported_by_the_dry_run_and_left_alone(upgrade):
+    result = run(upgrade, "upgrade.sh", "--dry-run", TEST_DB_OPEN="1")
+    assert result.returncode == 0, details(result)
+    assert "every network interface (0.0.0.0)" in result.stdout and "without a password" in result.stdout
+    assert "published on 127.0.0.1 only and restarting unless-stopped" in result.stdout
+    assert "keep a copy of its data volume" in result.stdout and "SILL_BIND_ADDR=0.0.0.0" in result.stdout
+    assert touches_database(upgrade) == []
+    assert not any(c[0] in ("stop", "up", "start", "build") for c in compose_calls(upgrade))
+
+
+def test_open_database_port_is_closed_after_the_backup_and_before_anything_else(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1")
+    assert result.returncode == 0, details(result)
+    log = calls(upgrade)
+
+    def at(match):
+        return next(i for i, c in enumerate(log) if match(c))
+
+    dump = at(lambda c: "pg_dump" in c)
+    stop_worker = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "maintenance_worker"])
+    stop_db = at(lambda c: c[0] == "compose" and c[7:] == ["stop", "db"])
+    copy = at(lambda c: c[0] == "run")
+    start_db = at(lambda c: c[0] == "compose" and c[7:] == RECREATE)
+    build = at(lambda c: c[0] == "compose" and c[7] == "build")
+    migrate = at(lambda c: c[0] == "exec" and "psql" in c and "-c" not in c)
+    assert dump < stop_worker < stop_db < copy < start_db < build < migrate
+    # The second copy: made offline by the database's own image, named after this run's backup.
+    backup, = (upgrade[0] / "backups").glob("*.gz")
+    kept = "backend_postgres_data_before_" + backup.name.split("-")[1]
+    assert re.fullmatch(r"backend_postgres_data_before_\d{8}T\d{6}Z", kept)
+    assert log[copy][:4] == ["run", "--rm", "--network", "none"] and OLD_IMAGE in log[copy]
+    assert "backend_postgres_data:/from:ro" in log[copy] and f"{kept}:/to" in log[copy]
+    assert f"kept in the Docker volume {kept}" in result.stdout
+    assert "published on 127.0.0.1 only, restarting unless-stopped" in result.stdout
+    assert "Upgrade complete" in result.stdout
+    # Compose is offered the database exactly once, and is never asked to build it.
+    commands = compose_calls(upgrade)
+    assert [c for c in commands if c[0] == "up" and "db" in c] == [RECREATE]
+    assert [c for c in commands if c[0] == "build"] == [["build", "maintenance_worker"]]
+    assert not any(c[0] == "update" for c in log)
+
+
+def test_a_second_upgrade_leaves_the_closed_database_alone(upgrade):
+    first = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1")
+    assert first.returncode == 0, details(first)
+    (Path(upgrade[2]["TEST_FIXTURE"]) / "docker-calls").unlink()
+    again = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1")
+    assert again.returncode == 0, details(again)
+    assert touches_database(upgrade) == [] and "every network interface" not in again.stdout
+
+
+def test_a_failed_volume_copy_starts_the_old_database_again_and_stops(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="copy")
+    assert result.returncode != 0 and "Upgrade complete" not in result.stdout
+    assert "started again as it was; nothing changed" in result.stderr
+    commands = compose_calls(upgrade)
+    assert ["start", "db"] in commands and ["start", "maintenance_worker"] in commands
+    assert not any(c[0] in ("up", "build") for c in commands)
+    assert any(c[:2] == ["volume", "rm"] and c[-1].startswith("backend_postgres_data_before_") for c in calls(upgrade))
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+    assert list((upgrade[0] / "backups").glob("*.gz"))
+
+
+def test_a_database_that_does_not_come_back_stops_before_any_migration(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_UPGRADE_FAILURE="recreate")
+    assert result.returncode != 0 and "Upgrade complete" not in result.stdout
+    assert "backend_postgres_data is intact" in result.stderr and "holds a copy made before this change" in result.stderr
+    assert "up -d --no-build --no-deps db" in result.stderr and "nothing was migrated" in result.stderr
+    assert not any(c[0] == "build" for c in compose_calls(upgrade))
+    assert not (Path(upgrade[2]["TEST_FIXTURE"]) / "applied-sql").exists()
+
+
+@pytest.mark.parametrize("tag", ["rebuilt", "missing"])
+def test_database_is_left_alone_when_its_image_can_no_longer_be_proved(upgrade, tag):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_DB_TAG=tag)
+    assert result.returncode == 0, details(result)
+    assert "will leave it that way" in result.stdout and "backend-db" in result.stdout
+    assert "WARNING: sill_db still publishes port 5432" in result.stderr
+    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+
+
+def test_asking_for_every_interface_keeps_the_container(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_OPEN="1", TEST_BIND="0.0.0.0")
+    assert result.returncode == 0, details(result)
+    assert "every network interface" not in result.stdout
+    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+
+
+def test_missing_restart_policy_is_set_in_place(upgrade):
+    result = run(upgrade, "upgrade.sh", "--no-verify", TEST_DB_RESTART="no")
+    assert result.returncode == 0, details(result)
+    assert "will set it to unless-stopped in place" in result.stdout
+    assert "sill_db now restarts unless-stopped" in result.stdout
+    assert touches_database(upgrade) == [["update", "--restart", "unless-stopped", "sill_db"]]
+
+
+def test_recreated_database_is_adopted_only_as_the_same_image_and_volume(monkeypatch):
+    mod = runtime_validator()
+    config = {"name": "backend", "volumes": {"postgres_data": {"name": "backend_postgres_data"}}, "services": {"db": {
+        "container_name": "sill_db", "restart": "unless-stopped",
+        "ports": [{"target": 5432, "host_ip": "127.0.0.1"}],
+        "volumes": [{"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]}}}
+    previous = {"project": "backend", "container_name": "sill_db", "container_id": "c" * 64, "image_id": OLD_IMAGE,
+                "volume_name": "backend_postgres_data", "volume_source": "postgres_data"}
+
+    def docker(container_id="f" * 64, image=OLD_IMAGE, host_ip="127.0.0.1", restart="unless-stopped"):
+        def inspect(kind, name):
+            if kind == "volume":
+                return {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.volume": "postgres_data"}}
+            return {"Id": container_id, "Image": image, "State": {"Running": True},
+                    "Config": {"Labels": {"com.docker.compose.project": "backend", "com.docker.compose.service": "db"}},
+                    "Mounts": [{"Destination": "/var/lib/postgresql/data", "Name": "backend_postgres_data"}],
+                    "HostConfig": {"PortBindings": {"5432/tcp": [{"HostIp": host_ip, "HostPort": "5432"}]},
+                                   "RestartPolicy": {"Name": restart}}}
+        monkeypatch.setattr(mod, "inspect", inspect)
+
+    monkeypatch.setattr(mod.subprocess, "check_output", lambda *args, **kwargs: OLD_IMAGE + "\n")
+    docker()
+    assert mod.adopt_recreated(config, previous) == {**previous, "container_id": "f" * 64}
+    for change, message in [(dict(container_id="c" * 64), "not the same image"),
+                            (dict(image="sha256:" + "e" * 64), "not the same image"),
+                            (dict(host_ip=""), "port and restart settings"),
+                            (dict(restart="no"), "port and restart settings")]:
+        docker(**change)
+        with pytest.raises(ValueError, match=message):
+            mod.adopt_recreated(config, previous)

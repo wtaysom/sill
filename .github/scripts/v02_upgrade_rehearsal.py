@@ -202,8 +202,8 @@ def rehearse(source, temporary, evidence, report):
     def docker(*args, **kwargs):
         return run("docker", *args, cwd=outside, env=env, **kwargs)
 
-    def psql(sql):
-        return json.loads(docker("exec", CONTAINERS["db"], "psql", "-h", "127.0.0.1", "-XAt", "-v",
+    def psql(sql, container=CONTAINERS["db"]):
+        return json.loads(docker("exec", container, "psql", "-h", "127.0.0.1", "-XAt", "-v",
                                  "ON_ERROR_STOP=1", "-U", "sill", "-d", "sill", "-c", sql))
 
     def phase(name):
@@ -241,9 +241,13 @@ def rehearse(source, temporary, evidence, report):
                        for port, bindings in (info["NetworkSettings"]["Ports"] or {}).items() if bindings})
         return state
 
-    def store():
-        return dict(ledger=psql("SELECT json_agg(migration_id ORDER BY migration_id) FROM schema_migrations"),
-                    memories=psql(MEMORIES))
+    def store(container=CONTAINERS["db"]):
+        return dict(ledger=psql("SELECT json_agg(migration_id ORDER BY migration_id) FROM schema_migrations", container),
+                    memories=psql(MEMORIES, container))
+
+    def kept_volumes():
+        return sorted(name for name in docker("volume", "ls", "--format", "{{.Name}}").splitlines()
+                      if name.startswith(f"{PROJECT}_postgres_data_before_"))
 
     def embeddings():
         name = CONTAINERS["embeddings"]
@@ -366,7 +370,7 @@ def rehearse(source, temporary, evidence, report):
         def untouched(when):
             require(not env_file.exists() and not env_file.is_symlink(), f"backend/.env exists {when}")
             require(registry.read_bytes() == registry_before, f"the client entry changed {when}")
-            require(not backups(), f"a backup was written {when}")
+            require(not backups() and not kept_volumes(), f"a backup or a volume copy was written {when}")
             require(store() == before, f"the store changed {when}")
             require({s: (r["id"], r["status"]) for s, r in runtime().items()}
                     == {s: (r["id"], r["status"]) for s, r in old_runtime.items()},
@@ -391,6 +395,9 @@ def rehearse(source, temporary, evidence, report):
         require(code == 0 and "DRY: no backup, data, runtime, package or registration changed." in text
                 and f"{pending} pending migrations." in text,
                 "the full dry run did not pass; see upgrade-3-dry-run-both.log")
+        require("every network interface" in text and "published on 127.0.0.1 only" in text
+                and "keep a copy of its data volume" in text,
+                "the dry run did not say it would close the database port and keep a copy")
         untouched("after the passing dry run")
 
         phase("the upgrade")
@@ -413,9 +420,37 @@ def rehearse(source, temporary, evidence, report):
         require(stat.S_IMODE(archive.stat().st_mode) == 0o600 and keep in dump and newer in dump
                 and repeated in dump, "the backup is not private or was not taken before the archive")
         new_runtime, new_embeddings = runtime(settled=True), embeddings()
-        require(new_runtime["db"]["id"] == old_runtime["db"]["id"]
+        # v0.2 published PostgreSQL on every interface with no restart policy.
+        # The upgrade closes that with a new container from the same image on
+        # the same volume, and keeps the data as it was in a second volume.
+        require(("0.0.0.0", "5432") in old_runtime["db"]["ports"].get("5432/tcp", [])
+                and old_runtime["db"]["restart"] in ("", "no"),
+                f"v0.2's database was not published everywhere without a restart policy: {old_runtime['db']}")
+        require(new_runtime["db"]["id"] != old_runtime["db"]["id"]
                 and new_runtime["db"]["image"] == old_runtime["db"]["image"],
-                "the upgrade replaced the database container")
+                "the database is not a new container from the image it already ran on")
+        require(new_runtime["db"]["ports"] == {"5432/tcp": [("127.0.0.1", "5432")]}
+                and new_runtime["db"]["restart"] == "unless-stopped",
+                f"the database port is not closed or it has no restart policy: {new_runtime['db']}")
+        kept, = kept_volumes()
+        require(f"kept in the Docker volume {kept}" in text and kept.endswith(archive.name.split("-")[1]),
+                "the upgrade did not name the volume that keeps the old data")
+        # The kept volume is the v0.2 database exactly as it was: start a
+        # throwaway server on a copy of it and compare with the store before.
+        image, scratch, witness = old_runtime["db"]["image"], "sill_rehearsal_scratch", "sill_rehearsal_kept_copy"
+        docker("run", "--rm", "--network", "none", "-v", f"{kept}:/from:ro", "-v", f"{scratch}:/to", image, "sh", "-c",
+               "cp -a /from/. /to/ && chown --reference=/from /to && chmod --reference=/from /to", timeout=600)
+        docker("run", "-d", "--name", witness, "--network", "none", "-v", f"{scratch}:/var/lib/postgresql/data",
+               image, "postgres", "-c", "search_path=ag_catalog,public", "-c", "app.embedding_dimension=768")
+        for _ in range(90):
+            ready = subprocess.run(["docker", "exec", witness, "pg_isready", "-h", "127.0.0.1", "-U", "sill", "-d", "sill"],
+                                   cwd=outside, env=env, capture_output=True, timeout=30)
+            if ready.returncode == 0:
+                break
+            time.sleep(1)
+        require(store(witness) == before,
+                "the kept volume is not the database as it was before the upgrade")
+        docker("stop", witness, timeout=120)
         for service in ("db", "embeddings", "rabbitmq"):
             require(new_runtime[service]["mounts"] == old_runtime[service]["mounts"],
                     f"{service} is on another volume after the upgrade")
@@ -437,6 +472,7 @@ def rehearse(source, temporary, evidence, report):
         report["upgrade"] = dict(seconds=seconds, runtime=new_runtime, embeddings=new_embeddings,
                                  embeddings_readiness=waits, backup=archive.name,
                                  cache_growth_kb=new_embeddings["cache_kb"] - old_embeddings["cache_kb"],
+                                 kept_volume=kept, kept_volume_matches_the_old_store=True,
                                  env_keys=sorted(settings), ledger=after["ledger"])
 
         phase("recall of v0.2 memories through the adopted entry")
@@ -470,8 +506,9 @@ def rehearse(source, temporary, evidence, report):
                 f"the repeated upgrade exited {code}; see upgrade-5-repeat.log")
         require(store() == settled and env_file.read_bytes() == env_bytes
                 and registry.read_bytes() == registry_after
-                and runtime(settled=True)["db"]["id"] == old_runtime["db"]["id"],
-                "the repeated upgrade changed the store, backend/.env, the client entry or the database container")
+                and runtime(settled=True)["db"]["id"] == new_runtime["db"]["id"] and kept_volumes() == [kept],
+                "the repeated upgrade changed the store, backend/.env, the client entry or the database container, "
+                "or copied the volume again")
         report["repeat"] = dict(seconds=seconds, backups=[path.name for path in backups()])
     finally:
         # Never remove resources. The runner tears down its own daemon.

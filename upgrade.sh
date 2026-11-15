@@ -182,6 +182,7 @@ if (( ! SCHEMA_ONLY )); then
   sill_check_running_instance
   settings="$(sill_compose config --format json | "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" "$dimension")" || fail "Compose instance does not match the installed data"
   sill_capture_database_identity "$settings"
+  sill_database_notice
   # Preserve the running embedding space, including a custom revision that
   # predates the new defaults. Omitted fields are pinned after backup below.
   EMBEDDING_MODEL_ID="$(printf '%s' "$settings" | python3 -c 'import json,sys; print(json.load(sys.stdin)["EMBEDDING_MODEL_ID"])')"
@@ -210,6 +211,16 @@ mv -- "$partial" "$backup"
 partial=""
 printf 'Valid private backup: %s\n' "$backup"
 if (( ! SCHEMA_ONLY )); then
+  # A v0.2 database container publishes its port on every interface. Close
+  # that first, as a step of its own: if it fails, the old container is
+  # started again and the package, images and schema are still the old ones.
+  stamp="${backup##*/preupgrade-}"
+  if [[ "$(sill_plan_field "$(sill_database_plan)" action)" == recreate ]]; then
+    printf 'Close connected clients now: the database is about to restart.\n'
+    sill_compose stop maintenance_worker
+    worker_stopped=1
+  fi
+  sill_secure_database "${stamp%%-*}" || fail "The database port was not closed; nothing was migrated"
   sill_preserve_embedding_identity "$dimension"
   # No services are changed until backup succeeds. Build/install failure
   # leaves the prior worker container available and running.

@@ -491,9 +491,129 @@ sill_capture_database_identity() {
     return 1
   fi
   if [[ -z "$SILL_DATABASE_IDENTITY" && -n "$observed" ]]; then
-    printf 'Retaining the existing database container and immutable image. PostgreSQL/OS security updates, ports and restart settings are unchanged; an OS refresh needs a separate backed-up migration.\n'
+    printf 'Retaining the existing database image and data volume. PostgreSQL/OS security updates are unchanged; an OS refresh needs a separate backed-up migration.\n'
   fi
   SILL_DATABASE_IDENTITY="$observed"
+}
+
+# --- a database container from before this checkout's settings ----------------
+# v0.2 published PostgreSQL on every interface, with trust authentication and
+# no restart policy. upgrade.sh closes that. The decision is made by
+# scripts/upgrade_runtime.py (database_plan); these two functions report it
+# and carry it out.
+
+sill_database_plan() {
+  sill_compose config --format json |
+    "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" --database-plan "$SILL_DATABASE_IDENTITY"
+}
+
+sill_plan_field() {
+  printf '%s' "$1" | python3 -c 'import json,sys; v=json.load(sys.stdin).get(sys.argv[1]); print(", ".join(v) if isinstance(v, list) else ("" if v is None else v))' "$2"
+}
+
+# Read-only: say what the upgrade will do, before the backup and in a dry run.
+sill_database_notice() {
+  local plan action
+  [[ -n "$SILL_DATABASE_IDENTITY" ]] || return 0
+  plan="$(sill_database_plan)" || return 1
+  action="$(sill_plan_field "$plan" action)" || return 1
+  case "$action" in
+    recreate)
+      printf 'The database container publishes port 5432 on every network interface (%s) and accepts connections without a password.\n' "$(sill_plan_field "$plan" published)"
+      printf '  After the backup, the upgrade will stop it, keep a copy of its data volume, and start a new container from the same image on the same volume, published on %s only and restarting %s.\n' \
+        "$(sill_plan_field "$plan" bind)" "$(sill_plan_field "$plan" restart)"
+      printf '  To keep it reachable from other machines, set SILL_BIND_ADDR=0.0.0.0 in %s before upgrading.\n' "$SILL_ENV_FILE"
+      ;;
+    blocked)
+      printf 'The database container publishes port 5432 on every network interface (%s) and accepts connections without a password.\n' "$(sill_plan_field "$plan" published)"
+      printf '  The upgrade will leave it that way: the image %s is no longer the one this database runs on, so a new container could not be proved equivalent. See "Closing the database port" in README.md.\n' "$(sill_plan_field "$plan" tag)"
+      ;;
+    restart)
+      printf 'The database container has no matching restart policy; the upgrade will set it to %s in place.\n' "$(sill_plan_field "$plan" restart)"
+      ;;
+  esac
+}
+
+# After the backup and before migrations. $1 names this run (the backup's stamp).
+sill_secure_database() {
+  local stamp="$1" plan action container image volume copy restart id status adopted
+  local started="$SECONDS" timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  [[ -n "$SILL_DATABASE_IDENTITY" ]] || return 0
+  plan="$(sill_database_plan)" || return 1
+  action="$(sill_plan_field "$plan" action)" || return 1
+  container="$(sill_plan_field "$plan" container)" || return 1
+  restart="$(sill_plan_field "$plan" restart)" || return 1
+  case "$action" in
+    keep) return 0 ;;
+    restart|blocked)
+      docker update --restart "$restart" "$container" >/dev/null || return 1
+      printf 'Database container %s now restarts %s.\n' "$container" "$restart"
+      if [[ "$action" == blocked ]]; then
+        printf 'WARNING: %s still publishes port 5432 on every network interface without a password. See "Closing the database port" in README.md.\n' "$container" >&2
+      fi
+      return 0
+      ;;
+    recreate) ;;
+    *) printf 'Unknown database plan: %s\n' "$action" >&2; return 1 ;;
+  esac
+  image="$(sill_plan_field "$plan" image)" || return 1
+  volume="$(sill_plan_field "$plan" volume)" || return 1
+  copy="${volume}_before_${stamp}"
+  printf 'Closing the database port. Stopping %s.\n' "$container"
+  sill_compose stop db || return 1
+  # The second copy is made with the database stopped, by the image it runs
+  # on, so it is the same files with the same owner and modes.
+  printf 'Copying its data volume %s to %s.\n' "$volume" "$copy"
+  if ! docker run --rm --network none -v "$volume:/from:ro" -v "$copy:/to" "$image" \
+       sh -c 'cp -a /from/. /to/ && chown --reference=/from /to && chmod --reference=/from /to'; then
+    docker volume rm "$copy" >/dev/null 2>&1 || true
+    sill_compose start db || true
+    printf 'Could not copy the database volume. The database was started again as it was; nothing changed.\n' >&2
+    return 1
+  fi
+  # --no-build: only the existing image, which the plan proved is this one.
+  if ! sill_compose up -d --no-build --no-deps db; then
+    sill_database_recovery "$volume" "$copy"
+    return 1
+  fi
+  # The ledger is still the old one, so sill_wait_healthy would refuse it.
+  while :; do
+    status=missing
+    if id="$(sill_compose ps -a -q db 2>/dev/null)" && [[ -n "$id" ]]; then
+      status="$(docker inspect --format '{{.State.Status}}{{if .State.Health}} {{.State.Health.Status}}{{end}}' "$id" 2>/dev/null)" || status=unavailable
+    fi
+    case "$status" in
+      'running healthy') break ;;
+      missing|unavailable|dead*|exited*|paused*|removing*|'running unhealthy')
+        printf 'The recreated database reached state: %s.\n' "$status" >&2
+        sill_database_recovery "$volume" "$copy"
+        return 1
+        ;;
+    esac
+    if (( SECONDS - started >= timeout )); then
+      printf 'The recreated database was not healthy after %ss (%s).\n' "$timeout" "$status" >&2
+      sill_database_recovery "$volume" "$copy"
+      return 1
+    fi
+    sleep 2
+  done
+  if ! adopted="$(sill_compose config --format json |
+       "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" --adopt-recreated "$SILL_DATABASE_IDENTITY")"; then
+    sill_database_recovery "$volume" "$copy"
+    return 1
+  fi
+  SILL_DATABASE_IDENTITY="$adopted"
+  printf 'Database recreated from the same image on the same volume: published on %s only, restarting %s.\n' \
+    "$(sill_plan_field "$plan" bind)" "$restart"
+  printf 'Its data as it was before this upgrade is kept in the Docker volume %s. Remove that volume when you no longer want it.\n' "$copy"
+}
+
+sill_database_recovery() {
+  local env_file="$SILL_ENV_FILE"
+  [[ -e "$env_file" || -L "$env_file" ]] || env_file=/dev/null
+  printf 'The data volume %s is intact, and %s holds a copy made before this change. No migration has run.\n' "$1" "$2" >&2
+  printf 'Start the database again with: docker compose --project-directory %q --env-file %q -f %q up -d --no-build --no-deps db\n' \
+    "$SILL_BACKEND" "$env_file" "$COMPOSE_FILE" >&2
 }
 
 sill_check_database_identity() {

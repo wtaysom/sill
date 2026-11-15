@@ -24,7 +24,11 @@ def inspect(kind, name):
 
 
 def database_identity(config, expected=None):
-    """Identify the running container; managed updates never recreate this db."""
+    """Identify the running container, its immutable image and its data volume.
+
+    A managed update never lets Compose substitute another image or volume.
+    The one deliberate change is `database_plan` below, which keeps both.
+    """
     project = config["name"]
     service = config["services"]["db"]
     db = inspect("container", service["container_name"])
@@ -54,6 +58,54 @@ def database_identity(config, expected=None):
     if expected is not None and identity != expected:
         raise ValueError("Database identity changed during this operation; no replacement will be started")
     return identity
+
+
+EVERY_INTERFACE = {"", "0.0.0.0", "::"}
+
+
+def database_plan(config, identity):
+    """What to do about a database container older than this checkout's settings.
+
+    v0.2 published PostgreSQL on every interface, with trust authentication
+    and no restart policy. A restart policy can be changed in place. A port
+    binding cannot: closing it takes a new container. That is planned only
+    when the image Compose would start is provably the one this database
+    already runs on, so the new container differs in settings and nothing
+    else. Otherwise the container is left alone and the plan says why.
+    """
+    service = config["services"]["db"]
+    host = inspect("container", service["container_name"]).get("HostConfig") or {}
+    published = sorted({binding.get("HostIp") or "" for binding in
+                        (host.get("PortBindings") or {}).get("5432/tcp") or []})
+    wanted = [port for port in service.get("ports", []) if port.get("target") == 5432]
+    bind = wanted[0].get("host_ip") or "0.0.0.0" if len(wanted) == 1 else None
+    restart = (host.get("RestartPolicy") or {}).get("Name") or "no"
+    wanted_restart = service.get("restart") or "no"
+    plan = {"action": "keep", "container": service["container_name"], "image": identity["image_id"],
+            "volume": identity["volume_name"], "bind": bind, "restart": wanted_restart,
+            "published": [address or "0.0.0.0" for address in published]}
+    if bind is not None and bind not in EVERY_INTERFACE and EVERY_INTERFACE.intersection(published):
+        tag = service.get("image") or f'{config["name"]}-db'
+        try:
+            tagged = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                                             text=True, stderr=subprocess.DEVNULL).strip()
+        except subprocess.CalledProcessError:
+            tagged = ""
+        plan["action"] = "recreate" if tagged == identity["image_id"] else "blocked"
+        plan["tag"] = tag
+    elif restart != wanted_restart:
+        plan["action"] = "restart"
+    return plan
+
+
+def adopt_recreated(config, previous):
+    """Accept the one container this run recreated: same image, same volume, new settings."""
+    current = database_identity(config)
+    if current["container_id"] == previous["container_id"] or current != {**previous, "container_id": current["container_id"]}:
+        raise ValueError("The recreated database is not the same image on the same volume")
+    if database_plan(config, current)["action"] != "keep":
+        raise ValueError("The recreated database does not have this checkout's port and restart settings")
+    return current
 
 
 HEX = r"[a-fA-F0-9]{40,64}"
@@ -257,6 +309,14 @@ def main():
     path = Path(sys.argv[1])
     if sys.argv[2] == "--check-database":
         database_identity(config, json.loads(sys.argv[3]))
+        return
+    if sys.argv[2] == "--database-plan":
+        identity = json.loads(sys.argv[3])
+        database_identity(config, identity)
+        print(json.dumps(database_plan(config, identity)))
+        return
+    if sys.argv[2] == "--adopt-recreated":
+        print(json.dumps(adopt_recreated(config, json.loads(sys.argv[3])), sort_keys=True))
         return
     install = sys.argv[2] == "--install"
     if install and not existing_instance(config, path, "--fresh-profile" in sys.argv[3:]):
