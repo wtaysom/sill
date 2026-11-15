@@ -38,6 +38,51 @@ from cognitive_memory_api import (
 )
 from instance_config import InstanceConfigError, instance_dsn, load_instance_env, validate_dsn
 
+# Sent to the client at initialize. In a client without Sill's hooks (the
+# desktop apps, a hosted chat) this and the tool descriptions are everything
+# the model on the other end is told about when to use memory, so they say it.
+SERVER_INSTRUCTIONS = """\
+Sill is a long-term memory store shared by this person's sessions and clients. \
+Unless Sill's hooks are installed in this client, nothing from it reaches you \
+unasked: you see what you look up, and the store keeps what you put in it.
+
+Look things up with `recall` before relying on your impression of earlier \
+work: when the person points at something prior ("we decided", "last time", \
+a name you do not recognize), or when an earlier decision could change what \
+you are about to do. Treat what comes back as a pointer. A recalled claim \
+about the world or about code is worth checking against the source it names; \
+a recorded decision, preference or promise is itself the record.
+
+Store with `remember` when asked, and when something is settled that a later \
+session will need: a decision and what would change it, a correction, a \
+stated preference, a quotation with where it came from. Write for a reader \
+who has none of this conversation, and lead with the point, because the \
+opening words are what later searches match. Set `speaker` to whoever said \
+it. Leave `production` out unless you know who did the work. Keep credentials \
+and long transcript text out. Say a memory was stored only after the tool \
+returns its id.\
+"""
+
+VALID_FORCES = ("assertive", "commissive", "declaration", "directive", "expressive")
+
+# The smallest declaration a client with no session can make. It is quoted in
+# the `production` description, and a test validates it against provenance.py.
+PRODUCTION_EXAMPLE = {"made": [{
+    "kind": "person", "who": "Inez", "work": "ran the timing experiment", "at": [],
+    "declared": {"by": None, "when": "2026-11-13T00:00:00Z", "basis": "stated"},
+}]}
+
+
+def _initialization_options(options_cls: Any, **kwargs: Any) -> Any:
+    """Build the initialize options, with instructions where the SDK takes them.
+
+    `mcp>=1.0.0` is supported and its early releases have no `instructions`
+    field, so pass it only to an options class that declares one.
+    """
+    if "instructions" in getattr(options_cls, "model_fields", {}):
+        kwargs["instructions"] = SERVER_INSTRUCTIONS
+    return options_cls(**kwargs)
+
 
 def _print_err(msg: str) -> None:
     sys.stderr.write(msg + "\n")
@@ -499,7 +544,11 @@ def _tools() -> list[Any]:
             "score, NOT a cosine similarity: it is ~0.0164 for a top hit found by one of the "
             "two searches and ~0.0328 for one found by both, and it encodes rank rather than "
             "match quality. Judge relevance from the content and the ordering; do not read a "
-            "small score as a weak match, and do not threshold it as if it were 0..1.",
+            "small score as a weak match, and do not threshold it as if it were 0..1. "
+            "Each memory carries `speaker` (whose utterance it was) and `production` (who did "
+            "the intellectual work, as declared; null means nobody has declared). The first is "
+            "never evidence of the second. A recalled memory is a pointer: check a factual "
+            "claim against the source it names before relying on it.",
             {
                 "type": "object",
                 "properties": {
@@ -576,7 +625,13 @@ def _tools() -> list[Any]:
         ),
         _tool(
             "remember",
-            "Store a memory (embedding generated in DB).",
+            "Store one memory (embedding generated in the database). Write content that a "
+            "reader without this conversation can use, and lead with the point. Each memory "
+            "records `speaker` (whose utterance it was) and, optionally, `production` (who did "
+            "the intellectual work, as declared; null means nobody has declared). The first is "
+            "never evidence of the second. The same content from the same speaker returns the "
+            "existing memory unchanged; from another speaker it creates a separate record "
+            "linked as a restatement.",
             {
                 "type": "object",
                 "properties": {
@@ -1017,9 +1072,20 @@ def _tools() -> list[Any]:
     except ValueError:
         tools = [tool for tool in tools if tool.name != "stage"]
     attribution = {
-        "force": {"type": ["string", "null"], "description": "Illocutionary force of this act."},
-        "speaker": {"type": ["string", "null"], "description": "Whose act this records; no author is inferred."},
-        "production": {"type": ["object", "string", "null"], "description": "Optional declared intellectual contributors. Full typed object, or who [as Voice]: work [@ address] [basis]. Compact self requires a supplied session. Null means undeclared."},
+        "force": {"type": ["string", "null"], "enum": [*VALID_FORCES, None], "description": (
+            "Illocutionary force of the recorded act, which sets how it succeeds: assertive (a claim; true or false), "
+            "directive (a request or instruction; complied with or not), commissive (a promise; kept or not), "
+            "expressive (a stated attitude; sincere or not), declaration (an act that makes something so; "
+            "within the speaker's standing or not). Null or omitted is untagged and read as assertive.")},
+        "speaker": {"type": ["string", "null"], "description": (
+            "Whose act this records: the person's name for their words, this instance's name for its own "
+            "conclusions, an author's name for a quotation. No author is inferred; omitted records no speaker.")},
+        "production": {"type": ["object", "string", "null"], "description": (
+            "Who did the intellectual work, as declared. This is not the speaker. Omit or pass null when you "
+            "have not established it; null means undeclared and nothing is inferred. Pass the full object, "
+            "for example " + json.dumps(PRODUCTION_EXAMPLE, separators=(",", ":")) + ". The compact form "
+            "who [as Voice]: work [@ address] [basis] is accepted only when this server process has a session "
+            "to name as the declarer; a desktop app or hosted chat has none, and the compact form is refused there.")},
         "minted_in": {"type": ["object", "null"], "description": "Explicit mint context; otherwise gathered from supplied runtime evidence, with unknown fields null."},
     }
     for tool in tools:
@@ -1065,7 +1131,8 @@ async def _run_server(dsn: str) -> None:
         return [TextContent(type="text", text=text)]
 
     try:
-        init_opts = InitializationOptions(
+        init_opts = _initialization_options(
+            InitializationOptions,
             server_name="sill",
             server_version=_server_version(),
             capabilities=ServerCapabilities(tools=ToolsCapability()),

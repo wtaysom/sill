@@ -120,6 +120,7 @@ step_preflight() {
       return 1
     fi
   done
+  sill_require_python
   if (( ${#CLIENTS[@]} == 0 )); then
     if command -v claude >/dev/null 2>&1; then CLIENTS[0]=claude-code; fi
     if command -v codex >/dev/null 2>&1; then CLIENTS[${#CLIENTS[@]}]=codex; fi
@@ -135,6 +136,7 @@ step_install_backend() {
 step_prepare_instance() {
   if (( DRY_RUN )); then
     sill_preserve_embedding_identity --install
+    sill_database_notice install
     note "DRY: embedding profile $EMBEDDING_PROFILE (existing active profiles preserved)"
     note "DRY: would select the Compose instance and create a private $SILL_ENV_FILE if absent"
     return
@@ -143,6 +145,8 @@ step_prepare_instance() {
   if (( ${#CLIENTS[@]} )) || [[ -n "$HOOKS_FOR" || "$SCOPE" == home ]]; then mode=persist; fi
   sill_prepare_instance "$mode"
   sill_preserve_embedding_identity --install
+  # An installer rerun keeps an older database container exactly as it is.
+  sill_database_notice install
   sill_create_env_file
   if (( ${#CLIENTS[@]} )); then
     register_clients --dry-run

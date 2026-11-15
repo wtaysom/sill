@@ -336,7 +336,8 @@
     "supersede_memory",
     "sync_archive_status",
     "sync_goal_state",
-    "touch_memory_access"
+    "touch_memory_access",
+    "update_memory_importance"
   ],
   "v03_release": [
     {
@@ -760,6 +761,15 @@
       "arguments": "p_memory_id uuid",
       "result": "void",
       "settings": null
+    },
+    {
+      "namespace": "public",
+      "name": "update_memory_importance",
+      "arguments": "p_memory_id uuid, p_new_importance double precision, p_reason text",
+      "result": "boolean",
+      "settings": [
+        "search_path=public, ag_catalog"
+      ]
     }
   ]
 }

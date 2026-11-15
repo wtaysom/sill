@@ -30,6 +30,16 @@ for observed results and outstanding checks.
   with a receipt and cleans up its agent process group on timeout or
   interruption. Standalone receipt, dateline and link checks audit
   selected Markdown files. [Beat worker](docs/beats.md)
+- **Tell the connected model how to use memory.** The MCP server now sends
+  short instructions when a client connects, and the `remember` and `recall`
+  descriptions say what `speaker`, `force` and `production` mean. In a
+  client without hooks these are all the model is told. The concepts guide
+  gains a chapter on [memories as speech acts](docs/concepts.md#a-memory-is-a-speech-act).
+- **Resolve repeated memories before upgrading.** v0.2 could keep the same
+  content from the same speaker twice; v0.3 keeps one live copy. The dry
+  run now lists each pair and stops before anything changes.
+  `./upgrade.sh --archive-duplicates` archives the newer copy of each
+  after the backup.
 - **Verify AGE graphs after logical restore.** An explicit procedure for
   isolated PostgreSQL 16 / AGE 1.6 restore targets repairs retained source
   catalog OIDs, then checks every graph row through a fresh Cypher session.
@@ -47,22 +57,39 @@ for observed results and outstanding checks.
 ### Changed
 
 - **Upgrade the selected runtime.** `upgrade.sh` previews the plan,
-  validates a backup and applies pending migrations, including 008–015,
+  validates a backup and applies pending migrations, including 008–016,
   to the selected database. It reinstalls the package and recreates the
   maintenance worker. [Upgrade steps](README.md#upgrading)
 - **Published ports bind to loopback by default.** An explicit
   `SILL_BIND_ADDR` selects a different bind address. Managed installs
   select a pinned embeddings image for the Docker engine architecture.
 - **Use Bookworm for fresh database builds.** Managed upgrades and installer
-  reruns preserve the validated existing database container and image to
-  avoid an implicit collation change. Its OS/security state and container
-  settings remain until a separate backed-up migration; direct Compose
+  reruns preserve the validated existing database image and data volume to
+  avoid an implicit collation change. Its OS/security state remains until a
+  separate backed-up migration; direct Compose
   operations can bypass this preservation. [Upgrade steps](README.md#upgrading)
 - **Track recall exposure and explicit use separately.** Search results
   record exposure, while explicit retrieval by ID records use. Recall
   results continue to report the Reciprocal Rank Fusion `score`.
 
 ### Fixed
+
+- **Upgrade a default v0.2 install.** The upgrade no longer needs a
+  `backend/.env` to exist; it creates an empty private one. It reads the
+  loaded embedding snapshot from the service's model cache when TEI
+  `/info` reports none, which is the case for every stack started without
+  a revision.
+- **`update_importance` works.** The function wrote its audit row to a
+  schema where the table does not exist, so the MCP tool always failed.
+  Migration 016 fixes the target.
+- **Check the Python interpreter before installing.** `install.sh`,
+  `upgrade.sh` and `verify.sh` stop with the path and version found when
+  `python3` is older than 3.10. An old pipx default interpreter is
+  overridden for the install, and a fallback environment left by an older
+  or removed Python is rebuilt.
+- **Receipt audit on Python 3.10.** The Docker route parsed the store's
+  timestamps in a form 3.10 rejects and reported every lookup as an
+  unreachable store.
 
 - **Failed store recall is visible.** The hook reports query errors, a missing
   Docker executable and timeouts in the host's status message, with details in
@@ -71,6 +98,14 @@ for observed results and outstanding checks.
 
   Contributed by Adeh DeSandies ([@adevadeh](https://github.com/adevadeh)), branch `fix/visible-store-outage`.
 
+- **Close the database port an older install left open.** v0.2 published
+  PostgreSQL on every network interface with trust authentication and no
+  restart policy, and an upgraded store kept that container. `upgrade.sh`
+  now says so in the dry run, then stops the database, keeps a second copy
+  of its data volume, and starts a new container from the same image on the
+  same volume, published on `127.0.0.1` only and restarting unless stopped.
+  Set `SILL_BIND_ADDR=0.0.0.0` first to keep it reachable from other
+  machines. [Closing the database port](README.md#closing-the-database-port)
 - **Compose services resume after the container engine restarts.** The
   database, embeddings, RabbitMQ and maintenance worker use `unless-stopped`
   and honor a deliberate `docker compose stop`. Set `SILL_RESTART_POLICY=no` to

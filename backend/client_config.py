@@ -234,11 +234,20 @@ def _render(path: Path, body: str, client: str, env_file: Path, command: Path,
 
 
 def register_client(client: str, env_file: Path, command: Path, *,
-                    dry_run: bool = False, adopt_legacy: bool = False) -> str:
+                    dry_run: bool = False, adopt_legacy: bool = False,
+                    pending_env_file: bool = False) -> str:
     path = client_config_path(client)
     try:
-        load_instance_env(env_file)
-        env_file = env_file.resolve(strict=True)
+        if pending_env_file and dry_run and not (env_file.exists() or env_file.is_symlink()):
+            # upgrade.sh previews before it creates an absent instance file;
+            # an empty one has nothing to validate. Registration itself still
+            # requires the file.
+            if not env_file.is_absolute():
+                raise InstanceConfigError(f"{env_file}: --env-file requires an absolute path")
+            env_file = env_file.parent.resolve(strict=True) / env_file.name
+        else:
+            load_instance_env(env_file)
+            env_file = env_file.resolve(strict=True)
         if not command.is_absolute() or not command.is_file() or not os.access(command, os.X_OK):
             raise ClientConfigError(
                 f"{path}: --mcp-command must name an absolute executable file ({command})"

@@ -142,3 +142,31 @@ jobs:
           name: native-linux-runtime-evidence
           path: ${{ runner.temp }}/sill-native-evidence
           if-no-files-found: error
+
+  v02-default-upgrade:
+    name: default v0.2 install upgraded in place (Linux amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The rehearsal clones this checkout and starts from the v0.2.0 tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No backend/.env, default names and ports, embeddings started without a
+      # revision, a bare sill-mcp client entry and one repeated memory: the
+      # install v0.2's own installer leaves, which the other jobs do not meet.
+      - name: Required upgrade rehearsal from a default v0.2.0 install
+        run: python -I .github/scripts/v02_upgrade_rehearsal.py "${RUNNER_TEMP}/sill-v02-upgrade-evidence"
+      - name: Save installer, upgrade, MCP and container evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v02-default-upgrade-evidence
+          path: ${{ runner.temp }}/sill-v02-upgrade-evidence
+          if-no-files-found: error

@@ -92,7 +92,7 @@ constructor enum cast, and the callable tests exercise first goal creation.
 
 Actual v0.1 init has no migration ledger; v0.2 has `ag_catalog.schema_migrations`
 001–007. The transaction-aware runner upgrades these without creating a second
-ledger. Fresh and both upgraded routes must contain exactly 001–015 in the same
+ledger. Fresh and both upgraded routes must contain exactly 001–016 in the same
 namespace, identical schema definitions and affected callable contracts, and
 preserve synthetic identity/charter references, historical data and RRF scores.
 Missing image configuration skips an explicitly local run. With

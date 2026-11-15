@@ -261,7 +261,7 @@ def snapshot(docker, owned, checkout, pack, store):
                                 "-XAt", "-v", "ON_ERROR_STOP=1", "-U", "sill", "-d", "sill", "-c", sql))
 
     ledger = db("SELECT json_agg(migration_id ORDER BY migration_id) FROM ag_catalog.schema_migrations WHERE source='initdb'")
-    require(ledger == [f"{i:03}" for i in range(1, 16)]
+    require(ledger == [f"{i:03}" for i in range(1, 17)]
             and db("SELECT count(*) FROM ag_catalog.schema_migrations") == len(ledger),
             "unexpected migration ledger")
     profile = db("""SELECT json_build_object('profile',profile,'provenance',provenance,

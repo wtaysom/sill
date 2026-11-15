@@ -48,7 +48,7 @@ def snapshot(tmp_path, pack):
 
     def capture(rows, store):
         responses = iter([
-            [f"{i:03}" for i in range(1, 16)], 15,
+            [f"{i:03}" for i in range(1, 17)], 16,
             dict(profile=profile, fingerprint="fixture-fingerprint",
                  provenance={"historical_identity": "declared-unverified"}),
             [operation], identity, rows,

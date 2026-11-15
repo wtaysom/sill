@@ -115,9 +115,12 @@ The temporary hosted connection is intentionally retained at the operator's
 request, with its test client, private plugin and one-day runtime key.
 
 Fresh builds use Bookworm. Managed upgrades and installer reruns preserve
-the existing database container to avoid silently changing its collation
-runtime. That also retains its OS/security state, ports and restart settings
-until a separately planned, backed-up migration. Direct Compose operations
+the existing database image and data volume to avoid silently changing its
+collation runtime. That also retains its OS/security state until a separately
+planned, backed-up migration. After the rehearsals recorded here, `upgrade.sh`
+gained one exception for a container that still publishes its port on every
+interface: it is replaced from the same image on the same volume, and CI's
+default-v0.2 upgrade job checks the result. Direct Compose operations
 can bypass this preservation path. The frozen baseline's known generated
 `dedupe_key` initialization error remains recorded; successful validation
 is not a claim of an error-free initialization log.

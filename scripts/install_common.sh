@@ -27,6 +27,74 @@ sill_run() {
   fi
 }
 
+# --- Python interpreters ------------------------------------------------------
+# Three interpreters can be in play, and on a Mac they often differ: python3
+# on PATH runs these scripts' helpers and builds the fallback venv; pipx may
+# build the package's environment with another; and an environment left by an
+# earlier run may point at a third, or at one that has since been removed.
+# Each is checked where it is used, and each message names the file it means.
+
+sill_python_ok() {
+  "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+sill_python_describe() {
+  "$1" -c 'import platform, sys; print("%d.%d.%d, %s" % (sys.version_info[:3] + (platform.machine(),)))' 2>/dev/null ||
+    printf 'not runnable'
+}
+
+sill_require_python() {
+  local path minor found=0
+  if ! path="$(command -v python3)"; then
+    printf 'Sill needs Python 3.10 or newer, and there is no python3 on PATH.\n' >&2
+    return 1
+  fi
+  if sill_python_ok "$path"; then
+    printf 'Python: %s (%s)\n' "$path" "$(sill_python_describe "$path")"
+    if [[ "$(uname -s)" == Darwin && "$(sysctl -n hw.optional.arm64 2>/dev/null)" == 1 &&
+          "$(sill_python_describe "$path")" == *x86_64 ]]; then
+      printf '  Note: this is an Intel build of Python running under Rosetta. Sill works with it; a native arm64 Python is faster.\n'
+    fi
+    return 0
+  fi
+  printf 'Sill needs Python 3.10 or newer. python3 on PATH is %s (%s).\n' "$path" "$(sill_python_describe "$path")" >&2
+  # Newest first, with room for releases that do not exist yet.
+  for (( minor = 30; minor >= 10; minor-- )); do
+    if path="$(command -v "python3.$minor" 2>/dev/null)" && sill_python_ok "$path"; then
+      printf '  %s is new enough. Put its directory first on PATH so that python3 means it, then rerun.\n' "$path" >&2
+      found=1
+    fi
+  done
+  if (( ! found )); then
+    printf '  No newer python3.x was found on PATH. Install one (python.org, or: brew install python), open a new terminal, then rerun.\n' >&2
+  fi
+  return 1
+}
+
+# pipx builds new environments with its own default interpreter, which is the
+# one pipx itself was installed under unless PIPX_DEFAULT_PYTHON says otherwise.
+sill_pipx_python() {
+  local default
+  default="$(pipx environment --value PIPX_DEFAULT_PYTHON 2>/dev/null)" || return 0
+  [[ -n "$default" ]] || return 0
+  if ! sill_python_ok "$default"; then
+    export PIPX_DEFAULT_PYTHON="$(command -v python3)"
+    printf 'pipx would build with %s (%s); using %s for this install instead.\n' \
+      "$default" "$(sill_python_describe "$default")" "$PIPX_DEFAULT_PYTHON"
+  fi
+}
+
+sill_check_installed_python() {
+  local python="$1"
+  if ! sill_python_ok "$python"; then
+    printf 'The installed Sill environment runs %s (%s); it needs Python 3.10 or newer.\n' \
+      "$python" "$(sill_python_describe "$python")" >&2
+    printf '  Remove that environment (pipx uninstall sill-memory, or delete %s), then rerun.\n' \
+      "$HOME/.local/share/sill-venv" >&2
+    return 1
+  fi
+}
+
 sill_pipx_venvs() {
   local path
   path="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null)" || return 1
@@ -84,6 +152,7 @@ sill_python() {
 sill_install_backend() {
   local dir venv="$HOME/.local/share/sill-venv" localbin="$HOME/.local/bin" name
   if command -v pipx >/dev/null 2>&1; then
+    sill_pipx_python
     sill_run pipx install --force -e "$SILL_BACKEND" || return 1
     if (( ! ${DRY_RUN:-0} )); then
       # Do not accept a stale fallback venv if pipx did not expose this install.
@@ -93,11 +162,22 @@ sill_install_backend() {
         printf 'pipx did not expose the Sill package in its configured environment.\n' >&2
         return 1
       fi
+      sill_check_installed_python "$dir/python" || return 1
     fi
     return
   fi
-  sill_run python3 -m venv "$venv" || return 1
+  if [[ -e "$venv/bin/python" || -L "$venv/bin/python" ]] && ! sill_python_ok "$venv/bin/python"; then
+    # Left by an earlier run under an older Python, or its interpreter has
+    # since been removed. Building over it would keep the old interpreter.
+    printf 'Rebuilding %s: its interpreter is %s.\n' "$venv" "$(sill_python_describe "$venv/bin/python")"
+    sill_run python3 -m venv --clear "$venv" || return 1
+  else
+    sill_run python3 -m venv "$venv" || return 1
+  fi
   sill_run "$venv/bin/python" -m pip install -e "$SILL_BACKEND" || return 1
+  if (( ! ${DRY_RUN:-0} )); then
+    sill_check_installed_python "$venv/bin/python" || return 1
+  fi
   sill_run mkdir -p "$localbin" || return 1
   for name in sill sill-mcp sill-worker; do
     if [[ -e "$localbin/$name" || -L "$localbin/$name" ]] &&
@@ -411,9 +491,248 @@ sill_capture_database_identity() {
     return 1
   fi
   if [[ -z "$SILL_DATABASE_IDENTITY" && -n "$observed" ]]; then
-    printf 'Retaining the existing database container and immutable image. PostgreSQL/OS security updates, ports and restart settings are unchanged; an OS refresh needs a separate backed-up migration.\n'
+    printf 'Retaining the existing database image and data volume. PostgreSQL/OS security updates are unchanged; an OS refresh needs a separate backed-up migration.\n'
   fi
   SILL_DATABASE_IDENTITY="$observed"
+}
+
+# --- a database container from before this checkout's settings ----------------
+# v0.2 published PostgreSQL on every interface, with trust authentication and
+# no restart policy. upgrade.sh closes that. The decision is made by
+# scripts/upgrade_runtime.py (database_plan); the functions below report it
+# and carry it out.
+#
+# SILL_DATABASE_STEP says what this run has done to the database container, so
+# that every exit, an interrupt included, can say what is true:
+#   ""         nothing, or finished: the recorded identity names the database
+#   stopped    this run stopped it; the old container still exists
+#   replacing  Compose was asked to replace it; either container may exist
+#   failed     it is not as this run found it, and the messages have said how
+SILL_DATABASE_STEP=""
+SILL_DATABASE_STEP_CONTAINER=""
+SILL_DATABASE_COPY=""
+SILL_DATABASE_COPY_HELPER=""
+
+sill_database_plan() {
+  sill_compose config --format json |
+    "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" --database-plan "$SILL_DATABASE_IDENTITY"
+}
+
+sill_plan_field() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+v = json.load(sys.stdin).get(sys.argv[1])
+print(", ".join(v) if isinstance(v, list) else "1" if v is True else "" if v is None or v is False else v)' "$2"
+}
+
+# Read-only: say what the upgrade will do, before the backup and in a dry run.
+# install.sh keeps the container whatever it finds, and says how to change that.
+sill_database_notice() {
+  local mode="${1:-upgrade}" plan action
+  [[ -n "$SILL_DATABASE_IDENTITY" ]] || return 0
+  plan="$(sill_database_plan)" || return 1
+  action="$(sill_plan_field "$plan" action)" || return 1
+  case "$action" in
+    recreate|blocked)
+      printf 'The database container publishes port 5432 on every network interface (%s) and accepts connections without a password.\n' "$(sill_plan_field "$plan" published)"
+      if [[ "$mode" == install ]]; then
+        printf '  install.sh leaves it that way. Run ./upgrade.sh to close the port.\n'
+      elif [[ "$action" == recreate ]]; then
+        printf '  After the backup, the upgrade will stop it, keep a copy of its data volume, and start a new container from the same image on the same volume, published on %s only and restarting %s.\n' \
+          "$(sill_plan_field "$plan" bind)" "$(sill_plan_field "$plan" restart)"
+        printf '  To keep it reachable from other machines, set SILL_BIND_ADDR=0.0.0.0 in %s before upgrading.\n' "$SILL_ENV_FILE"
+      else
+        printf '  The upgrade will leave it that way: it could not prove that %s is the image this database runs on, so a new container might not be an equivalent one. See "Closing the database port" in README.md.\n' "$(sill_plan_field "$plan" tag)"
+      fi
+      ;;
+    restart)
+      if [[ "$mode" != install ]]; then
+        printf 'The database container restarts "%s"; the upgrade will set that to %s in place.\n' \
+          "$(sill_plan_field "$plan" restart_now)" "$(sill_plan_field "$plan" restart)"
+      fi
+      ;;
+  esac
+}
+
+# The old container still exists, stopped by this run: put the database back.
+# Returns 1 when it is running again as it was, 2 when it is not.
+sill_database_restore() {
+  local container="$1"
+  if sill_compose start db >/dev/null 2>&1 &&
+     [[ "$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" == true ]]; then
+    SILL_DATABASE_STEP=""
+    printf 'The database was started again as it was.\n' >&2
+    return 1
+  fi
+  SILL_DATABASE_STEP=failed
+  printf 'The database container %s is stopped and could not be started again. This step did not change its data volume. Start it with: docker start %s\n' \
+    "$container" "$container" >&2
+  return 2
+}
+
+# The replacement is not usable. Stop it, so that nothing keeps restarting on
+# the volume, and say only what is known.
+sill_database_abandon() {
+  local container="$1" copy="$2" env_file="$SILL_ENV_FILE"
+  [[ -e "$env_file" || -L "$env_file" ]] || env_file=/dev/null
+  SILL_DATABASE_STEP=failed
+  sill_compose stop -t 120 db >/dev/null 2>&1 || true
+  printf 'The database is stopped. No migration has run, and the installed package and the worker image are the ones from before.\n' >&2
+  printf 'A copy of its data volume, made before this change with the database stopped, is in the Docker volume %s.\n' "$copy" >&2
+  printf 'See what the container reported with: docker logs %s\n' "$container" >&2
+  printf 'Start it with: docker compose --project-directory %q --env-file %q -f %q up -d --no-build --no-deps db\n' \
+    "$SILL_BACKEND" "$env_file" "$COMPOSE_FILE" >&2
+  printf 'Then run ./upgrade.sh again.\n' >&2
+}
+
+# After the backup and before the package, images or schema change.
+# $1 names this run (the backup's stamp); $2 is the plan upgrade.sh acted on.
+# Returns 0 when done or not needed, 1 when the database is as it was, and 2
+# when it is not and the messages say how.
+sill_secure_database() {
+  local stamp="$1" plan="$2" action container image tag volume copy restart old id status adopted
+  local started timeout="${SILL_INSTALL_WAIT_HEALTHY_S:-$SILL_WAIT_HEALTHY_DEFAULT}"
+  action="$(sill_plan_field "$plan" action)" || return 1
+  container="$(sill_plan_field "$plan" container)" || return 1
+  restart="$(sill_plan_field "$plan" restart)" || return 1
+  case "$action" in
+    keep) return 0 ;;
+    restart|blocked)
+      if [[ -n "$(sill_plan_field "$plan" restart_differs)" ]]; then
+        if ! docker update --restart "$restart" "$container" >/dev/null; then
+          printf 'Could not set the restart policy of %s.\n' "$container" >&2
+          return 1
+        fi
+        printf 'Database container %s now restarts %s.\n' "$container" "$restart"
+      fi
+      if [[ "$action" == blocked ]]; then
+        printf 'WARNING: %s still publishes port 5432 on every network interface without a password. See "Closing the database port" in README.md.\n' "$container" >&2
+      fi
+      return 0
+      ;;
+    recreate) ;;
+    *) printf 'Unknown database plan: %s\n' "$action" >&2; return 1 ;;
+  esac
+  if [[ ! "$timeout" =~ ^[1-9][0-9]*$ || "${#timeout}" -gt 8 ]]; then
+    printf 'Readiness timeout must be a positive integer number of seconds.\n' >&2
+    return 1
+  fi
+  image="$(sill_plan_field "$plan" image)" || return 1
+  tag="$(sill_plan_field "$plan" tag)" || return 1
+  volume="$(sill_plan_field "$plan" volume)" || return 1
+  old="$(sill_plan_field "$plan" container_id)" || return 1
+  copy="${volume}_before_${stamp}"
+  SILL_DATABASE_STEP_CONTAINER="$container"
+
+  printf 'Closing the database port. Stopping %s.\n' "$container"
+  SILL_DATABASE_STEP=stopped
+  # Compose's default is ten seconds and then SIGKILL; a shutdown checkpoint can take longer.
+  if ! sill_compose stop -t 120 db; then
+    printf 'Could not stop the database.\n' >&2
+    sill_database_restore "$container"
+    return $?
+  fi
+
+  # The second copy is made with the database stopped, by the image it runs
+  # on, so it is the same files with the same owner and modes. The helper is
+  # named so that an interrupted copy can be removed rather than left running.
+  printf 'Copying its data volume %s to %s.\n' "$volume" "$copy"
+  SILL_DATABASE_COPY="$copy"
+  SILL_DATABASE_COPY_HELPER="sill_copy_${stamp}"
+  if ! docker run --rm --name "$SILL_DATABASE_COPY_HELPER" --network none \
+       -v "$volume:/from:ro" -v "$copy:/to" "$image" \
+       sh -c 'cp -a /from/. /to/ && chown --reference=/from /to && chmod --reference=/from /to' </dev/null; then
+    printf 'Could not copy the database volume.\n' >&2
+    sill_discard_database_copy
+    sill_database_restore "$container"
+    return $?
+  fi
+  SILL_DATABASE_COPY=""
+  SILL_DATABASE_COPY_HELPER=""
+
+  # The tag could have been pointed at another image while the copy ran.
+  if [[ "$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null)" != "$image" ]]; then
+    printf '%s no longer names the image this database runs on; the container was not replaced. The copy in %s is complete and can be removed.\n' "$tag" "$copy" >&2
+    sill_database_restore "$container"
+    return $?
+  fi
+
+  SILL_DATABASE_STEP=replacing
+  # --no-build: only the existing image, just checked. No terminal: Compose
+  # must never be able to ask a question about the data volume.
+  if ! sill_compose up -d --no-build --no-deps db </dev/null; then
+    if [[ "$(docker inspect --format '{{.Id}}' "$container" 2>/dev/null)" == "$old" ]]; then
+      printf 'Compose did not replace the container.\n' >&2
+      sill_database_restore "$container"
+      return $?
+    fi
+    sill_database_abandon "$container" "$copy"
+    return 2
+  fi
+
+  # The ledger is still the old one, so sill_wait_healthy would refuse it.
+  started="$SECONDS"
+  while :; do
+    status=missing
+    if id="$(sill_compose ps -a -q db 2>/dev/null)" && [[ -n "$id" ]]; then
+      status="$(docker inspect --format '{{.State.Status}}{{if .State.Health}} {{.State.Health.Status}}{{end}}' "$id" 2>/dev/null)" || status=unavailable
+    fi
+    printf '  [%ss] db: %s\n' "$(( SECONDS - started ))" "${status#running }"
+    case "$status" in
+      'running healthy') break ;;
+      # With a restart policy a server that exits shows as restarting, not exited.
+      missing|unavailable|dead*|exited*|paused*|restarting*|removing*|'running unhealthy')
+        printf 'The recreated database reached state: %s.\n' "$status" >&2
+        sill_database_abandon "$container" "$copy"
+        return 2
+        ;;
+    esac
+    if (( SECONDS - started >= timeout )); then
+      printf 'The recreated database was not healthy after %ss (%s).\n' "$timeout" "$status" >&2
+      sill_database_abandon "$container" "$copy"
+      return 2
+    fi
+    sleep 2
+  done
+
+  if ! adopted="$(sill_compose config --format json |
+       "$(sill_python)" -I "$SILL_DIR/scripts/upgrade_runtime.py" "$SILL_ENV_FILE" --adopt-recreated "$SILL_DATABASE_IDENTITY")"; then
+    printf 'The new container is not the same image on the same volume with the planned settings.\n' >&2
+    sill_database_abandon "$container" "$copy"
+    return 2
+  fi
+  SILL_DATABASE_IDENTITY="$adopted"
+  SILL_DATABASE_STEP=""
+  printf 'Database recreated from the same image on the same volume: published on %s only, restarting %s.\n' \
+    "$(sill_plan_field "$plan" bind)" "$restart"
+  printf 'Its data as it was before this upgrade is kept in the Docker volume %s. Remove that volume when you no longer want it.\n' "$copy"
+}
+
+# A copy that did not finish must not be left under the name of a good one.
+sill_discard_database_copy() {
+  local copy="$SILL_DATABASE_COPY" helper="$SILL_DATABASE_COPY_HELPER"
+  SILL_DATABASE_COPY=""
+  SILL_DATABASE_COPY_HELPER=""
+  [[ -n "$copy" ]] || return 0
+  if [[ -n "$helper" ]]; then docker rm -f "$helper" >/dev/null 2>&1 || true; fi
+  if ! docker volume rm "$copy" >/dev/null 2>&1; then
+    printf 'The incomplete copy in the Docker volume %s could not be removed. Do not rely on it; remove it with: docker volume rm %s\n' "$copy" "$copy" >&2
+  fi
+}
+
+# For an EXIT trap. The step's own failures have already spoken; this covers
+# an interrupt that arrives while it holds the database stopped.
+sill_interrupted_database_step() {
+  case "$SILL_DATABASE_STEP" in
+    stopped)
+      printf 'Interrupted while the database was stopped for this upgrade.\n' >&2
+      sill_discard_database_copy
+      sill_database_restore "$SILL_DATABASE_STEP_CONTAINER" || true
+      ;;
+    replacing)
+      SILL_DATABASE_STEP=failed
+      printf 'Interrupted while the database container was being replaced. Check it with: docker ps -a --filter name=%s\n' "$SILL_DATABASE_STEP_CONTAINER" >&2
+      ;;
+  esac
 }
 
 sill_check_database_identity() {

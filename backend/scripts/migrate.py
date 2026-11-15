@@ -191,6 +191,66 @@ def inspect_state(db, directory):
     return {"ledger_schema": schema, "create_ledger": not ledgers, "applied": applied, "pending": pending, "dimension": dim}
 
 
+def duplicate_groups(db, state):
+    """Live memories that migration 010 will refuse, oldest first in each group.
+
+    010 makes a live utterance unique by speaker and content and stops if two
+    already exist. It runs after earlier pending migrations have committed and
+    the new package is installed, so the same question is asked here, while
+    nothing has changed. Migrations 001-009 alter no row's speaker, content or
+    archive state, and before 001 there is no speaker: every row has none.
+    """
+    if "010" not in state["pending"]:
+        return []
+    # A constant cannot be a GROUP BY key, so the no-speaker case names content alone.
+    key = "coalesce(speaker,''), md5(content)" if state["applied"] else "md5(content)"
+    return json.loads(db.query(
+        "SELECT COALESCE(json_agg(g ORDER BY g->0->>'created', g->0->>'id'), '[]') FROM ("
+        "SELECT json_agg(json_build_object('id', id::text, 'created', "
+        "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) ORDER BY created_at, id) AS g "
+        f"FROM public.memories WHERE archived_at IS NULL GROUP BY {key} HAVING count(*) > 1) d"))
+
+
+def duplicate_report(groups):
+    lines = []
+    for group in groups:
+        keep, extra = group[0], group[1:]
+        lines.append(f"  keep {keep['id']} ({keep['created']}); newer: "
+                     + ", ".join(f"{row['id']} ({row['created']})" for row in extra))
+    return "\n".join(lines)
+
+
+def check_duplicates(groups, archive):
+    """Refuse before anything changes, or say what the explicit choice will do."""
+    if not groups:
+        return
+    count = sum(len(group) - 1 for group in groups)
+    if not archive:
+        raise ValueError(
+            f"{len(groups)} group(s) of live memories repeat the same content from the same speaker.\n"
+            + duplicate_report(groups) + "\n"
+            "Migration 010 keeps one live copy per speaker, so the upgrade stopped here; nothing changed.\n"
+            "Review them, then archive the copies you do not want, or rerun with --archive-duplicates "
+            f"to archive the {count} newer one(s) after the backup. Archived memories stay in the database.")
+    print(f"--archive-duplicates: {count} newer copy(ies) will be archived after the backup; the oldest in each group stays live.\n"
+          + duplicate_report(groups), file=sys.stderr)
+
+
+def archive_duplicates_sql(groups):
+    """One transaction that archives exactly the reviewed newer copies."""
+    if not groups:
+        return ""
+    lines = ["BEGIN;", "SET LOCAL search_path = public, ag_catalog;"]
+    for group in groups:
+        keep = uuid.UUID(group[0]["id"])
+        for row in group[1:]:
+            # status is set as well: stores older than migration 003 have no trigger syncing it.
+            lines.append("UPDATE public.memories SET status='archived', archived_at=now(), "
+                         f"archive_reason='duplicate of {keep}' WHERE id='{uuid.UUID(row['id'])}' AND archived_at IS NULL;")
+    count = sum(len(group) - 1 for group in groups)
+    return "\n".join(lines + ["COMMIT;", f"\\echo Archived {count} duplicate memories"]) + "\n"
+
+
 def admin_database(database):
     return "template1" if database == "postgres" else "postgres"
 
@@ -224,7 +284,7 @@ def restore_fence(args, marker, admin):
     args.recovery_file.unlink()
 
 
-def apply_fenced(args, db, state, identity, admin):
+def apply_fenced(args, db, state, identity, admin, duplicates=()):
     if not state["pending"]:
         return
     args.recovery_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -242,7 +302,8 @@ def apply_fenced(args, db, state, identity, admin):
     finally:
         os.unlink(temporary)
     print(f"Recovery marker: {args.recovery_file}\nIf interrupted: {recovery_command(args)}", flush=True)
-    script = ""
+    # Runs in the fenced migration session, in its own transaction, first.
+    script = archive_duplicates_sql(duplicates)
     applied = state["applied"][:]
     for path in sorted(args.migrations.glob("[0-9][0-9][0-9]_*.sql"))[len(applied):]:
         script += atomic_sql(path, state["ledger_schema"], applied, state["create_ledger"] and not applied)
@@ -299,6 +360,8 @@ def main(argv=None):
     parser.add_argument("--database", default="sill")
     parser.add_argument("--migrations", type=Path, required=True)
     parser.add_argument("--recovery-file", type=Path)
+    parser.add_argument("--archive-duplicates", action="store_true",
+                        help="Archive the newer copy of each repeated live memory before migration 010")
     args = parser.parse_args(argv)
     if args.recovery_file is None:
         args.recovery_file = args.migrations.resolve().parents[1] / "backups/.upgrade-fence.json"
@@ -317,11 +380,15 @@ def main(argv=None):
         raise ValueError("Upgrade needs a superuser, an accessible admin database, and the selected database accepting connections")
     db = Database(args.container, args.user, args.database)
     state = inspect_state(db, args.migrations)
+    # Reported on stderr and by exit status; the printed state stays the same
+    # shape, because upgrade.sh compares it before and after a failed apply.
+    duplicates = duplicate_groups(db, state)
+    check_duplicates(duplicates, args.archive_duplicates)
     if args.action == "preflight":
         print(json.dumps(state))
         return
     try:
-        apply_fenced(args, db, state, identity, admin)
+        apply_fenced(args, db, state, identity, admin, duplicates)
     except subprocess.CalledProcessError:
         ledger = f'{ident(state["ledger_schema"])}.schema_migrations'
         exists = db.query("SELECT to_regclass('" + ledger.replace("'", "''") + "') IS NOT NULL") == "t"

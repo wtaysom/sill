@@ -17,6 +17,8 @@ set -euo pipefail
 # shellcheck source=scripts/install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/scripts/install_common.sh"
 
+sill_require_python >/dev/null || exit 1
+
 NO_SEED=0
 RUNTIME_ONLY=0
 while (( $# )); do

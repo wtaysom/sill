@@ -74,6 +74,7 @@ def _cmd_connect(args: argparse.Namespace, _extra: list[str]) -> int:
         status = register_client(
             args.client, args.env_file, command,
             dry_run=args.dry_run, adopt_legacy=args.adopt_legacy,
+            pending_env_file=args.pending_env_file,
         )
     except ClientConfigError as exc:
         print(f"sill connect: {exc}", file=sys.stderr)
@@ -170,6 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
     connect.add_argument("--mcp-command", type=Path, help="Absolute path to the sill-mcp executable")
     connect.add_argument("--dry-run", action="store_true", help="Validate registration without changing files")
     connect.add_argument("--adopt-legacy", action="store_true", help="Replace an ambiguous bare sill-mcp entry")
+    # For upgrade.sh's dry run, which previews before creating an absent file.
+    connect.add_argument("--pending-env-file", action="store_true", help=argparse.SUPPRESS)
     connect.set_defaults(func=_cmd_connect)
 
     from uuid import UUID

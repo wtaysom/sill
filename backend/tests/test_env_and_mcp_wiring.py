@@ -446,6 +446,10 @@ def run_instance_server(tmp_path, monkeypatch, capsys, env_body=None, extra=(), 
         response = types.JSONRPCResponse.model_validate_json(messages[0])
         assert response.id == 1
         assert response.result["serverInfo"]["name"] == "sill"
+        # The guidance is useful only if the real SDK puts it on the wire.
+        from mcp.server.models import InitializationOptions
+        if "instructions" in InitializationOptions.model_fields:
+            assert response.result["instructions"] == server.SERVER_INSTRUCTIONS
     else:
         assert captured.out == ""
     return status, seen, captured.err, env_file

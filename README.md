@@ -14,6 +14,11 @@ Install Git, Python 3.10 or later, and a Docker engine with Compose.
 Start Docker and sign in to the client you want to use. If you already
 use Sill, follow [Upgrading](#upgrading).
 
+A Mac's own `python3` is 3.9. The installer checks the `python3` on your
+`PATH` first and stops with the path and version it found if that is too
+old; install a newer one (python.org, or `brew install python`) and open
+a new terminal.
+
 For Claude Desktop on macOS, run the commands below. On macOS or Linux,
 use `--client claude-code` for Claude Code or `--client codex` for Codex CLI
 in the install command.
@@ -76,6 +81,27 @@ git pull
 ./upgrade.sh
 ```
 
+Coming from v0.2, the dry run will raise up to two things, and both are
+settled by a flag you add to both commands:
+
+- **Your client entry is a bare `sill-mcp`.** v0.2 registered it without
+  saying which database it meant. Once you have confirmed it uses this
+  one, add `--adopt-legacy`.
+- **The same speaker stored the same content twice.** v0.3 keeps one live
+  copy per speaker, and v0.2 could keep two. The dry run lists each pair
+  and stops. Archive the copies you do not want yourself, or add
+  `--archive-duplicates` to archive the newer copy of each after the
+  backup is taken. Archived memories stay in the database.
+
+A v0.2 install that ran on defaults has no `backend/.env`. The upgrade
+creates an empty private one, which means the same defaults, and records
+the embedding identity in it.
+
+A v0.2 database also publishes its port on every network interface and
+accepts connections without a password. The upgrade closes that port and
+keeps a second copy of the data; see
+[Closing the database port](#closing-the-database-port).
+
 `upgrade.sh` checks the selected instance and writes a validated private
 archive under `backups/preupgrade-*.sql.gz` before changing the runtime.
 It rebuilds the worker, reinstalls the package, applies pending migrations, and
@@ -89,13 +115,12 @@ reported failure. A backup can be used for recovery into an empty
 database after confirming the target and keeping the original data.
 
 Fresh installs build PostgreSQL 16 on Debian Bookworm. Managed upgrades and
-installer reruns retain the existing database container and immutable image,
-checking its identity and Compose/volume ownership before runtime changes and
+installer reruns retain the existing database image and data volume,
+checking their identity and Compose/volume ownership before runtime changes and
 at completion. Missing, replaced or stopped databases are refused; start a
 stopped database with its existing container/configuration before retrying.
 The existing PostgreSQL/OS image receives no security updates through this
-application upgrade, and its port bindings and restart policy remain unchanged.
-Older Bullseye PostgreSQL packages are EOL. Moving an existing database to a new
+application upgrade. Older Bullseye PostgreSQL packages are EOL. Moving an existing database to a new
 OS image needs a separate backed-up migration that handles collation changes;
 this command does not perform that migration or refresh collation versions.
 Do not use direct `docker compose build/up` to upgrade an existing database:
@@ -115,8 +140,12 @@ service with its prior configuration and resolve the reported mismatch. Changing
 embedding spaces requires the explicit [profile migration](docs/EMBEDDING-PROFILES.md),
 not an installer rerun. This records the current service identity; it does not
 attest unknown historical vectors or activate a profile. An omitted revision is
-pinned from the running TEI `/info` immutable `model_sha`, including when the
-old container used `main`. An explicit symbolic revision is left untouched, but
+pinned to the snapshot the running service loaded. TEI `/info` reports that
+hash only when the service was started with one; a v0.2 stack was not, so the
+upgrade reads the hash from the service's model cache, which records the one
+snapshot that `main` resolved to when the model was downloaded. If the cache
+holds several, the message lists them and asks you to set `EMBEDDING_REVISION`
+to the one your vectors came from. An explicit symbolic revision is left untouched, but
 a restart refuses it: a matching label cannot prove the same loaded snapshot.
 To retain that space, explicitly set the reported SHA in `EMBEDDING_REVISION`
 and remove conflicting shell overrides before retrying. A stopped or unavailable
@@ -129,6 +158,60 @@ The older `~/.claude/.mcp.json` is a file Claude Code never reads. For a
 bare `sill-mcp` entry in a current registry, confirm its database before
 using `--adopt-legacy`. Restart the clients after upgrading and repeat
 the memory check before resuming the schedule.
+
+### Closing the database port
+
+v0.2 published PostgreSQL on every network interface, with trust
+authentication and no restart policy. On a shared network, another machine
+could read and change the store without a password, and the database did
+not come back after a reboot. v0.3 publishes on `127.0.0.1` and restarts
+unless stopped, but a port binding cannot be changed on an existing
+container.
+
+So `upgrade.sh` replaces the container and nothing else. The dry run says it
+will. After the backup, and before the package, images or schema change, it:
+
+1. stops the worker and the database;
+2. copies the database's data volume, with the database's own image, to a
+   second volume named `<volume>_before_<backup timestamp>`;
+3. starts a new container from the same image on the same volume, with this
+   checkout's port and restart settings, and waits for it to be healthy.
+
+It does this only when the image Compose would start is the one the database
+already runs on, and it checks that again after the copy. If the database
+cannot be stopped or copied, or Compose does not replace the container, the
+old container is started again and the upgrade stops. If a new container
+was created but does not come up healthy with the planned settings, the
+upgrade stops it and says where the copy is and how to start the database.
+In every case no migration has run, and the package and worker image are
+still the old ones.
+
+The second volume is the complete database as it was before the upgrade,
+at the old schema. The upgrade never reads it again. Keep it until you
+trust the upgraded store, then remove it:
+
+```bash
+docker volume ls --filter name=_before_
+docker volume rm <that volume>
+```
+
+Two cases leave the container as it is, apart from setting its restart
+policy in place:
+
+- **You want other machines to reach it.** Set `SILL_BIND_ADDR=0.0.0.0` in
+  `backend/.env` before upgrading.
+- **The image tag no longer names the running image**, for example after a
+  direct `docker compose build`. The upgrade warns and names the tag. To
+  close the port, point the tag back at the image the database runs on and
+  upgrade again:
+
+  ```bash
+  docker tag "$(docker inspect --format '{{.Image}}' sill_db)" <tag from the warning>
+  ./upgrade.sh
+  ```
+
+Installer reruns do not do this. They say that the port is open and leave
+the container as it is; only `upgrade.sh` closes it.
 
 ### Updating project hooks
 

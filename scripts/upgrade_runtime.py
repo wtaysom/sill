@@ -24,7 +24,11 @@ def inspect(kind, name):
 
 
 def database_identity(config, expected=None):
-    """Identify the running container; managed updates never recreate this db."""
+    """Identify the running container, its immutable image and its data volume.
+
+    A managed update never lets Compose substitute another image or volume.
+    The one deliberate change is `database_plan` below, which keeps both.
+    """
     project = config["name"]
     service = config["services"]["db"]
     db = inspect("container", service["container_name"])
@@ -56,6 +60,104 @@ def database_identity(config, expected=None):
     return identity
 
 
+EVERY_INTERFACE = {"", "0.0.0.0", "::"}
+
+
+def database_plan(config, identity):
+    """What to do about a database container older than this checkout's settings.
+
+    v0.2 published PostgreSQL on every interface, with trust authentication
+    and no restart policy. A restart policy can be changed in place. A port
+    binding cannot: closing it takes a new container. That is planned only
+    when the image Compose would start is provably the one this database
+    already runs on, so the new container differs in settings and nothing
+    else. Otherwise the container is left alone and the plan says why.
+    """
+    service = config["services"]["db"]
+    host = inspect("container", service["container_name"]).get("HostConfig") or {}
+    published = sorted({binding.get("HostIp") or "" for binding in
+                        (host.get("PortBindings") or {}).get("5432/tcp") or []})
+    wanted = [port for port in service.get("ports", []) if port.get("target") == 5432]
+    bind = wanted[0].get("host_ip") or "0.0.0.0" if len(wanted) == 1 else None
+    policy = host.get("RestartPolicy") or {}
+    restart = policy.get("Name") or "no"
+    if restart == "on-failure" and policy.get("MaximumRetryCount"):
+        # Compose writes the count into the policy; Docker reports it beside the name.
+        restart = f'on-failure:{policy["MaximumRetryCount"]}'
+    wanted_restart = service.get("restart") or "no"
+    # The name Compose v2 gives the image it builds for a service with no `image:`.
+    tag = service.get("image") or f'{config["name"]}-db'
+    plan = {"action": "keep", "container": service["container_name"], "container_id": identity["container_id"],
+            "image": identity["image_id"], "tag": tag, "volume": identity["volume_name"], "bind": bind,
+            "restart": wanted_restart, "restart_now": restart, "restart_differs": restart != wanted_restart,
+            "published": [address or "0.0.0.0" for address in published]}
+    if bind is not None and bind not in EVERY_INTERFACE and EVERY_INTERFACE.intersection(published):
+        try:
+            tagged = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+                                             text=True, stderr=subprocess.DEVNULL).strip()
+        except subprocess.CalledProcessError:
+            tagged = ""
+        plan["action"] = "recreate" if tagged == identity["image_id"] else "blocked"
+    elif plan["restart_differs"]:
+        plan["action"] = "restart"
+    return plan
+
+
+def adopt_recreated(config, previous):
+    """Accept the one container this run recreated: same image, same volume, new settings."""
+    current = database_identity(config)
+    if current["container_id"] == previous["container_id"] or current != {**previous, "container_id": current["container_id"]}:
+        raise ValueError("The recreated database is not the same image on the same volume")
+    if database_plan(config, current)["action"] != "keep":
+        raise ValueError("The recreated database does not have this checkout's port and restart settings")
+    return current
+
+
+HEX = r"[a-fA-F0-9]{40,64}"
+
+
+def cached_snapshot(container, env, model, label, pinned):
+    """The model snapshot this service loaded, read from its download cache.
+
+    The cache names each snapshot directory by commit and keeps one pointer
+    per requested revision. A single snapshot that the pointer names is the
+    only one the service can have loaded. With several, the operator's own
+    explicit hex EMBEDDING_REVISION settles it when it names one of them.
+    Anything else stays unproved, and the message says what was found.
+    """
+    root = env.get("HUGGINGFACE_HUB_CACHE") or "/data"
+    ref = label or "main"
+    unproved = ValueError(
+        "Cannot prove the installed embedding revision: TEI /info reports none and the service's "
+        f"model cache has no readable snapshot for {model}. See docs/EMBEDDING-PROFILES.md before upgrading")
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", model)
+            or not re.fullmatch(r"/[A-Za-z0-9_./-]*", root) or ".." in root
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", ref) or ".." in ref):
+        raise unproved
+    try:
+        output = subprocess.check_output([
+            "docker", "exec", container, "sh", "-c",
+            'd="$1/$2"; cat "$d/refs/$3" 2>/dev/null; printf "\\n--\\n"; ls -1 "$d/snapshots" 2>/dev/null',
+            "sill-cached-snapshot", root, "models--" + model.replace("/", "--"), ref,
+        ], text=True)
+    except subprocess.CalledProcessError:
+        raise unproved from None
+    pointer, _, listing = output.partition("\n--\n")
+    pointer = pointer.strip()
+    snapshots = [line.strip() for line in listing.splitlines() if re.fullmatch(HEX, line.strip())]
+    if len(snapshots) == 1 and pointer == snapshots[0]:
+        return pointer
+    if isinstance(pinned, str) and re.fullmatch(HEX, pinned) and pinned in snapshots:
+        return pinned
+    if not snapshots:
+        raise unproved
+    raise ValueError(
+        "Cannot prove the installed embedding revision: TEI /info reports none and the service's model "
+        f"cache holds {len(snapshots)} snapshot(s) for {model} that its pointer does not settle: "
+        + ", ".join(sorted(snapshots)) + ". Set EMBEDDING_REVISION in backend/.env to the one your stored "
+        "vectors came from, then retry")
+
+
 def validate(config, settings, dimension, *, install=False, observe_revision=False):
     project = config["name"]
     services = config["services"]
@@ -70,26 +172,38 @@ def validate(config, settings, dimension, *, install=False, observe_revision=Fal
     model = command[command.index("--model-id") + 1]
     env = dict(x.split("=", 1) for x in embedding["Config"]["Env"] if "=" in x)
     revision = env.get("REVISION")
-    if install or observe_revision or not revision or not re.fullmatch(r"[a-fA-F0-9]{40,64}", revision):
+    source = "container REVISION"
+    if install or observe_revision or not revision or not re.fullmatch(HEX, revision):
         # Omitted pins and mutable labels require the actually loaded snapshot.
         # Installer restarts also verify the loaded SHA, not label equality.
+        container = services["embeddings"]["container_name"]
         try:
             info = json.loads(subprocess.check_output([
-                "docker", "exec", services["embeddings"]["container_name"],
+                "docker", "exec", container,
                 "curl", "-fsS", "--max-time", "10", "http://localhost:80/info",
             ], text=True))
-            revision = info.get("model_sha")
-            if info.get("model_id") != model or not isinstance(revision, str) or not re.fullmatch(r"[a-fA-F0-9]{40,64}", revision):
+            if info.get("model_id") != model:
                 raise ValueError()
+            observed = info.get("model_sha")
         except (ValueError, subprocess.CalledProcessError):
             raise ValueError("Cannot prove the installed embedding revision from TEI /info; verify and persist EMBEDDING_REVISION before upgrading") from None
+        source = "TEI /info model_sha"
+        if isinstance(observed, str) and re.fullmatch(HEX, observed):
+            revision = observed
+        else:
+            source = "cached model snapshot"
+            # TEI's model_sha repeats the revision the service was started
+            # with: null when it was started without one, as every v0.2 stack
+            # was, and the label itself for a symbolic one. The download cache
+            # records which snapshot that resolved to.
+            revision = cached_snapshot(container, env, model, revision, settings.get("EMBEDDING_REVISION"))
     actual = {"EMBEDDING_MODEL_ID": model, "EMBEDDING_REVISION": revision, "EMBEDDING_DIMENSION": str(dimension)}
     if env.get("EMBEDDING_DIMENSION", str(dimension)) != str(dimension):
         raise ValueError("Running embeddings dimension differs from stored vectors")
     for key, value in actual.items():
         if key in settings and settings[key] != value:
             if key == "EMBEDDING_REVISION" and not re.fullmatch(r"[a-fA-F0-9]{40,64}", settings[key]):
-                raise ValueError(f"EMBEDDING_REVISION is not the observed immutable pin. Keep the existing service; explicitly set its TEI /info model_sha {revision} in backend/.env and clear conflicting shell overrides, or use an explicit embedding migration")
+                raise ValueError(f"EMBEDDING_REVISION is not the observed immutable pin. Keep the existing service; explicitly set its {source} {revision} in backend/.env and clear conflicting shell overrides, or use an explicit embedding migration")
             raise ValueError(f"{key} would change the installed embedding space; routine upgrades do not activate profiles")
     profile_exists = db_query(config, "SELECT to_regclass('public.embedding_regime') IS NOT NULL")
     if profile_exists == "t":
@@ -200,6 +314,14 @@ def main():
     path = Path(sys.argv[1])
     if sys.argv[2] == "--check-database":
         database_identity(config, json.loads(sys.argv[3]))
+        return
+    if sys.argv[2] == "--database-plan":
+        identity = json.loads(sys.argv[3])
+        database_identity(config, identity)
+        print(json.dumps(database_plan(config, identity)))
+        return
+    if sys.argv[2] == "--adopt-recreated":
+        print(json.dumps(adopt_recreated(config, json.loads(sys.argv[3])), sort_keys=True))
         return
     install = sys.argv[2] == "--install"
     if install and not existing_instance(config, path, "--fresh-profile" in sys.argv[3:]):

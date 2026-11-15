@@ -79,7 +79,7 @@ def test_fresh_and_data_bearing_upgrade_match_functions(schema_routes):
             assert ledger(conn) == [('ag_catalog',)], (lane, ledger(conn))
             assert query(conn, 'SELECT migration_id,source FROM schema_migrations ORDER BY 1') == [
                 (f'{n:03}', 'initdb' if lane == 'fresh' or lane == 'from02' and n <= 7 else 'upgrade.sh')
-                for n in range(1,16)]
+                for n in range(1,17)]
             assert store['ledger_before'] == ([] if lane == 'from01' else [('ag_catalog',)])
             snapshots[lane] = catalog(conn, manifest['release_function_names'])
     for lane in ('from01','from02'):
@@ -195,7 +195,8 @@ def test_ambiguous_duplicate_ledger_is_rejected(schema_routes):
             query(conn, 'DROP TABLE public.schema_migrations')
             conn.commit()
         assert ledger(conn) == [('ag_catalog',)]
-        assert query(conn, 'SELECT count(*) FROM schema_migrations') == [(15,)]
+        shipped = len(list((ROOT / 'backend/migrations').glob('[0-9][0-9][0-9]_*.sql')))
+        assert query(conn, 'SELECT count(*) FROM schema_migrations') == [(shipped,)]
 
 
 def test_initdb_logs_retain_only_known_frozen_baseline_error(schema_routes):
