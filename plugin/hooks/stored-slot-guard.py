@@ -52,6 +52,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+import _store
 
 DB_CONTAINER = os.environ.get("SILL_DB_CONTAINER", "sill_db")
 DB_USER = os.environ.get("SILL_DB_USER", "sill")
@@ -142,21 +143,30 @@ def main() -> None:
         sys.exit(0)
 
     missing = []
+    unchecked = False
     for h in dict.fromkeys(ids):
         try:
-            r = subprocess.run(
-                ["docker", "exec", DB_CONTAINER, "psql", "-U", DB_USER, "-d",
-                 DB_NAME, "-t", "-A", "-c",
-                 f"SELECT count(*) FROM memories WHERE id::text LIKE '{h}%';"],
-                capture_output=True, text=True, timeout=8,
-            )
-            if r.returncode != 0:
-                continue  # store unreachable for this id: skip it, check the rest
-            if r.stdout.strip() == "0":
+            if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+                rows = _store.query(f"SELECT count(*) AS n FROM memories WHERE id::text LIKE '{h}%';", timeout=8)
+                count = str(rows[0]['n'])
+            else:
+                r = subprocess.run(
+                    ["docker", "exec", DB_CONTAINER, "psql", "-U", DB_USER, "-d",
+                     DB_NAME, "-t", "-A", "-c",
+                     f"SELECT count(*) FROM memories WHERE id::text LIKE '{h}%';"],
+                    capture_output=True, text=True, timeout=8,
+                )
+                if r.returncode != 0:
+                    unchecked = True
+                    continue
+                count = r.stdout.strip()
+            if count == "0":
                 missing.append(h)
         except Exception:
-            continue  # same: unreachable, skip only this id
+            unchecked = True
 
+    if unchecked and not missing:
+        print(json.dumps({'systemMessage':'[sill] Receipt store unavailable; receipt unchecked.'}))
     if missing:
         reason = (
             f"stored-slot-guard: receipt-shaped id(s) {missing} have no row "

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sill-memory"
-version = "0.2.1"
+version = "0.3.0"
 description = "Sill — Postgres-backed persistent memory for AI agents (MCP + workers)."
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -24,6 +24,9 @@ dependencies = [
   # acceptance rehearsal — see docs/RELEASE-REHEARSAL.md.
   "mcp>=1.0.0,<2",
   "python-dotenv>=1.0.0",
+  "simplejson>=3.19",
+  "tomlkit>=0.13.2",
+  "tomli>=2.0.1; python_version < '3.11'",
   "requests>=2.31.0",
   "httpx>=0.25.0",
   "pydantic>=2.4.2",
@@ -46,11 +49,16 @@ sill-worker = "worker:main"
 [tool.setuptools]
 py-modules = [
   "memory_tools",
+  "embedding_profiles",
   "cognitive_memory_api",
   "prompt_resources",
   "sill",
   "sill_cli",
   "sill_mcp_server",
+  "instance_config",
+  "client_config",
+  "provenance",
+  "session_identity",
   "worker",
   "rabbit_bridge",
   "beat_worker",
@@ -62,3 +70,7 @@ include-package-data = false
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["scripts*"]
+
+[tool.pytest.ini_options]
+# Async clients/pools are created and closed within individual tests.
+asyncio_default_fixture_loop_scope = "function"

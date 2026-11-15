@@ -295,7 +295,7 @@ def test_carry_forward_writes_the_expected_sidecar_shape(tmp_path, monkeypatch):
 
     rp.carry_forward(["warning one", "warning two"], "sess-abc")
 
-    sidecar = tmp_path / "response-patterns-last-sess-abc.json"
+    sidecar = tmp_path / "response-patterns-last-sha256-33a386c9464a4538527687ee331d081db7d7448137f25db6fd13b1d8d1053a71.json"
     assert sidecar.exists()
     data = json.loads(sidecar.read_text())
     assert data["warnings"] == ["warning one", "warning two"]
@@ -311,8 +311,8 @@ def test_carry_forward_prefers_the_env_session_id_over_the_argument(tmp_path, mo
 
     rp.carry_forward(["w"], "argument-session")
 
-    assert (tmp_path / "response-patterns-last-env-session.json").exists()
-    assert not (tmp_path / "response-patterns-last-argument-session.json").exists()
+    assert (tmp_path / "response-patterns-last-sha256-958fb03fefc51c3489138fe560ccfbaca36207c1dc587715a98090ff384d1561.json").exists()
+    assert not (tmp_path / "response-patterns-last-sha256-b3c61174dfd015ff01e4fb0211914df8a2224a675764c99801d0677123056094.json").exists()
 
 
 def test_carry_forward_no_ops_without_any_session_id(tmp_path, monkeypatch):

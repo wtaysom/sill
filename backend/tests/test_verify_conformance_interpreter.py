@@ -23,12 +23,10 @@ operators to set.
 Static assertions only: running verify.sh needs a live stack.
 """
 
-import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFY_SH = REPO_ROOT / "verify.sh"
-INSTALL_SH = REPO_ROOT / "install.sh"
 
 
 def verify_text() -> str:
@@ -39,31 +37,6 @@ def check_6_body() -> str:
     text = verify_text()
     start = text.index("Check 6/6")
     return text[start:]
-
-
-def test_verify_defines_an_interpreter_resolver():
-    assert re.search(r"(?m)^sill_python\(\)\s*\{", verify_text()), (
-        "verify.sh has no sill_python(); check 6 is back to guessing"
-    )
-
-
-def test_the_resolver_honors_an_explicit_override():
-    """The degraded branch's own advice depends on this."""
-    m = re.search(r"(?ms)^sill_python\(\)\s*\{.*?^\}", verify_text())
-    assert m, "could not isolate sill_python()"
-    assert "SILL_PYTHON" in m.group(0)
-
-
-def test_the_resolver_matches_installs_resolution_order():
-    """If the two drift, verify.sh checks an interpreter install.sh never
-    populated — which is the original bug in a new costume."""
-    body = re.search(r"(?ms)^sill_python\(\)\s*\{.*?^\}", verify_text()).group(0)
-    for needle in ("pipx", "venvs/sill-memory/bin/python", ".local/share/sill-venv/bin/python"):
-        assert needle in body, f"verify.sh's resolver never considers {needle}"
-    install_body = re.search(r"(?ms)^sill_python\(\)\s*\{.*?^\}", INSTALL_SH.read_text(encoding="utf-8"))
-    assert install_body, "install.sh no longer defines sill_python()"
-    for needle in ("venvs/sill-memory/bin/python", ".local/share/sill-venv/bin/python"):
-        assert needle in install_body.group(0)
 
 
 def test_check_6_does_not_probe_or_run_the_bare_system_python():

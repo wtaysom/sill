@@ -13,11 +13,10 @@ decision rather than a default:
 
 Nothing in a single-host install needs any of that reachable off-box: the
 hooks reach Postgres by `docker exec`, and the MCP server connects to
-localhost. The default here stays 0.0.0.0 so this change alters nobody's
-behavior on upgrade, but `SILL_BIND_ADDR=127.0.0.1` now closes it in one line.
+localhost. The default binds to loopback; an explicit SILL_BIND_ADDR opts in to exposure.
 
-The tests assert the shape (every published port is overridable, defaults
-unchanged) rather than probing a live socket — the rest of backend/tests/
+The tests assert the shape (every published port is overridable, with loopback
+defaults) rather than probing a live socket — the rest of backend/tests/
 needs no docker, and a bind test would need a running daemon.
 """
 
@@ -27,7 +26,7 @@ from pathlib import Path
 COMPOSE = Path(__file__).resolve().parents[1] / "docker-compose.yml"
 ENV_EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
 
-DEFAULT_BIND = "0.0.0.0"
+DEFAULT_BIND = "127.0.0.1"
 
 
 def published_ports() -> list[str]:
@@ -58,9 +57,7 @@ def test_every_published_port_takes_the_bind_address_variable():
     )
 
 
-def test_the_default_bind_address_changes_nothing():
-    """Upgrading must not quietly move anyone's ports. 0.0.0.0 is exactly what
-    an unprefixed Compose port mapping already meant."""
+def test_the_default_bind_address_limits_the_ports_to_this_host():
     for entry in published_ports():
         assert entry.startswith(f"${{SILL_BIND_ADDR:-{DEFAULT_BIND}}}:"), entry
 
@@ -69,9 +66,9 @@ def test_the_container_side_ports_are_untouched():
     """The last field is the in-container port; the middle is the host port.
     A bind-address prefix must not have shifted either."""
     expected = {
-        "${SILL_BIND_ADDR:-0.0.0.0}:${POSTGRES_PORT:-5432}:5432",
-        "${SILL_BIND_ADDR:-0.0.0.0}:${RABBITMQ_PORT:-5672}:5672",
-        "${SILL_BIND_ADDR:-0.0.0.0}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672",
+        "${SILL_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432",
+        "${SILL_BIND_ADDR:-127.0.0.1}:${RABBITMQ_PORT:-5672}:5672",
+        "${SILL_BIND_ADDR:-127.0.0.1}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672",
     }
     assert set(published_ports()) == expected
 
@@ -81,5 +78,5 @@ def test_env_example_explains_the_choice_and_why_it_matters():
     An operator who is not told it will read 0.0.0.0 as ordinary."""
     body = ENV_EXAMPLE.read_text(encoding="utf-8")
     assert "SILL_BIND_ADDR" in body
-    assert "127.0.0.1" in body, "loopback is never shown as the alternative"
+    assert "127.0.0.1" in body, "loopback default is missing"
     assert "trust" in body, "the passwordless-auth reason is not stated"

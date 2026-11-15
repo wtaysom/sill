@@ -96,6 +96,19 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{SILL_PYTHON}} {{SILL_PLUGIN_DIR}}/hooks/write-recall.py",
+            "statusMessage": "Recalling written context",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

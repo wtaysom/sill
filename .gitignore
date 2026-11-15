@@ -51,6 +51,11 @@ backups/
 charter.md
 journal/
 notes/
+# Same reason: docs/onboarding/03-first-beats.md says to copy
+# backend/beats.example.json here and edit the prompts, so this file carries
+# an operator's own standing prompts as soon as it is useful. The example it
+# is copied from stays tracked.
+/beats.json
 
 # Runtime memory-health snapshots (local state, machine-specific)
 backend/memory_health_history.jsonl

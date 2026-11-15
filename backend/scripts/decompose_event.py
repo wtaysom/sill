@@ -62,14 +62,10 @@ def build_sql(spec: dict) -> str:
         imp = float(a.get("importance", 0.6))
         speaker = a.get("speaker", default_speaker)
         content = a["content"]
-        lines.append(f"  v_id := create_memory('{mtype}'::memory_type, {_dq(content)}, {imp});")
-        sets = []
-        if force:
-            sets.append(f"force = '{force}'")
-        if speaker:
-            sets.append(f"speaker = {_dq(speaker)}")
-        if sets:
-            lines.append(f"  UPDATE memories SET {', '.join(sets)} WHERE id = v_id;")
+        speaker_arg = _dq(speaker) if speaker is not None else "NULL"
+        force_arg = f"'{force}'" if force is not None else "NULL"
+        lines.append(f"  SELECT memory_id INTO v_id FROM public.mint_memory('{mtype}'::memory_type, {_dq(content)}, {imp}, "
+                     f"p_speaker => {speaker_arg}, p_force => {force_arg});")
         lines.append("  ids := array_append(ids, v_id);")
     lines.append("  RAISE NOTICE 'BUNDLE_IDS %', ids;")
     lines.append("END $$;")

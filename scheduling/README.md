@@ -22,7 +22,7 @@ the reason explained right after the table:
 | `{{SILL_PYTHON}}`    | The interpreter that has the backend package installed — the pipx venv's `bin/python`, or `~/.local/share/sill-venv/bin/python` if you used the pip+venv fallback. |
 | `{{SILL_DIR}}`       | This repo's root — where `beats.json` and `prompts/` live once you've set them up (**not** `backend/`). |
 | `{{SILL_LOG_DIR}}`   | Where stdout/stderr and the worker's own `beat-worker.log` should go. `/tmp` works, but survives reboots better somewhere under your home directory. |
-| `{{SILL_BEAT_CLI}}`  | The absolute path to the agent CLI executable (`claude`) that the worker spawns every beat. |
+| `{{SILL_BEAT_CLI}}`  | The absolute path to the default Claude Code executable for voices without a `cli` field. |
 
 **Why `{{SILL_BEAT_CLI}}` has to be an absolute path.** The worker's
 default (`SILL_BEAT_CLI` unset) is the bare command name `claude`,
@@ -40,6 +40,12 @@ needing `~/.local/bin` on the scheduler's `PATH` at all — the same
 resolve-once-at-substitution strategy `{{SILL_PYTHON}}` already uses below,
 for the identical reason (a scheduler's minimal `PATH` doesn't match your
 interactive shell's).
+
+A voice can set `cli` in `beats.json` to override this template value.
+For a Codex voice, set `"launcher": "codex"` and set `cli` to the absolute
+path returned by `command -v codex`. Without `cli`, a Codex voice resolves
+`codex` on the scheduler's `PATH`. Verify each configured launcher by hand
+with the same project, settings and permissions before loading a schedule.
 
 Find your own values for these the same way `install.sh` resolves them:
 
@@ -221,7 +227,7 @@ completing:
 
 ```bash
 tail -f "$SILL_LOG_DIR"/beat-worker.log
-# -> "[analyst] Beat complete in Ns — transcript <timestamp>.txt"
+# -> "[analyst] Beat complete in Ns — transcript <attempt-id>.txt"
 ```
 
 A repeating `"[<voice>] Beat exited 0 in Ns but produced no file matching
@@ -229,16 +235,7 @@ A repeating `"[<voice>] Beat exited 0 in Ns but produced no file matching
 `docs/beats.md`'s Permissions section describes is still unresolved —
 scheduling was never the failure; run that section's by-hand check again.
 
-A repeating `"[<voice>] Beat attempt error after Ns: [Errno 2] No such
-file or directory: 'claude'."` line is a different failure entirely: the
-worker never even reached the agent CLI. It means `SILL_BEAT_CLI` (or the
-`{{SILL_BEAT_CLI}}` token substituted into the installed plist/unit) is
-either unset/bare `claude` or points at a path that no longer exists, and
-neither template's fixed, minimal `PATH` includes wherever `claude`
-actually lives (typically `~/.local/bin`) — see "Why `{{SILL_BEAT_CLI}}`
-has to be an absolute path" above. Rotation correctly holds on this
-failure (it fails safe), but no voice will ever beat until it's fixed. Fix
-by re-resolving `command -v claude` in your interactive shell and
-re-installing (edit-and-reload steps above), or by setting
-`SILL_BEAT_CLI` in the installed plist/unit to that absolute path by
-hand.
+A `launch_error` receipt with a `No such file or directory` message in the
+worker log means the configured executable could not be started. Check the
+voice's `cli` path, the Claude default in `SILL_BEAT_CLI`, or the scheduler's
+`PATH`. The rotation stays on that voice until it completes successfully.

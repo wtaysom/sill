@@ -145,6 +145,118 @@ prevents the corpus from filling up with restated trivia.
 
 ---
 
+## A memory is a speech act
+
+A store that treats every row as a fact goes wrong in three ways. It
+fact-checks a promise as if it were a claim. It lets whoever typed a
+sentence into the store pass for the person who said it, or for the one
+who worked it out. And it takes the memories it shows most often for the
+ones that matter most. Sill records enough about each memory to keep
+these apart.
+
+### Who said it: `speaker`
+
+A memory can name whose utterance it records. When the person you work
+with says "use tabs in this repo", the speaker is that person, even
+though an assistant made the tool call that stored it. When the
+assistant reaches a conclusion of its own, the speaker is the assistant,
+under whatever name the instance goes by. A quotation from a book has
+its author as speaker.
+
+```bash
+sill notice "Use tabs, not spaces, in this repo." --speaker Inez --force directive
+```
+
+`recall` can be restricted to one speaker (`speaker="Inez"`). The filter
+applies before ranking, so the result is the best of what Inez said and
+not the Inez rows that happened to make an overall top ten. The
+`speakers` tool lists who is in the store, and `#Nobody` selects
+memories recorded with no speaker. Nothing guesses a speaker: a memory
+stored without one stays without one.
+
+### What kind of act: `force`
+
+The five kinds are Searle's. Each succeeds in its own way.
+
+| Force | Example | It succeeds when |
+|---|---|---|
+| `assertive` | "The parser drops trailing commas." | it is true |
+| `directive` | "Run the linter before every commit." | it is complied with |
+| `commissive` | "I'll write up the migration notes." | it is kept |
+| `expressive` | "I'm glad we dropped the old importer." | it is sincere |
+| `declaration` | "This design is approved." | the speaker had the standing to make it so |
+
+Only an assertive can be checked for truth. Fact-checking an instruction
+makes no sense; the questions for it are whether it still stands and
+whether it is being followed. A memory with no force is read as
+assertive, which is what every row was before the field existed.
+
+Storing is itself always an assertion: the row claims that this act took
+place. So a stored promise can fail in two different ways, as a record
+(nobody promised that) and as a promise (it was not kept).
+
+### Who did the work: `production`
+
+The speaker is whose utterance a row was. Who did the thinking behind it
+is a separate question, and the answers often differ: a person reads out
+a conclusion the assistant reached, or an assistant writes up an
+experiment the person ran. `production` records the contributors when
+someone declares them.
+
+```bash
+sill notice "Batching the embedding calls cut import time from 40 s to 6 s." \
+  --speaker Inez \
+  --made-json '{"made":[{"kind":"person","who":"Inez","work":"ran the timing experiment","at":[],"declared":{"by":null,"when":"2026-11-13T00:00:00Z","basis":"stated"}}]}'
+```
+
+Production is declared and never inferred. A memory with no production
+is *undeclared*: nobody has said who made it. That is different from
+saying nobody made it, and Sill does not fill the gap from the speaker,
+the session, or the most recent transcript.
+
+The object form above works everywhere. Inside a Claude Code or Codex
+session there is a session to name as the declarer, and the short form
+`--made "Inez: ran the timing experiment [stated]"` is accepted too. A
+desktop app or a hosted chat has no such session, so the short form is
+refused there. See [attribution and perspective
+recall](migrations/011-perspective-recall.md) for the full grammar.
+
+### The same words from another mouth
+
+If the same speaker stores the same words twice, the second call returns
+the first memory untouched. If a different speaker stores those words,
+Sill keeps a separate memory and links it to the earlier one as a
+restatement. Two people agreeing is recorded as two acts, and neither is
+rewritten as the other's.
+
+Replacing a memory is a different operation. `sill notice --supersedes
+<id>` archives the old memory and links the new one to it, and the
+`follow_supersedes` tool walks how a position changed. Quoting someone
+does not supersede them, and neither does restating them. See [atomic
+memory creation](migrations/010-atomic-mint.md).
+
+### Shown is not used
+
+Recall displays memories. That is *exposure*, and Sill counts it. It
+does not make a memory look more recent or more important, because then
+whatever was shown most would go on being shown. Recency moves only on
+explicit use: fetching a memory by its id or, where the `track-reuse`
+hook is installed, citing that id in a response. Access counts never
+feed importance. Importance changes when someone decides it should,
+through `update_importance`.
+
+### Commitments can end
+
+A promise stays live until something ends it. `link_commitment` gives a
+commitment one home goal. Closing that goal, by setting it to
+`completed` or `abandoned` with `change_goal_priority`, releases the
+commitments that live there and only those: each is archived with the
+goal named as the reason. Reopening the goal restores only the ones that
+this closing released. A promise is neither kept forever by default nor
+dropped without a trace.
+
+---
+
 ## Embeddings (locked at install)
 
 The Docker stack runs HuggingFace TEI with

@@ -9,7 +9,7 @@ into .md files are NEVER surfaced mid-session by similarity to the prompt — on
 the seed corpus is. This ingests each .md memory into the DB so recall can reach
 it.
 
-Uses sill.notice() -> create_memory() SQL, which:
+Uses sill.notice() -> public.mint_memory() SQL, which:
   - generates the 768-d embedding *inside* the db container (the embeddings
     service is only reachable on the docker network, not from the host),
   - writes the type-specific subtype row,

@@ -11,6 +11,7 @@ import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import _store
 
 PROJECT_DIR = Path(os.environ.get("SILL_PROJECT_ROOT", os.getcwd()))
 RULES_DIR = Path(
@@ -31,6 +32,9 @@ DB_NAME = os.environ.get("SILL_DB_NAME", "sill")
 
 def query_postgres(sql: str) -> list[list[str]]:
     """Run a SQL query and return results as list of lists."""
+    if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+        return _store.selected_legacy_rows(sql, unavailable_message=
+            '[sill] Selected store unavailable; checkpoint query unchecked.')
     cmd = [
         "docker", "exec", DB_CONTAINER,
         "psql", "-U", DB_USER, "-d", DB_NAME,

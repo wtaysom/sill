@@ -1,6 +1,6 @@
 {
   "name": "sill",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Persistent memory + recall/discipline hooks for AI agents",
   "author": {
     "name": "William Taysom & Sili"

@@ -7,7 +7,8 @@ Hard constraint for this file: never write to the real ``~/.claude`` or
    performs a single write anywhere in the script — see ``run()`` and every
    ``DRY_RUN``-gated branch in install.sh) *and* overrides ``HOME`` to a
    pytest ``tmp_path``, so even a latent dry-run bug can't reach the real
-   home directory.
+   home directory. Read-only runtime discovery is replaced by the Docker
+   boundary fixture below; no command can reach a real service.
 2. The two tests that exercise install.sh's real (non-dry-run) file-writing
    logic for the new home-scope helpers do so by *sourcing* install.sh in a
    subprocess (install.sh's own "main" section is guarded by a
@@ -37,6 +38,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = REPO_ROOT / "install.sh"
 UPGRADE_SH = REPO_ROOT / "upgrade.sh"
 AMBIENT_TEMPLATE = REPO_ROOT / "plugin" / "claude.home.md.template"
+
+
+@pytest.fixture(autouse=True)
+def isolated_scope_docker(tmp_path, monkeypatch):
+    """Scope rendering does not require an engine or an existing instance."""
+    bin_dir = tmp_path / "scope-bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(f"#!{sys.executable}\n" + r'''
+import json, sys
+args = sys.argv[1:]
+if args[0] == "compose" and args[-3:] == ["config", "--format", "json"]:
+    print(json.dumps({"services": {}, "volumes": {}}))
+elif args[:2] in (["container", "ls"], ["volume", "ls"]):
+    pass
+elif args[:2] == ["exec", "sill_absent_container_for_tests"]:
+    raise SystemExit(1)
+else:
+    raise AssertionError("Unexpected Docker operation in scope rendering test: " + repr(args))
+''')
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
 
 
 def run_install(args, home, extra_env=None, timeout=60):
@@ -240,6 +263,12 @@ def test_home_scope_codex_render_writes_fresh_then_leaves_existing_alone(tmp_pat
     dst = home / ".codex" / "hooks.json"
     assert dst.exists()
     rendered = dst.read_text()
+    write_group, = json.loads(rendered)['hooks']['PostToolUse']
+    assert write_group['matcher'] == 'Write|Edit|MultiEdit|apply_patch'
+    write_hook, = write_group['hooks']
+    assert write_hook['timeout'] == 30
+    assert 'SILL_INSTANCE_ENV_FILE=' in write_hook['command']
+    assert 'write-recall.py' in write_hook['command']
     assert "{{SILL_PLUGIN_DIR}}" not in rendered
     assert str(REPO_ROOT / "plugin") in rendered
 
@@ -248,6 +277,23 @@ def test_home_scope_codex_render_writes_fresh_then_leaves_existing_alone(tmp_pat
     assert r2.returncode == 0, r2.stderr
     assert dst.read_text() == "TAMPERED-BY-TEST"
     assert "already exists" in r2.stdout
+
+
+def test_rendered_hook_command_handles_spaces_and_apostrophes(tmp_path):
+    import shlex
+
+    home = tmp_path / "new home"
+    home.mkdir()
+    plugin = tmp_path / "owner's checkout" / "plugin"
+    interpreter = home / "python tools" / "python"
+    r = source_and_call(
+        '_render_codex_hooks "$SILL_DIR/plugin/codex.hooks.json.template" '
+        f'"$HOME/hooks.json" {shlex.quote(str(plugin))} {shlex.quote(str(interpreter))}',
+        home=home,
+    )
+    assert r.returncode == 0, r.stderr
+    command = json.loads((home / "hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert shlex.split(command) == ["env", "SILL_INSTANCE_ENV_FILE=" + str(REPO_ROOT / "backend/.env"), str(interpreter), str(plugin / "hooks/response-patterns.py")]
 
 
 def test_home_scope_claude_merge_is_idempotent_and_preserves_other_content(tmp_path):
@@ -456,12 +502,8 @@ def test_upgrade_never_writes_outside_hooks_for_path(tmp_path):
     assert not (decoy_home / ".claude").exists()
 
 
-def test_upgrade_hooks_refresh_runs_before_db_preflight(tmp_path):
-    """Confirms hook refresh is reached even in a combined (non
-    --hooks-only) invocation, and confirms it happens BEFORE the DB
-    preflight check — using a nonexistent container so preflight fails fast
-    and safely rather than reaching this machine's real sill_db (confirmed
-    live via `docker ps` during development; see module docstring)."""
+def test_upgrade_does_not_refresh_hooks_before_db_preflight(tmp_path):
+    """Full upgrade must not write hook settings when DB preflight fails."""
     project = tmp_path / "proj"
     project.mkdir()
     r = run_upgrade(
@@ -469,7 +511,7 @@ def test_upgrade_hooks_refresh_runs_before_db_preflight(tmp_path):
         extra_env={"SILL_DB_CONTAINER": "sill_absent_container_for_tests"},
         timeout=30,
     )
-    assert (project / ".codex" / "hooks.json").exists(), \
-        "hooks refresh must run even when the DB step that follows it fails"
-    assert r.returncode != 0, "the fake container must make DB preflight fail"
+    assert not (project / ".codex/hooks.json").exists()
+    assert not (project / ".claude/settings.local.json").exists()
+    assert r.returncode != 0
     assert "sill_absent_container_for_tests" in (r.stdout + r.stderr)

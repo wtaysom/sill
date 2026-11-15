@@ -147,12 +147,16 @@ def main() -> int:
         default=os.getenv("SILL_WORKER_MODE", "maintenance"),
         help="Which worker to run.",
     )
+    p.add_argument("--once", action="store_true", help="Run one beat attempt and exit.")
     args = p.parse_args()
+    if args.once and args.mode != "beat":
+        p.error("--once requires --mode beat")
     if args.mode == "beat":
-        from beat_worker import run_beat_loop
-        run_beat_loop()
-    else:
-        asyncio.run(_amain(args.mode))
+        from beat_worker import main as beat_main
+
+        return beat_main(once=args.once)
+
+    asyncio.run(_amain(args.mode))
     return 0
 
 

@@ -1,135 +1,95 @@
-# Phases 1–4: Standing It Up
+# Install and use your first memory
 
-Four phases that end with software running, wired to the harnesses you
-actually use, able to say what it is — and able to use its own tools when
-nobody is watching. The last one is the one people skip, and skipping it
-produces a system that looks healthy and does nothing.
+**Done when** a fresh client session retrieves the content and UUID of a
+synthetic preference you saved with Sill.
 
-Each phase below states what done looks like before it gives you commands.
-If a phase doesn't reach its done-condition, stop there. The failures here
-are all diagnosable, and none of them get easier by being carried forward
-into a phase that assumes them.
+## Install
 
-## Phase 1 — Install
+On macOS or Linux, use Git, Python 3.10 or later, and a running Docker
+engine with Compose. Open the app you plan to use and sign in through that
+app. A local Claude or Codex connection uses your existing client sign-in.
+Sill's default local embeddings and memory tools need no model API key.
 
-**Done when:** `./verify.sh` exits 0 and prints a `pass:` line for each of
-its six checks.
+For Claude Desktop on macOS:
 
 ```bash
-./install.sh
-```
-
-Ten preflighted steps: the backend package and its console scripts, the
-Docker stack (Postgres with pgvector and the graph extension, embeddings,
-RabbitMQ, the maintenance worker), the methodology seed, the plugin symlink,
-and the MCP server entry. `./install.sh --help` prints the full flag list;
-`--scope home|project` is the one decision worth making deliberately, and
-the README's "Install scope" section lays out the tradeoff.
-
-The embeddings container downloads its model on first start (~1.2 GB of
-float32 safetensors — the `-300m` in the model name is parameters, not
-megabytes), so the first `docker compose` step is slow in a way later ones are
-not.
-
-**If step 4 gives up before the model is ready**, that is the one install
-failure that is not a misconfiguration:
-
-```text
-install.sh: db/embeddings not healthy after 600s. Check 'docker compose -f .../docker-compose.yml logs'.
-```
-
-Measured on an Apple Silicon Mac, first boot took **903 s** from container
-start to the first healthy probe — the compose file pins `platform:
-linux/amd64`, so the embeddings image runs emulated there. The install is
-idempotent: watch `docker compose -f backend/docker-compose.yml ps` until
-`embeddings` reports `healthy`, then re-run `./install.sh`, and it will
-continue from step 4. To wait longer in the first place, raise the timeout:
-
-```bash
-SILL_INSTALL_WAIT_HEALTHY_S=1800 ./install.sh
-```
-
-Then:
-
-```bash
+git clone https://github.com/wtaysom/sill.git
+cd sill
+./install.sh --client claude-desktop
 ./verify.sh
-echo "exit: $?"
 ```
 
-Six checks: services healthy, the MCP server answering a real `initialize`
-handshake over stdio, seed loaded, one hook parsing a canned event, schema
-level current, adapter conformance. Success is one `pass:` line per check
-and `All checks passed.` at the end; check 2's line names the server and
-version that answered.
+For Claude Code, use `--client claude-code`. For either Codex CLI or a
+desktop local Codex session, use `--client codex`. Repeat `--client` to
+connect several clients to this checkout in one run. Without that flag,
+the installer selects the Claude Code and Codex CLIs it detects on
+`PATH`. For desktop-only setup, select the client explicitly.
 
-A failure names its own fix and stops at the first one. Its shape:
+The installer puts the Sill commands in a pipx environment if pipx is
+available. Otherwise it uses a virtual environment under
+`~/.local/share/sill-venv` and links the commands into `~/.local/bin`. Add
+the appropriate bin directory to your shell's `PATH` for the `sill`
+commands below. Desktop registrations use an absolute executable path.
 
-```text
-=== Check 1/6: docker compose services healthy ===
-  FAIL: db is 'missing', expected 'healthy'
-```
-
-`missing` means no such container — the daemon is down, or the stack was
-never brought up, or another project on this machine has already claimed the
-container name `sill_db` (set `SILL_DB_CONTAINER` in `backend/.env` if you
-need two stacks side by side). Fix it and re-run; `verify.sh` is safe to run
-as many times as you like.
-
-## Phase 2 — Harness adapters
-
-**Done when:** every harness you use lists a connected `sill` MCP server,
-and adapter conformance passes.
-
-Restart Claude Code and/or Codex first — the MCP server entry is read at
-startup, so a session that was already open when you installed will not see
-it.
+The first run downloads the embedding model and can take several minutes.
+The installer waits up to 1,800 seconds by default. If it times out, check
+the service status and logs for the named failure, then rerun the same
+install command after fixing it.
 
 ```bash
-claude mcp list
+docker compose -f backend/docker-compose.yml ps
 ```
 
-Look for a `sill` entry reported as connected. If it isn't there, the entry
-didn't reach `~/.claude.json` (or `~/.codex/config.toml`); re-run
-`./install.sh` and read step 7's output.
+`verify.sh` checks the services and schema, an MCP handshake over stdio, the
+seed, and hook and adapter fixtures. If you chose `./install.sh --no-seed`,
+use `./verify.sh --no-seed` as well. A passing smoke check means you can
+move on to testing the tools inside your client.
 
-Conformance is check 6 of `./verify.sh` above — the four-slot contract
-(inject / mint / capture / track) that makes "supports harness X" something
-you can check rather than something the README asserts. `docs/adapters.md`
-has the contract, the Claude Code / Codex divergence table, and what's
-version-fragile on the Codex side. Run it directly if you want it on its
-own. pytest is a dev-only extra, and it has to go into the *same* interpreter
-`install.sh` put the backend in — a bare `pip` may not exist at all on a
-machine that has only `python3`, and a bare `python3` will not have the
-backend's dependencies:
+## Connect your client
 
-```bash
-SILL_PYTHON="$(ls "${PIPX_HOME:-$HOME/.local/pipx}/venvs/sill-memory/bin/python" 2>/dev/null \
-  || ls "$HOME/.local/share/sill-venv/bin/python" 2>/dev/null \
-  || command -v python3)"
-"$SILL_PYTHON" -m pip install -e "backend[dev]"
-cd backend && "$SILL_PYTHON" -m pytest tests/test_adapter_conformance.py -q
-```
+Quit and reopen the desktop app, or restart the CLI session. Check that
+the client lists the Sill memory tools and allow the selected calls if
+prompted. Claude Code uses `~/.claude.json`. For each app's registry,
+permissions, and connection checks, follow the
+[client setup guide](../desktop-clients.md).
 
-That is the same resolve-the-interpreter recipe `scheduling/README.md` uses,
-and the same order `install.sh` itself resolves in. Without pytest,
-`verify.sh` degrades to a dependency-free capture-slot check and says so.
+## Remember and recall
 
-Hooks are wired per project by default. If this project should have recall
-and the guards, it needs `--hooks-for` — and phase 7's drill assumes the
-guards are actually wired here:
+1. In your first session, ask:
 
-```bash
-./install.sh --hooks-for /path/to/this/project
-```
+   > Use the Sill `remember` tool to store this synthetic test preference:
+   > For imaginary moon maps, I prefer dotted orange gridlines. Return the
+   > UUID from the tool result.
 
-## Phase 3 — The identity card
+2. Record the UUID from the successful tool call and close the session.
+   Open a fresh session connected to the same Sill instance. Use another
+   available client if you connected one.
+3. Ask without supplying the answer or the UUID:
+
+   > Use the Sill `recall` tool to look up my synthetic preference for
+   > imaginary moon maps. Report the content and the memory UUID from the
+   > tool result.
+
+Compare both the content and UUID with the original tool result. If the
+client replies without using Sill, select the server or plugin in that
+client and ask for the exact tool again. If the tool runs but cannot find
+the memory, check that both clients use the same absolute env-file path
+and that you started a fresh session after registration.
+
+For everyday use, ask the assistant to recall relevant prior decisions at
+the start of a task and to remember a concise decision when you ask it to
+retain one. These prompts guide tool use. Automatic recall and guard
+behavior depend on the host and its hook configuration.
+
+## Optional identity and worker permissions
+
+### Identity card
 
 **Done when:** `sill identity show` prints a card whose name is
 `null (not yet christened)`.
 
-An instance should be able to answer "what am I, whose is this, and where is
-the document that says why" from first boot — before recall, before a beat,
-before anyone asks it to think about anything. That is all this file is.
+The identity card records which tools and project an instance uses. Set the
+engine and harnesses to match your installation. This example uses Claude Code.
 
 ```bash
 sill identity init
@@ -152,10 +112,12 @@ identity: /path/to/state/identity.json
 stated in those words so an instance reading its own card mid-onboarding can
 tell the difference between "nobody has named me yet" and "this file is
 unreadable." Both cases are reported, in plain language, without a
-traceback. The name and charter arrive in phase 8, not now. Field reference:
-`docs/identity.md`.
+traceback. Set the name and charter during [christening](05-christening.md).
+See the [identity field reference](../identity.md).
 
-## Phase 4 — Permissions verified
+### Worker permissions
+
+Phase 4 of the optional onboarding sequence.
 
 **Done when:** a headless agent-CLI run in this project's directory
 **creates a file**. Not "exits 0" — a denied run also exits 0.
@@ -168,8 +130,12 @@ describing what it tried. Exit code 0. Nothing written. A beat worker with
 this problem ticks on schedule forever, produces transcripts full of
 plausible reports, and accomplishes nothing.
 
-Confirm the failure yourself, in a throwaway directory with no settings
-file, so you know what it looks like:
+The example below uses Claude Code. For Codex CLI, check the workspace and
+approval settings for an actual write in the worker directory. See
+[beat permissions](../beats.md#permissions).
+
+If you need to diagnose a denied Claude Code write, try this in a throwaway
+directory with no settings file:
 
 ```bash
 mkdir -p /tmp/sill-permission-demo
@@ -208,9 +174,8 @@ spawns a fixed command with no `--allowedTools` flag, so a project settings
 file is the only channel it has. Delete `proof.txt`, **merge** the grant into
 this project's settings file, and run the same command *without* the flag.
 
-Merge rather than overwrite: phase 2's `./install.sh --hooks-for` already put
-a `hooks` block in this exact file, and a `cat >` heredoc here silently
-deletes it — which phase 7's drill then can't find.
+Merge rather than overwrite: `./install.sh --hooks-for` may already have
+put a `hooks` block in this file. The guard drill needs that block.
 
 ```bash
 rm proof.txt
@@ -219,7 +184,10 @@ python3 - <<'PY'
 import json, pathlib
 p = pathlib.Path(".claude/settings.local.json")
 d = json.loads(p.read_text()) if p.exists() else {}
-d.setdefault("permissions", {})["allow"] = ["Bash(sill notice *)", "Write", "Edit"]
+allow = d.setdefault("permissions", {}).setdefault("allow", [])
+for grant in ["Bash(sill notice *)", "Write", "Edit"]:
+    if grant not in allow:
+        allow.append(grant)
 p.write_text(json.dumps(d, indent=2) + "\n")
 print("hook entries preserved:", sum(len(v) for v in d.get("hooks", {}).values()))
 PY
@@ -247,7 +215,7 @@ be debugging scope and pattern syntax at the same time.
 --help` lists `seed`, `db`, `verify`, `notice`, `identity`, `backfill`).
 Recall reaches a beat through the **MCP server**, not the shell, so a beat
 that needs to look something up needs `sill` connected in the harness the
-worker spawns (phase 2), not another `Bash(...)` entry here. A beat asked to
+worker spawns (see [client setup](../desktop-clients.md)), not another `Bash(...)` entry here. A beat asked to
 measure recall with only the grants above will correctly report that it
 cannot — which is the right behavior and a confusing hour if you were not
 expecting it.
@@ -281,9 +249,6 @@ Clean up when both rungs pass:
 rm proof.txt
 ```
 
-Keep `.claude/settings.local.json`. It is the phase's real output.
+Keep `.claude/settings.local.json`. It holds the permissions the worker needs.
 
----
-
-Next: `docs/onboarding/02-backfill.md` — the consent-scoped scan, and the
-first thing this system does that touches your working life.
+Next, choose any relevant step from the [optional setup](README.md#optional-setup-after-the-memory-round-trip).

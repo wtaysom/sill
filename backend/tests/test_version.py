@@ -1,6 +1,6 @@
 """Version stamp: backend/pyproject.toml, plugin/plugin.json, and
-`sill-mcp --version` must all agree, and the CHANGELOG's dev section must
-have become a dated release with no `-dev` suffix.
+`sill-mcp --version` must all agree, and the CHANGELOG must
+have a dated heading for the current version.
 
 v0.1.0's own CHANGELOG "Known issues" list named `sill-mcp` having no
 `--version` flag as an open issue for the whole 0.1.0 line (see
@@ -22,7 +22,7 @@ PYPROJECT = BACKEND_ROOT / "pyproject.toml"
 PLUGIN_JSON = REPO_ROOT / "plugin" / "plugin.json"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
-EXPECTED_VERSION = "0.2.1"
+EXPECTED_VERSION = "0.3.0"
 
 
 def _pyproject_version() -> str:
@@ -110,43 +110,30 @@ def test_version_flag_matches_pyproject_when_package_is_resolvable():
         cwd=BACKEND_ROOT, capture_output=True, text=True, timeout=15,
     )
     assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr!r}"
-    assert _pyproject_version() in r.stdout, (
+    assert r.stdout.strip() == f"sill-mcp {_pyproject_version()}", (
         f"expected pyproject version {_pyproject_version()!r} in --version "
         f"output, got: {r.stdout!r}"
     )
 
 
-# --- CHANGELOG: dated release, not "-dev — unreleased" ----------------------
+# --- CHANGELOG: dated version heading ---------------------------------------
 
-def test_changelog_has_no_dev_unreleased_marker():
-    """The v0.2.0 section describes a dated release, not a pending one.
-
-    Scoped to that section deliberately. The earlier form of this test read
-    everything above `## v0.1.0`, which also condemned a `## Unreleased`
-    heading sitting *above* v0.2.0 — the standard Keep a Changelog place for
-    work that has landed but not yet shipped, and the format this file's own
-    header says it follows. That made the next change to this repo, whatever
-    it turned out to be, unable to record itself without failing CI: the
-    author's choices were to leave the change undocumented or to edit a
-    released section. The claim worth holding is about the release heading,
-    so check the release heading.
-    """
+def test_changelog_has_no_dev_marker_for_current_version():
     text = CHANGELOG.read_text()
-    assert "v0.2.0-dev" not in text, "CHANGELOG still carries the -dev marker"
-    body = text.split("## v0.2.0", 1)[-1].split("## v0.1.0", 1)[0]
-    assert "unreleased" not in body.lower(), (
-        "CHANGELOG's 0.2.0 section still reads as unreleased"
+    dev_heading = rf"^## v{re.escape(EXPECTED_VERSION)}-dev\b"
+    assert not re.search(dev_heading, text, re.M), "CHANGELOG still has a -dev heading"
+
+
+def test_changelog_has_dated_heading_for_current_version():
+    text = CHANGELOG.read_text()
+    heading = rf"^## v{re.escape(EXPECTED_VERSION)} — \d{{4}}-\d{{2}}-\d{{2}}$"
+    assert re.search(heading, text, re.M), (
+        f"could not find a '## v{EXPECTED_VERSION} — YYYY-MM-DD' heading in CHANGELOG.md"
     )
 
 
-def test_changelog_has_dated_v0_2_0_heading():
+def test_changelog_current_version_precedes_release_history():
     text = CHANGELOG.read_text()
-    m = re.search(r"(?m)^## v0\.2\.0 — (\d{4}-\d{2}-\d{2})\s*$", text)
-    assert m, "could not find a '## v0.2.0 — YYYY-MM-DD' release heading in CHANGELOG.md"
-
-
-def test_changelog_v0_2_0_section_precedes_v0_1_0():
-    text = CHANGELOG.read_text()
-    i020 = text.index("## v0.2.0")
-    i010 = text.index("## v0.1.0")
-    assert i020 < i010, "the new release heading should sit above the v0.1.0 history"
+    versions = (EXPECTED_VERSION, "0.2.1", "0.2.0", "0.1.0")
+    positions = [text.index(f"## v{version} — ") for version in versions]
+    assert positions == sorted(positions), "version headings must be newest first"

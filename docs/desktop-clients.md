@@ -1,0 +1,183 @@
+# Connect Sill to your client
+
+Run [install and first use](onboarding/01-install.md) with the target below.
+For another client on an existing install, run the matching `sill connect`
+command from the Sill checkout. It merges the Sill entry with the
+client's existing settings. `--dry-run` previews whether the registration
+can be made. Restart the client and allow the specific Sill calls when asked.
+
+Each local registration points to the installed `sill-mcp` executable and
+passes the absolute `backend/.env` path as a separate `--env-file` argument.
+Keep the file private. Set the PostgreSQL coordinates or `SILL_DB_DSN` in
+that file. The explicit file supplies literal values for the database,
+independent of the client's working directory and ambient PostgreSQL
+settings. Hook commands use `SILL_INSTANCE_ENV_FILE` to select that same
+file. These are separate settings.
+
+If the client has a legacy entry containing only `sill-mcp`, check which
+database it used before adopting it. Once confirmed, add `--adopt-legacy`
+to the matching registration or [upgrade](../README.md#upgrading) command.
+Review custom entries yourself. Default memory tools work with the local
+embeddings service. The separate `stage` tool requires an explicit
+`SILL_ENABLE_STAGE=1` in the server process environment and a working
+optional Chorus installation.
+
+## Claude Desktop
+
+Install with `./install.sh --client claude-desktop` on macOS. For an
+existing install:
+
+```bash
+sill connect claude-desktop --env-file "$(pwd -P)/backend/.env"
+```
+
+1. Quit Claude Desktop completely with **Claude > Quit Claude**, then
+   reopen it.
+2. In **Settings > Desktop app > Extensions > Local MCP servers**, check
+   the Sill connection and its logs. **Edit config** opens
+   `~/Library/Application Support/Claude/claude_desktop_config.json`,
+   where the entry is `mcpServers.sill`.
+3. Open a new chat and look for Sill under **+ > Connectors**. Allow the
+   requested tool calls and run the first-memory exercise. If local MCP
+   servers are disabled on a managed Mac, check the organization's local
+   MCP policy. [Claude Desktop local server guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)
+
+## Claude Code
+
+Install with `./install.sh --client claude-code`. For an existing install:
+
+```bash
+sill connect claude-code --env-file "$(pwd -P)/backend/.env"
+```
+
+Restart Claude Code. `claude mcp list` should show Sill connected. Its
+user-scope entry is `mcpServers.sill` in `~/.claude.json`. Accept workspace
+trust if required, then allow the Sill tools in the session.
+
+## Codex CLI
+
+Install with `./install.sh --client codex`. For an existing install:
+
+```bash
+sill connect codex --env-file "$(pwd -P)/backend/.env"
+```
+
+Restart Codex. `codex mcp list` shows the registration, and `/mcp` inside a
+new session shows the connected server and tools. Check `[mcp_servers.sill]`
+in `${CODEX_HOME:-$HOME/.codex}/config.toml` if the server is missing. Allow
+the selected Sill tools when prompted. If you wired optional Codex CLI
+hooks, use `/hooks` to review and trust them again after a command changes.
+[Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+· [Codex hook review](https://learn.chatgpt.com/docs/hooks)
+
+## Desktop local Codex
+
+Use `./install.sh --client codex` or the `sill connect codex` command
+above. The target writes `[mcp_servers.sill]` in
+`${CODEX_HOME:-$HOME/.codex}/config.toml` without requiring the Codex CLI.
+Run the registration on the same local host and with the Codex home
+used by the desktop app. Open **Settings > MCP servers**, check that
+Sill is enabled, then use **Restart** or quit and reopen the app. In a
+new Codex session running locally on the Mac, check `/mcp` and allow
+the requested Sill tool calls. [Desktop MCP settings](https://learn.chatgpt.com/docs/extend/mcp?surface=desktop)
+
+## Client capabilities and verification
+
+| Client | Deliberate MCP memory tools | Automatic recall in prompts | Sill transcript capture | Sill guards | Observed version and mode |
+|---|---|---|---|---|---|
+| Claude Desktop | Local stdio | No Sill hooks | None from this integration | None from this integration | 5.11492.5 remembered and recalled in two chats with Sill 0.3.0 at `8380f2b`. Codex CLI independently retrieved the same memory and declared production. |
+| Claude Code | Local stdio | Optional Claude Code hook | Local CLI JSONL for hook processing | Optional Claude Code hooks | 2.1.296 remembered and recalled in separate processes with Sill 0.3.0 at `8380f2b`. Prompt, guard, write and independent write callbacks passed across separate fixture runs. |
+| Codex CLI | Local stdio | Optional Codex hook | Local CLI JSONL for hook processing | Optional, reviewed Codex hooks | 0.162.1 retrieved the same Sill 0.3.0 UUID from Claude Code at `8380f2b`. Prompt, guard, write and independent write callbacks passed after normal hook trust. |
+| Desktop local Codex | Local stdio in the app's Codex host | Local hook support in the host. Sill behavior unverified. | Sill capture unverified | Sill enforcement unverified | Two distinct Codex Desktop chats passed remember/recall with Sill 0.3.0 at `8380f2b`. Native transcripts reported embedded runtime `0.169.0-alpha.11.1`; app bundle version unknown. Raw tool results and database checks matched the full typed record. |
+| Hosted ChatGPT Chat / Work | Private custom MCP plugin via Secure MCP Tunnel | Explicit tool calls | None from this integration | None from this integration | Web Chat mode passed a functional two-chat memory check with tunnel-client 0.0.20 and Sill 0.3.0 at `8380f2b`. Independent raw cloud-plugin retrieval and database checks matched the full typed record; browser raw tool JSON was unavailable. |
+
+The native CLI checks verified the same synthetic UUID, speaker and full
+declared production across processes. Their measured runtime at `8380f2b`
+is unchanged by the subsequent installer, restore and CI fixes through
+`7facec3`; see the [release rehearsal](RELEASE-REHEARSAL.md) for exact
+revision and platform coverage. Claude Desktop's final two-chat check also
+used `8380f2b`. Relevant fields were transcribed from its expanded native
+tool cards; database readback and an independent raw Codex MCP result
+verified the complete typed production. This proves deliberate memory
+tool use, not automatic recall or other Sill hooks in Claude Desktop.
+The earlier Desktop 5.11492.2 observation at `f3233a5` reported Sill 0.2.1
+and remains separate evidence. Worker launcher checks do not establish
+hook delivery or desktop behavior. See [harness adapters](adapters.md) for
+hook scope. The first-memory prompts guide deliberate tool use in any
+connected client.
+
+## Hosted ChatGPT Chat and Work via a private tunnel
+
+The functional two-chat memory flow passed in hosted ChatGPT web Chat
+mode. Browser approvals and assistant answers were observed separately
+from an independent raw cloud-plugin recall and database comparison;
+the browser's exact tool JSON and execution count remain unverified.
+See the [release rehearsal](RELEASE-REHEARSAL.md#hosted-chatgpt) for the
+evidence boundary. Local Codex and Claude use their own app sign-ins.
+This separate hosted setup needs a Platform organization with Secure MCP
+Tunnel access and a ChatGPT workspace that permits creating and using
+a private custom MCP plugin.
+
+1. In Platform tunnel settings, find or create a private tunnel associated
+   with the intended ChatGPT workspace. Creating or editing the tunnel
+   requires **Tunnels Read + Manage**. The runtime key and the person
+   selecting the tunnel during plugin creation need **Tunnels Read + Use**.
+   ChatGPT workspace or developer-mode access is a separate permission.
+   Check both if the tunnel is absent in ChatGPT.
+   [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+2. Download OpenAI's published `tunnel-client` for your Mac and run
+   `tunnel-client help quickstart`. The flags below were checked against
+   0.0.20. Supply the restricted runtime key as
+   `CONTROL_PLANE_API_KEY` through a protected environment or secret
+   store. Keep key literals out of command arguments, shell history,
+   configuration files, logs, repositories, and backups.
+3. In the shell with the runtime key and `CONTROL_PLANE_TUNNEL_ID` set,
+   create a local stdio profile. Replace both absolute paths with those
+   from the local Sill registration. The inner quotes keep paths with
+   spaces intact as separate arguments.
+
+   ```bash
+   umask 077
+   tunnel-client init --sample sample_mcp_stdio_local --profile sill-local \
+     --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
+     --control-plane-api-key-ref env:CONTROL_PLANE_API_KEY \
+     --mcp-command '"/absolute/path/to/sill-mcp" --env-file "/absolute/path to/sill/backend/.env"'
+   tunnel-client doctor --profile sill-local --explain
+   ```
+
+4. After the doctor check passes, run the client in the foreground and
+   leave it running through discovery and use. The default health
+   listener for this profile is loopback on port 8080. Check readiness
+   from another terminal.
+
+   ```bash
+   tunnel-client run --profile sill-local
+   ```
+
+   ```bash
+   curl -fsS http://127.0.0.1:8080/readyz
+   ```
+
+   Open the local `/ui` on that listener for status and active polling.
+   If the port is occupied, choose a free loopback port with
+   `--health-listen-addr` when creating the profile and use that port for
+   the readiness check. If the MCP child fails, verify both absolute
+   paths, the private env file, and the local Sill runtime.
+5. In ChatGPT on the web, go to **Plugins > + > Add custom MCP server**.
+   Choose **Tunnel** under **Connection**, enter the ID in **Tunnel ID**
+   and select the matching tunnel button. Confirm the authentication
+   settings for the stdio binding, then create and install the plugin in
+   the intended workspace. Check that discovery lists `remember` and
+   `recall`, and set the plugin's tool permissions to **Always ask**.
+   The observed UI listed all 39 Sill tools without individual enable
+   switches. In a hosted chat, select the installed plugin with `@` and run the
+   [first-memory exercise](onboarding/01-install.md#remember-and-recall)
+   using a fresh hosted chat for recall.
+   [OpenAI custom MCP server guide](https://developers.openai.com/api/docs/guides/custom-mcp-server)
+
+The hosted check is complete once the hosted chat calls Sill and the fresh
+chat retrieves the same synthetic UUID. Keep the database ports private
+and use one foreground tunnel client per stdio tunnel. Secure MCP Tunnel
+is for private connections. Public plugin submission has its own HTTPS
+endpoint and authentication requirements.
+[OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)

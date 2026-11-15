@@ -29,6 +29,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+import _store
 
 DB_CONTAINER = os.environ.get("SILL_DB_CONTAINER", "sill_db")
 DB_USER = os.environ.get("SILL_DB_USER", "sill")
@@ -65,6 +66,9 @@ def is_goodnight_message(message: str, triggers: list[str]) -> bool:
 
 
 def query_postgres(sql: str) -> list[list[str]]:
+    if 'SILL_INSTANCE_ENV_FILE' in os.environ:
+        return _store.selected_legacy_rows(sql, unavailable_message=
+            '[sill] Selected store unavailable; checkpoint query unchecked.')
     cmd = [
         "docker", "exec", DB_CONTAINER,
         "psql", "-U", DB_USER, "-d", DB_NAME,

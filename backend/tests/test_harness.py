@@ -1,6 +1,7 @@
 """Harness normalization. Pure functions over payload dicts; no I/O."""
 
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 HOOKS = Path(__file__).resolve().parents[2] / "plugin" / "hooks"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 spec = importlib.util.spec_from_file_location("_harness", HOOKS / "_harness.py")
 h = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(h)
@@ -31,6 +33,11 @@ CLAUDE_MULTI_EDIT = {"tool_name": "MultiEdit",
 CODEX_MULTI_FILE_PATCH = {"tool_name": "apply_patch",
                            "tool_input": {"input": "*** Update File: a.md\n+x\n"
                                                     "*** Update File: b.md\n+y\n"}}
+
+
+def _hook_events(host):
+    with (FIXTURES / f"{host}-hook-events.jsonl").open(encoding="utf-8") as fixture:
+        return {event["hook_event_name"]: event for event in map(json.loads, fixture)}
 
 
 @pytest.mark.parametrize("payload", [CLAUDE_BASH, CODEX_EXEC, CODEX_EXEC_CMD])
@@ -113,6 +120,80 @@ def test_command_key_precedence_and_junk_values():
 def test_write_kind_across_both_harnesses(payload):
     assert h.tool_kind(payload) in ("write", "edit")
     assert h.written_path(payload) == "a.md"
+
+
+@pytest.mark.parametrize("event_name", ["PreToolUse", "PostToolUse"])
+def test_current_codex_apply_patch_command_and_legacy_input_normalize_identically(event_name):
+    event = _hook_events("codex")[event_name]
+    legacy_event = {**event, "tool_input": {"input": event["tool_input"]["command"]}}
+    expected_path = "/tmp/sill-hook-fixture/outputs/rehearsal.md"
+    expected_text = (
+        "The synthetic blue compass rests beside the sample notebook. "
+        "This file verifies the scheduled worker output contract."
+    )
+    for payload in (event, legacy_event, _hook_events("claude")[event_name]):
+        assert h.tool_kind(payload) == "write"
+        assert h.written_path(payload) == expected_path
+        assert h.written_text(payload) == expected_text
+        assert h.written_files(payload) == [(expected_path, expected_text)]
+
+
+def test_codex_patch_command_takes_precedence_over_legacy_input():
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {
+            "command": "*** Add File: current.md\n+current\n",
+            "input": "*** Add File: legacy.md\n+legacy\n",
+        },
+    }
+    assert h.written_path(payload) == "current.md"
+    assert h.written_text(payload) == "current"
+    assert h.written_files(payload) == [("current.md", "current")]
+    # A nonblank string body wins even when its contents are unparseable.
+    payload["tool_input"]["command"] = "missing a patch header"
+    assert h.written_path(payload) is None
+    assert h.written_text(payload) is None
+    assert h.written_files(payload) == []
+
+
+@pytest.mark.parametrize("command", [None, ["patch"], {"patch": "text"}, 42, "", " \n"])
+def test_codex_patch_uses_legacy_input_if_command_has_no_string_body(command):
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {"command": command, "input": "*** Add File: legacy.md\n+legacy\n"},
+    }
+    assert h.written_path(payload) == "legacy.md"
+    assert h.written_text(payload) == "legacy"
+    assert h.written_files(payload) == [("legacy.md", "legacy")]
+
+
+def test_malformed_patch_fields_do_not_normalize_as_text():
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {"command": ["*** Add File: a.md", "+text"], "input": 42},
+    }
+    assert h.written_path(payload) is None
+    assert h.written_text(payload) is None
+    assert h.written_files(payload) == []
+
+
+def test_hook_events_and_rollout_records_use_separate_parsers(tmp_path):
+    rollout = {
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "call_fixture",
+            "input": "*** Add File: a.md\n+text\n",
+        },
+    }
+    assert h.written_files(rollout) == []
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(json.dumps(rollout), encoding="utf-8")
+    assert list(h.iter_transcript_tool_uses(transcript)) == [
+        {"id": "call_fixture", "name": "apply_patch", "input": "*** Add File: a.md\n+text\n"},
+    ]
+    assert list(h.iter_transcript_tool_uses(FIXTURES / "codex-hook-events.jsonl")) == []
 
 
 def test_written_text_reads_flat_edit_new_string():
@@ -247,9 +328,70 @@ def test_assistant_text_prefers_the_direct_field():
     assert h.assistant_text({}) is None
 
 
-def test_detect_identifies_each_harness():
-    assert h.detect({"turn_id": "t1", "session_id": "s"}) == "codex"
-    assert h.detect({"session_id": "s", "transcript_path": "/x.jsonl"}) in ("claude", "unknown")
+def test_detect_identifies_codex_without_guessing_claude():
+    assert h.detect(_hook_events("codex")["UserPromptSubmit"]) == "codex"
+    assert h.detect(_hook_events("claude")["UserPromptSubmit"]) == "unknown"
+    for turn_id in (None, False, [], "", " \t"):
+        assert h.detect({"turn_id": turn_id}) == "unknown"
+
+
+@pytest.mark.parametrize("event_name", ["UserPromptSubmit", "PreToolUse", "PostToolUse"])
+def test_hook_session_identity_uses_payload_for_codex_and_keeps_claude_override(event_name):
+    codex = _hook_events("codex")[event_name]
+    claude = _hook_events("claude")[event_name]
+    stable = "00000000-0000-4000-8000-000000000004"
+    env = {"CLAUDE_CODE_SESSION_ID": stable}
+    assert h.hook_session_id(codex, env=env) == "00000000-0000-4000-8000-000000000002"
+    assert h.hook_session_id(claude, env=env) == stable
+    assert h.hook_session_id(claude, env={}) == "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.mark.parametrize("session_id", [None, True, 42, {}, [], "", " \t"])
+def test_hook_session_identity_rejects_invalid_session_ids(session_id):
+    env = {"CLAUDE_CODE_SESSION_ID": "inherited-claude-id"}
+    assert h.hook_session_id({"turn_id": "t", "session_id": session_id}, env=env) is None
+    assert h.hook_session_id({"session_id": session_id}, env={}) is None
+
+
+def test_hook_session_identity_falls_back_on_invalid_override():
+    payload = {"session_id": " synthetic session "}
+    for override in (None, 42, " \n"):
+        assert h.hook_session_id(payload, env={"CLAUDE_CODE_SESSION_ID": override}) == (
+            " synthetic session "
+        )
+
+
+def test_hook_session_identity_rejects_non_payloads():
+    env = {"CLAUDE_CODE_SESSION_ID": "inherited-claude-id"}
+    for payload in (None, [], "text"):
+        assert h.hook_session_id(payload, env=env) is None
+
+
+def test_hook_session_path_key_preserves_canonical_uuid():
+    native_id = "deadbeef-1111-2222-3333-444455556666"
+    assert h.hook_session_path_key(native_id) == native_id
+    assert h.hook_session_path_key(native_id.upper()) != native_id
+
+
+def test_hook_session_path_key_keeps_arbitrary_session_ids_in_distinct_safe_paths():
+    session_ids = [
+        "../shared", ".._shared", "/absolute/path", "a\\b", "a/b", "recent",
+        "case", "CASE", "résumé", "re\u0301sume\u0301", " a ", "a",
+        "a" * 512, "a\0", "\ud800",
+    ]
+    keys = [h.hook_session_path_key(session_id) for session_id in session_ids]
+    assert all(key and re.fullmatch(r"[a-z0-9-]{1,128}", key) for key in keys)
+    assert len(set(keys)) == len(session_ids)
+    assert h.hook_session_path_key("recent") == (
+        "sha256-034a7e52c5c9534b709dc1dba403868399b0949f7c1933a67325c22077ffc221"
+    )
+    assert h.hook_session_path_key(session_ids[0]) == keys[0]
+    assert h.hook_session_path_key(keys[0]) != keys[0]
+
+
+def test_hook_session_path_key_rejects_invalid_session_ids():
+    for junk in (None, True, 42, [], {}, "", " \t"):
+        assert h.hook_session_path_key(junk) is None
 
 
 def test_never_raises_on_garbage():
