@@ -73,6 +73,24 @@ def test_cached_revision_refuses_anything_it_cannot_prove(rehearsal, listing):
         rehearsal["cached_revision"](listing)
 
 
+def test_the_old_image_build_changes_only_where_packages_come_from(rehearsal):
+    """v0.2.0's Dockerfile no longer builds: its Debian and PostgreSQL sources were retired."""
+    tagged = ("FROM postgres:16-bullseye\n\n# 1. Install Build Dependencies\n"
+              "RUN apt-get update && apt-get install -y \\\n    postgresql-server-dev-16 \\\n    gcc\n")
+    built = rehearsal["with_archived_sources"](tagged)
+    lines = built.splitlines(keepends=True)
+    assert lines[0] == "FROM postgres:16-bullseye\n" and "".join(lines[:1] + lines[2:]) == tagged
+    added = lines[1]
+    assert added.startswith("RUN ") and added.count("\n") == 1
+    for needed in ("http://archive.debian.org/", "https://apt-archive.postgresql.org/",
+                   "/etc/apt/sources.list.d/pgdg.list", "ca-certificates"):
+        assert needed in added
+    # It refuses a base it was not written for, and never applies twice.
+    for other in (tagged.replace("bullseye", "bookworm"), built):
+        with pytest.raises(RuntimeError, match="not the one this rehearsal knows"):
+            rehearsal["with_archived_sources"](other)
+
+
 def test_env_file_values_lose_one_layer_of_quotes(rehearsal):
     text = (f"# written by the upgrade\n\nEMBEDDING_REVISION='{REVISION}'\n"
             'EMBEDDING_MODEL_ID="unsloth/embeddinggemma-300m"\nEMBEDDING_DIMENSION=768\n'

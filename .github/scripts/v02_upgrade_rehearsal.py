@@ -43,6 +43,16 @@ REQUIRED = ("bash", "cat", "date", "dirname", "git", "gzip", "ln", "mkdir", "mkt
 OPTIONAL = ("basename", "chmod", "cp", "crontab", "cut", "env", "grep", "head", "id", "ls",
             "readlink", "sh", "sort", "tail", "tar", "touch", "tr", "uname", "wc")
 HEX = re.compile(r"[0-9a-f]{40}")
+# v0.2.0's database image no longer builds from its tag. Debian 11 left
+# deb.debian.org's security pool and PostgreSQL retired bullseye-pgdg, so the
+# first apt-get in its Dockerfile fails. The same packages are in the two
+# archives; the archived PostgreSQL source is https-only, hence the
+# certificates. Nothing else about the image changes.
+OLD_BASE = "FROM postgres:16-bullseye\n"
+ARCHIVES = ("RUN sed -i 's|http://deb.debian.org/|http://archive.debian.org/|g' /etc/apt/sources.list && "
+            "sed -i 's|http://apt.postgresql.org/|https://apt-archive.postgresql.org/|' "
+            "/etc/apt/sources.list.d/pgdg.list && apt-get update -o Dir::Etc::sourceparts=- && "
+            "apt-get install -y --no-install-recommends ca-certificates\n")
 MEMORIES = """SELECT coalesce(json_agg(json_build_object(
   'id', id::text, 'content_md5', md5(content), 'type', type::text, 'status', status::text,
   'live', archived_at IS NULL, 'created_at', created_at, 'vector_md5', md5(embedding::text))
@@ -89,6 +99,13 @@ def cached_revision(listing):
     require(snapshots == [pointer.strip()],
             f"expected the cache to hold exactly the snapshot refs/main names; found {snapshots}")
     return snapshots[0]
+
+
+def with_archived_sources(dockerfile):
+    """The v0.2.0 database Dockerfile with its package sources pointed at the archives."""
+    require(dockerfile.startswith(OLD_BASE) and "archive" not in dockerfile,
+            "the v0.2.0 database Dockerfile is not the one this rehearsal knows how to build today")
+    return OLD_BASE + ARCHIVES + dockerfile[len(OLD_BASE):]
 
 
 def compare_memories(before, after, keep, newer):
@@ -265,12 +282,21 @@ def rehearse(source, temporary, evidence, report):
                   engine=dict(version=docker("version", "--format", "{{.Server.Version}}"),
                               compose=docker("compose", "version", "--short")))
 
+    dockerfile = backend / "Dockerfile"
+    tagged = dockerfile.read_text()
+    dockerfile.write_text(with_archived_sources(tagged))
+    report["old_image_build"] = ("package sources pointed at archive.debian.org and apt-archive.postgresql.org; "
+                                 "the tagged Dockerfile is restored before the upgrade")
+
     try:
         phase(f"default {OLD_TAG} install")
         code, text, seconds = script(checkout / "install.sh", checkout,
                                      dict(env, SILL_INSTALL_WAIT_HEALTHY_S="1800"),
                                      evidence, "install-v0.2.0.log", temporary, 3000)
         require(code == 0, f"{OLD_TAG} install.sh exited {code}; see install-v0.2.0.log")
+        dockerfile.write_text(tagged)
+        require(run("git", "status", "--porcelain", "--untracked-files=no", cwd=checkout, env=env) == "",
+                "the v0.2 install left modified tracked files in its checkout")
         require(not env_file.exists() and not env_file.is_symlink(),
                 "the default v0.2 install wrote backend/.env; this rehearsal's premise changed")
         require(json.loads(registry.read_text())["mcpServers"] == {"unrelated": UNRELATED, "sill": LEGACY},
