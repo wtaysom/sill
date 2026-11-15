@@ -769,11 +769,16 @@ def test_old_python_stops_before_anything_is_installed(runtime):
     bin_dir = Path(env["TEST_PYTHON_WRAPPER"]).parent
     real = Path(env["TEST_PYTHON_WRAPPER"]).read_text()
     executable(bin_dir / "python3", OLD_PYTHON)
+    # The host may have its own python3.N further down PATH (a Linux runner
+    # has /usr/bin/python3.12). Stand an old one in front of every name the
+    # script tries, so "none found" does not depend on the machine.
+    for minor in range(10, 31):
+        executable(bin_dir / f"python3.{minor}", OLD_PYTHON)
     result = run(runtime, "install.sh", "--no-seed")
     assert result.returncode != 0
     assert "Python 3.10 or newer" in result.stderr and "3.9.6" in result.stderr
     assert str(bin_dir / "python3") in result.stderr
-    assert "No newer python3.x was found" in result.stderr
+    assert "No newer python3.x was found" in result.stderr and "is new enough" not in result.stderr
     assert not (Path(env["TEST_FIXTURE"]) / "docker-calls").exists()
     assert not (home / "xdg data").exists() and not (home / ".local").exists()
     # A newer interpreter under another name is pointed out by its path.
@@ -781,6 +786,11 @@ def test_old_python_stops_before_anything_is_installed(runtime):
     result = run(runtime, "install.sh", "--no-seed")
     assert result.returncode != 0
     assert f"{bin_dir / 'python3.12'} is new enough" in result.stderr
+    assert result.stderr.count("is new enough") == 1 and "No newer python3.x" not in result.stderr
+    # So is one newer than any release this script was written against.
+    executable(bin_dir / "python3.27", real)
+    result = run(runtime, "install.sh", "--no-seed")
+    assert f"{bin_dir / 'python3.27'} is new enough" in result.stderr
 
 
 def test_upgrade_and_verify_refuse_an_old_python_too(runtime):

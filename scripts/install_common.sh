@@ -44,7 +44,7 @@ sill_python_describe() {
 }
 
 sill_require_python() {
-  local path candidate found=0
+  local path minor found=0
   if ! path="$(command -v python3)"; then
     printf 'Sill needs Python 3.10 or newer, and there is no python3 on PATH.\n' >&2
     return 1
@@ -58,8 +58,9 @@ sill_require_python() {
     return 0
   fi
   printf 'Sill needs Python 3.10 or newer. python3 on PATH is %s (%s).\n' "$path" "$(sill_python_describe "$path")" >&2
-  for candidate in python3.14 python3.13 python3.12 python3.11 python3.10; do
-    if path="$(command -v "$candidate" 2>/dev/null)" && sill_python_ok "$path"; then
+  # Newest first, with room for releases that do not exist yet.
+  for (( minor = 30; minor >= 10; minor-- )); do
+    if path="$(command -v "python3.$minor" 2>/dev/null)" && sill_python_ok "$path"; then
       printf '  %s is new enough. Put its directory first on PATH so that python3 means it, then rerun.\n' "$path" >&2
       found=1
     fi

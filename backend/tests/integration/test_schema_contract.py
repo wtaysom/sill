@@ -195,7 +195,8 @@ def test_ambiguous_duplicate_ledger_is_rejected(schema_routes):
             query(conn, 'DROP TABLE public.schema_migrations')
             conn.commit()
         assert ledger(conn) == [('ag_catalog',)]
-        assert query(conn, 'SELECT count(*) FROM schema_migrations') == [(15,)]
+        shipped = len(list((ROOT / 'backend/migrations').glob('[0-9][0-9][0-9]_*.sql')))
+        assert query(conn, 'SELECT count(*) FROM schema_migrations') == [(shipped,)]
 
 
 def test_initdb_logs_retain_only_known_frozen_baseline_error(schema_routes):
