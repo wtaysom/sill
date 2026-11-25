@@ -15,7 +15,8 @@ All notable changes to Sill are recorded here. Format loosely follows
   by passage. Each memory shown says which part it was recalled for. A long
   prompt nobody typed still gets the time header alone. The passage design
   was rated blind on 24 long messages from one person, and on nobody
-  else's. See [Hooks](docs/hooks.md#spontaneous-recall).
+  else's, through that installation's retrieval functions, which differ
+  from Sill's. See [Hooks](docs/hooks.md#spontaneous-recall).
 - **A `[TIME]` header that counts your own messages.** The gap and the
   message count came from one database row per project that every prompt
   overwrote, so a background task notice or another session in the same

@@ -210,7 +210,12 @@ is asked with the first 2,000 characters of what you typed.
 
 The passage design was chosen by a blind rating of five candidates on
 24 long messages, all from one person. It has not been rated on anyone
-else's messages.
+else's messages. It was also rated through that installation's
+retrieval functions, which are not the ones here: its `fast_recall`
+takes as many nearest memories as it is asked for as seeds (150 in the
+rating), and Sill's takes five whatever it is asked for. A passage's
+fast lane therefore brings back different candidates here. What carries
+over is how a message is split and how passages share the places shown.
 
 **The `[TIME]` header.** `msg #N this session · <gap> since your last
 message` counts the messages you typed in this session and nothing

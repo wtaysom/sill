@@ -33,6 +33,15 @@ person's; the design has not been rated on anyone else's.
 backend/tests/test_recall_long_messages.py pins the rated behaviour on invented
 text; a change here should be rated again, not just tested again.
 
+The rating also ran through that installation's retrieval functions, and the
+ones here are not the same. Its fast_recall takes as many nearest memories as
+it is asked for as seeds (150 in the rating) and grows its answer from them;
+the fast_recall here takes five whatever it is asked for. So a passage's fast
+lane brings back different candidates here, and asking this one for more rows
+only lengthens its list (backend/tests/integration/test_passage_recall.py
+holds it to that). What was rated is how a message is split and how passages
+share the places shown, not what this store returns for a passage.
+
 A failed call loses its own rows and nothing else. When every call fails,
 passage_recall() raises recall_core.RecallUnavailable, as fused_recall() does:
 a store that could not answer is not a store with nothing to say. Anything else
