@@ -360,7 +360,9 @@ def parse_memory_rows(output: str, limit: int = 15) -> list[dict]:
 
 
 def recall_rows(fn: str, query_text: str, limit: int = 15, *,
-                fast_min_similarity: float = .25) -> list[dict]:
+                fast_min_similarity: float = .25, deadline: float | None = None) -> list[dict]:
+    """One retrieval lane. `deadline` (time.monotonic) bounds the call for a caller
+    that fans out its own lanes; past it the store is not asked at all."""
     if not query_text.strip() or limit <= 0:
         return []
     if fn not in {'fast','hybrid'}:
@@ -390,7 +392,7 @@ def recall_rows(fn: str, query_text: str, limit: int = 15, *,
           WHERE m.archived_at IS NULL
         ) candidates {floor} ORDER BY score DESC, id LIMIT {limit}
       ) preview"""
-    return parse_memory_rows(_run_sql(sql), limit)
+    return parse_memory_rows(_run_sql(sql) if deadline is None else _run_sql(sql, deadline=deadline), limit)
 
 
 def full_contents(ids: list[str], *, deadline: float | None = None) -> dict[str,str]:

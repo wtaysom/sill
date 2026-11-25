@@ -92,7 +92,7 @@ grep -l "_harness" plugin/hooks/*.py
 
 | Hook | Event | Default-wired | Harnesses |
 |---|---|:---:|---|
-| `spontaneous-recall` | UserPromptSubmit | yes | Claude Code + Codex. No harness-specific code needed — reads `prompt`, a field neither harness's payload is known to diverge on (the *inject* slot in `docs/adapters.md`; that compatibility is inferred, not independently confirmed against a live Codex sample). |
+| `spontaneous-recall` | UserPromptSubmit | yes | Claude Code + Codex. Recall reads `prompt`, a field neither harness's payload is known to diverge on (the *inject* slot in `docs/adapters.md`; that compatibility is inferred, not independently confirmed against a live Codex sample). The `[TIME]` header also reads `transcript_path` and `prompt_id` when the payload carries them, and both transcript schemas; without a transcript it falls back to the per-project row. |
 | `track-reuse` | Stop | yes | Claude Code + Codex. Harness-normalized — `_harness.join_mcp_name` fixes the unseparated Codex transcript join (`mcp__sillrecall_batch` → `mcp__sill__recall_batch`). |
 | `attribution-check` | PreToolUse | yes | Claude Code + Codex. Harness-normalized (F2 shell/MCP branch); F1 (beat-citation check) is dormant on a fresh install regardless of harness. |
 | `state-language-check` | PreToolUse | yes | Claude Code + Codex. Harness-normalized; also fixes a real bug where the `apply_patch` branch read `tool_input["command"]` (shell's key) instead of `"input"` (the patch body's actual key) — it never extracted anything on Codex even though `apply_patch` was already in its matcher. |
@@ -131,7 +131,9 @@ results as `additionalContext`. Every genuine prompt — including a
 short one that skips recall itself — also gets a one-line `[TIME]`
 header (wall-clock, plus the gap since your last message), and a
 headless/detached-beat gate silences the whole hook for
-non-interactive `--print` invocations.
+non-interactive `--print` invocations. A typed message over 2,000
+characters is recalled for passage by passage; see "Long messages"
+below.
 
 **When it fires:** `UserPromptSubmit`. Timeout: 45s.
 
@@ -145,7 +147,9 @@ non-interactive `--print` invocations.
 - `SILL_LOG_DIR` (default `/tmp`) — hook log, plus where the recall
   sidecar (`recall-sidecar-<session>.jsonl` / `-recent.jsonl`,
   consumed by `track-reuse`) and the response-pattern carry-forward
-  file (written by `response-patterns`, consumed here) both live.
+  file (written by `response-patterns`, consumed here) both live. The
+  log holds the first 100 characters of each prompt recalled for, so
+  the hook keeps it readable by its owner only.
 - `SILL_DETACHED_BEAT`, `SILL_INTERACTIVE`, `SILL_HEADLESS_TOOL` — the
   headless gate, see below.
 - Ambient, set by Claude Code itself, not by you:
@@ -157,7 +161,7 @@ non-interactive `--print` invocations.
 |---|---:|---|
 | `SILL_RECALL_MAX_MEMORIES` | `5` | Integer from 0 through 50. Zero skips store recall. |
 | `SILL_RECALL_MAX_CONVERSATIONS` | `2` | Integer from 0 through 50. Zero skips the optional conversation search. |
-| `SILL_RECALL_MIN_QUERY_LENGTH` | `20` | Integer from 0 through 10,000. Zero removes the minimum length. The 2,000-character maximum and topical keyword check still apply. |
+| `SILL_RECALL_MIN_QUERY_LENGTH` | `20` | Integer from 0 through 10,000. Zero removes the minimum length. The topical keyword check still applies. There is no maximum for a typed message; a prompt over 2,000 characters that nobody typed gets the time header alone. |
 | `SILL_RECALL_MIN_SIMILARITY` | `0.25` | Finite number from 0 through 1. Filters actual query cosine similarity in fast recall, independently of its blended score. Zero disables this filter. Hybrid recall uses its own reciprocal rank fusion scores. |
 | `SILL_RECALL_QUIET` | off | Set to `1`, `true` or `yes` to hide the displayed result list. The time header, store recall failure notices and model context still appear. |
 
@@ -174,6 +178,85 @@ how the GUI starts. For example, prefix the existing command with
 in the Claude Code settings or Codex `hooks.json` where it is registered.
 Codex may ask you to approve the edited command again. Compose reads
 `backend/.env` for the backend. The hook does not load that file.
+
+**Long messages.** A typed prompt over 2,000 characters is recalled
+for passage by passage (`plugin/hooks/_recall_passages.py`). Earlier
+versions skipped recall for any prompt that long. The message is split
+into what you wrote and what you quoted or pasted:
+
+- `<pasted_content>` blocks, `>` lines, and lines that open with an
+  assistant's name and a colon (`Assistant:`, `Claude:`, `Codex:`,
+  `ChatGPT:`, `Gemini:`) are material, not your words. So is an
+  unmarked paste after a short lead such as `Here you go...`.
+- On a line written `quoted reply — your answer`, the half before the
+  spaced dash is what you are answering and rides along with your
+  answer. If you never type a spaced dash, this rule does nothing. If
+  you use one as punctuation, the words before it stay in the passage
+  but names are taken only from the words after it.
+- Your own remarks drive the queries, questions first. A paste
+  contributes its opening, two inner pieces and its names. The names
+  you used are asked as a list of their own, by full-text match only.
+
+At most 12 passages and 24 store calls are made, four at a time, inside
+the same 15-second window a short prompt gets. Up to two memories that
+a third of the passages found are shown first, then one per passage in
+turn. Each is tagged `on="..."` with the opening of the passage it was
+recalled for. `SILL_RECALL_MAX_MEMORIES` and
+`SILL_RECALL_MIN_SIMILARITY` apply as they do to a short prompt. If the
+passages find nothing, the opening of the message is asked the old way.
+A long prompt nobody typed, such as a task notification or a workflow
+report, still gets the header alone. The optional conversation search
+is asked with the first 2,000 characters of what you typed.
+
+The passage design was chosen by a blind rating of five candidates on
+24 long messages, all from one person. It has not been rated on anyone
+else's messages.
+
+**The `[TIME]` header.** `msg #N this session · <gap> since your last
+message` counts the messages you typed in this session and nothing
+else. It is read from the session's own transcript
+(`plugin/hooks/_session_clock.py`), found through the `transcript_path`
+the harness hands the hook. A `prompt_id`, when the harness gives one,
+tells the prompt's own transcript entry from an earlier message with
+the same words. Earlier versions read one `session_activity` row per
+project that every prompt overwrote, so a background task notice or a
+second session in the same project reset the gap and the count.
+
+- A prompt nobody typed gets `not a typed message · <gap> since the
+  last typed message (#N this session)` and does not advance the row.
+- A message sent while the assistant was working is measured from when
+  you sent it: `sent 1m 58s ago, 1m 1s after your last message`.
+- A session's first message still reads the row: `new session (msg #1)
+  · last worked in <project> <gap> ago`.
+- Without a readable transcript the row answers as before. Claude Code
+  documents `transcript_path` for every hook event. Whether Codex
+  passes one to `UserPromptSubmit` is not confirmed in this repository,
+  so a Codex session may get the row.
+
+**What counts as typed.** A prompt is taken as typed unless it opens
+with `<` or `System:`, or is the desktop app's request for a suggested
+reply. Three wrappers are seen through: the Claude desktop app's
+`<pasted_content>`, Cursor's `<timestamp>`/`<user_query>` and Codex
+Desktop's `# Files mentioned by the user:` preamble. So are the notes
+the Claude desktop app puts in front of your words (`<system-reminder>`
+blocks, for a session you started from a card or the list of linked
+sessions): whether you typed the prompt is decided on what follows
+them, and recall is asked with what follows them. When what follows
+them is shorter than `SILL_RECALL_MIN_QUERY_LENGTH`, such as `Yes, try
+it`, the whole prompt is asked as before, note included.
+
+The rule has a cost. A message of your own that opens with `<`, such as
+pasted HTML or XML with nothing before it, is read as machine-written.
+Its header says `not a typed message`, it does not advance the clock,
+and if it is over 2,000 characters it gets no recall. A word in front
+of the markup avoids that.
+
+**Output size.** Claude Code replaces a hook's context over 10,000
+characters with a file path and a 2,000-character preview, and does
+not ask the model to open the file. The hook keeps its context under
+9,500: memories are dropped from the end, then conversations, and a
+pattern check is cut to 3,000. Only what was printed is journalled for
+`track-reuse` and counted as shown.
 
 **The headless gate.** `claude --print` (SDK/headless) invocations
 have no human on the other end — they must not get recall injected,
