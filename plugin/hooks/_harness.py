@@ -33,6 +33,11 @@ Two input shapes, not one:
   looked like it worked because a downstream filter used a substring
   test).
 
+Two functions take neither shape. They read the text of a prompt, or of a
+transcript's user message: own_words takes the desktop app's notes off the
+front of it, and typed_text returns what a person typed in it — out of
+whichever front-end's wrapper — or None when a harness wrote it.
+
 written_path/written_text answer for ONE file only — the first header in
 an apply_patch body. A caller that gates an in-scope check on
 written_path() before ever reading written_text() therefore judges a
@@ -497,6 +502,84 @@ def assistant_text(payload: object) -> str | None:
     try:
         d = _as_dict(payload)
         return _as_str(d.get("last_assistant_message")) if d is not None else None
+    except Exception:
+        return None
+
+
+# Wrappers three front-ends put round a message a person typed. The body is
+# what was typed; the wrapper is the front-end's. Each of the first two is an
+# opening matched at the start and a closing tag taken off the end by hand: one
+# pattern for the whole message (lazy body, `\s*` tail) tries every split of
+# every run of whitespace, and took 21 seconds on a megabyte of wide columns.
+_APP_SUGGESTION_OPENING = "This is an app-generated request for a suggested next user message"
+_WRAPPERS = (
+    (re.compile(r"\A<pasted_content\b[^>]*>"), "</pasted_content>"),                      # Claude desktop app
+    (re.compile(r"\A<timestamp>[^<]*</timestamp>\s*<user_query>"), "</user_query>"),      # Cursor
+)
+_CODEX_FILES = re.compile(r"\A# Files (?:mentioned|pasted) by the user:.*?^## My request[^\n]*:\s*\n(.*)\Z",
+                          re.S | re.M)
+
+
+# The Claude desktop app puts notes of its own in front of what a person typed: a
+# session started from a card, the list of linked sessions.
+_LEADING_REMINDERS = re.compile(r"\A\s*(?:<system-reminder>.*?</system-reminder>\s*)+", re.S)
+
+
+def own_words(text: object) -> object:
+    """`text` without the <system-reminder> blocks in front of it, when words
+    follow them.
+
+    The notes arrive in the transcript entry and in the prompt a hook is handed
+    alike, so one rule serves both. A reminder with nothing after it is nobody's
+    message and comes back as it was; so does anything that is not a string.
+    """
+    try:
+        if not isinstance(text, str):
+            return text
+        notes = _LEADING_REMINDERS.match(text)
+        after = text[notes.end():] if notes else text
+        return after if after.strip() else text
+    except Exception:
+        return text
+
+
+def typed_text(text: object) -> str | None:
+    """What a person typed in a prompt or a transcript's user message, or
+    None if nobody typed it.
+
+    A message is typed unless it
+      - opens with "<": task notifications, system reminders, agent and
+        cross-session messages, CI events, Codex's environment context.
+        Two wrappers are the exception, because their body is what the
+        person typed: the Claude desktop app's <pasted_content ...> and
+        Cursor's <timestamp>..<user_query>;
+      - is the desktop app's request for a suggested next message;
+      - opens with "System:".
+    Codex Desktop's "# Files mentioned by the user: ... ## My request...:"
+    wrapper is typed too; the request after it is returned.
+
+    A message behind the desktop app's own notes opens with "<" as well. Take
+    them off first: typed_text(own_words(text)).
+    """
+    try:
+        if not isinstance(text, str):
+            return None
+        s = text.strip()
+        if not s or s.startswith(_APP_SUGGESTION_OPENING) or s.startswith("System:"):
+            return None
+        if s.startswith("<"):
+            for opening, closing in _WRAPPERS:
+                m = opening.match(s)
+                if m:
+                    body = s[m.end():]          # s is stripped: a closing tag, if any, ends it
+                    if body.endswith(closing):
+                        body = body[:-len(closing)]
+                    return body.strip() or None
+            return None
+        m = _CODEX_FILES.match(s)
+        if m:
+            return re.split(r"\n<image\b", m.group(1), maxsplit=1)[0].strip() or None
+        return s
     except Exception:
         return None
 

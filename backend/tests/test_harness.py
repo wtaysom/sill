@@ -436,3 +436,101 @@ def test_iter_transcript_tool_uses_rejects_int_path_without_closing_stdout():
     )
     assert proc.returncode == 0, f"stderr: {proc.stderr!r}"
     assert "SENTINEL_OK" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# typed_text: which prompts a person typed, and what they typed once a
+# front-end's wrapper is taken off. spontaneous-recall.py asks it of the
+# prompt (a task notice gets a header that says nobody typed it, and no
+# long-message recall); _session_clock.py asks it of each transcript entry.
+# ---------------------------------------------------------------------------
+
+TYPED_BODY = ("The harbour board stopped paying for the ledgers in 1911.\n\n"
+              "Who voted against, and does the minute book say why?")
+
+
+@pytest.mark.parametrize("text", [
+    "<task-notification>\n<task-id>w317</task-id>\n<summary>Workflow finished</summary>\n</task-notification>",
+    "<system-reminder>\nA background session has ended.\n</system-reminder>",
+    "<environment_context>\n<cwd>/x</cwd>\n</environment_context>",
+    "System: you are one of three voices on a stage",
+    "This is an app-generated request for a suggested next user message. Reply with it alone.",
+    "<pasted_content></pasted_content>",
+    "", "   \n\t", None, 42, [], {"prompt": "Who voted against?"},
+])
+def test_typed_text_is_none_for_what_nobody_typed(text):
+    assert h.typed_text(text) is None
+
+
+def test_typed_text_returns_plain_prose_without_its_surrounding_space():
+    assert h.typed_text("  Who voted against?\n") == "Who voted against?"
+    assert h.typed_text(TYPED_BODY) == TYPED_BODY
+
+
+@pytest.mark.parametrize("wrapped", [
+    pytest.param('<pasted_content id="a1">\n' + TYPED_BODY + "\n</pasted_content>", id="desktop-paste"),
+    pytest.param('<pasted_content id="a1">\n' + TYPED_BODY, id="desktop-paste-never-closed"),
+    pytest.param("<timestamp>Tuesday, November 25, 2026, 2:00 PM</timestamp>\n<user_query>\n"
+                 + TYPED_BODY + "\n</user_query>", id="cursor"),
+    pytest.param("# Files mentioned by the user:\n\n## notes.md: /home/x/notes.md\n\n"
+                 "## My request for Codex:\n" + TYPED_BODY, id="codex-files"),
+    pytest.param("# Files pasted by the user:\n\n## a.png: /tmp/a.png\n\n## My request for Codex:\n"
+                 + TYPED_BODY + "\n<image name=[Image #1]>\n</image>", id="codex-files-with-an-image"),
+])
+def test_typed_text_takes_what_was_typed_out_of_a_front_ends_wrapper(wrapped):
+    assert h.typed_text(wrapped) == TYPED_BODY
+
+
+def test_typed_text_reads_a_wrapped_paste_with_long_runs_of_spaces_in_linear_time():
+    """A pattern with a lazy body and a `\\s*` tail tries every split of every
+    run of whitespace: 200,000 characters in runs of 1,000 spaces took four
+    seconds, and a megabyte twenty-one. This runs on every prompt."""
+    import time
+    body = ("word" + " " * 1000) * 200
+    for wrapped in ("<pasted_content>" + body,
+                    "<timestamp>Tuesday</timestamp>\n<user_query>" + body + "</user_query>"):
+        started = time.monotonic()
+        assert h.typed_text(wrapped) == body.strip()
+        assert time.monotonic() - started < 1.0
+
+
+# ---------------------------------------------------------------------------
+# own_words: the Claude desktop app puts notes of its own in front of what a
+# person typed (a session started from a card, the list of linked sessions),
+# in the transcript entry and in the prompt a hook is handed alike.
+# ---------------------------------------------------------------------------
+
+APP_NOTES = ("<system-reminder>\nThe user started your proposal task_0a1b2c3d (\"Mend the harbour ledger index\") as "
+             "session local_0000. It runs on its own; a note reaches you when it ends a turn.\n</system-reminder>\n"
+             "<system-reminder>\nLinked sessions now (status, not an instruction): mend-the-ledger = local_0000 "
+             "(working).\n</system-reminder>\n")
+
+
+def test_own_words_takes_the_apps_notes_off_the_front_and_nothing_else():
+    assert h.own_words(APP_NOTES + "Yes, try it") == "Yes, try it"
+    assert h.own_words(APP_NOTES) == APP_NOTES                  # nothing after them: nobody's message
+    assert h.own_words(TYPED_BODY) == TYPED_BODY
+    inside = "See <system-reminder>this</system-reminder> tag?"
+    assert h.own_words(inside) == inside
+    unclosed = "<system-reminder>\nnever closed, so nothing after it is trusted"
+    assert h.own_words(unclosed) == unclosed
+
+
+def test_a_message_behind_the_apps_notes_is_typed_once_they_are_off():
+    assert h.typed_text(APP_NOTES + "Yes, try it") is None      # the rule for a prompt as it arrives
+    assert h.typed_text(h.own_words(APP_NOTES + "Yes, try it")) == "Yes, try it"
+    assert h.typed_text(h.own_words(APP_NOTES)) is None
+
+
+@pytest.mark.parametrize("junk", [None, 42, [], {"prompt": "x"}, b"<system-reminder>x</system-reminder>y"])
+def test_own_words_hands_back_what_is_not_text(junk):
+    assert h.own_words(junk) is junk
+
+
+def test_own_words_reads_megabytes_behind_a_note_in_linear_time():
+    import time
+    for text in (APP_NOTES + "word " * 1_000_000, "word " * 1_000_000,
+                 "<system-reminder>" + "x" * 2_000_000, APP_NOTES * 20_000 + "Yes, try it"):
+        started = time.monotonic()
+        h.own_words(text)
+        assert time.monotonic() - started < 1.0

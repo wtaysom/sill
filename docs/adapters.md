@@ -29,7 +29,11 @@ the mechanism actually is, and where its proof lives.
 **Mechanism:** `plugin/hooks/spontaneous-recall.py`, a `UserPromptSubmit`
 hook. It reads `prompt` (and `cwd`/`session_id`) from the payload, queries
 the store, and returns `hookSpecificOutput.additionalContext` — text
-inserted into the agent's context before it answers. Every genuine prompt
+inserted into the agent's context before it answers. When the payload
+also carries a `transcript_path`, the `[TIME]` header's gap and count are
+read from that transcript; without one it uses the per-project row. A
+`prompt_id`, when present, tells the prompt's own transcript entry from an
+earlier message with the same words. Every genuine prompt
 also gets a one-line `[TIME]` header, so this slot has visible output even
 when nothing is recalled (a down store, a short prompt, or an empty
 result all still emit the header) — see `docs/hooks.md`'s
@@ -178,6 +182,8 @@ broken test.
 | `written_path(payload)` | hook payload | the target path or `None` | `Write`/`Edit`/`MultiEdit`'s `file_path`, or `apply_patch`'s path parsed out of its patch body's own `*** Update File: <path>` / `*** Add File: <path>` header line (Codex's `apply_patch` has no separate `file_path` field at all). Unparseable → `None`, never a guess. |
 | `written_text(payload)` | hook payload | the introduced text or `None` | `Write`'s full content, `Edit`'s `new_string`, `MultiEdit`'s `new_string`s newline-joined, or `apply_patch`'s added (`+`) lines — scoped to the *first* file's header only, so a multi-file patch can't leak file B's content into a check scoped to file A. |
 | `written_files(payload)` | hook payload | `[(path, added_text), ...]` | The multi-file-safe form of `written_path`/`written_text` together: one pair per `apply_patch` file header (each text scoped to only that file), or the single `(path, text)` pair for `Write`/`Edit`/`MultiEdit`. Exists because a caller gating an in-scope check on `written_path()` alone before ever reading `written_text()` judges an entire multi-file patch by its first file only — `state-language-check.py`, `stored-slot-guard.py`, and `tool-type-witness.py` all iterate this instead for exactly that reason. |
+| `own_words(text)` | a prompt, or the text of a transcript's user message | the text without the `<system-reminder>` blocks in front of it | The Claude desktop app puts notes of its own in front of what a person typed, in the transcript entry and in the prompt a hook is handed alike. They come off only when words follow them; a reminder alone, and anything that is not a string, comes back as it was. Call it before `typed_text`. |
+| `typed_text(text)` | a prompt, or the text of a transcript's user message | what the person typed, or `None` if nobody typed it | Anything that opens with `<` (task notifications, system reminders, Codex's environment context), the desktop app's suggested-message request and `System:` prompts are nobody's. Three wrappers come off and their body is returned: the Claude desktop app's `<pasted_content>`, Cursor's `<timestamp>`/`<user_query>`, and Codex Desktop's `# Files mentioned by the user:` preamble. Linear in the length of the text. Used by `spontaneous-recall.py` and `_session_clock.py`. |
 | `assistant_text(payload)` | hook payload | the assistant's turn text or `None` | Reads `last_assistant_message` directly — the one field Codex's `Stop` payload hands over that Claude's requires a transcript read to get (ground-truth item 3; already exploited by `response-patterns.py` and `track-reuse.py`, independently of this module). |
 | `iter_transcript_tool_uses(path)` | a transcript file path | `Iterator[{id, name, input}]` | The one function that does I/O. Walks both JSONL schemas — see the divergence table's "Transcript tool-call record" row. A non-path argument (including an `int`, which `open()` treats as a raw fd — a real, fixed bug; see `_harness.py`'s comments), a missing file, or a malformed line yields nothing rather than raising, and the result is built eagerly so a bad file can't fail *mid*-iteration either. |
 

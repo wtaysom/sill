@@ -3,6 +3,37 @@
 All notable changes to Sill are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+
+- **Recall for messages over 2,000 characters.** The prompt hook skipped
+  recall for any prompt that long. The guard was against a big paste timing
+  out the embedder, but a query is cut to 1,000 characters before it is
+  embedded, so it protected nothing. A typed long message is now split into
+  your own remarks and what you quoted or pasted, and recalled for passage
+  by passage. Each memory shown says which part it was recalled for. A long
+  prompt nobody typed still gets the time header alone. The passage design
+  was rated blind on 24 long messages from one person, and on nobody
+  else's, through that installation's retrieval functions, which differ
+  from Sill's. See [Hooks](docs/hooks.md#spontaneous-recall).
+- **A `[TIME]` header that counts your own messages.** The gap and the
+  message count came from one database row per project that every prompt
+  overwrote, so a background task notice or another session in the same
+  project reset them. They are now read from the session's own transcript.
+  A prompt nobody typed says so and leaves the clock alone. A message sent
+  while the assistant was working is measured from when it was sent. Notes
+  the Claude desktop app puts in front of your message are set aside:
+  recall is asked with your words, not with the note.
+- **Hook output stays under Claude Code's 10,000-character cap.** Over it,
+  Claude Code replaces a hook's context with a file path and a preview. The
+  hook now drops memories from the end to fit, and counts as shown only
+  what it printed.
+- **A failed conversation search no longer writes the prompt into the hook
+  log.** A timeout or a non-zero exit logged the command or its output,
+  which can hold the query. Failures are now logged by kind. The log is
+  created readable by its owner only, and an existing one is narrowed.
+
 ## v0.3.0 — 2026-11-15
 
 See the [release rehearsal](docs/RELEASE-REHEARSAL.md) for what was tested

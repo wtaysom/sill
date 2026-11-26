@@ -5,6 +5,7 @@ rather than a package, so make sure the backend root is importable whether
 tests are run from the repo root or from ``backend/``.
 """
 
+import ast
 import io
 import json
 import os
@@ -12,6 +13,7 @@ import runpy
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -106,3 +108,58 @@ def recall_hook(monkeypatch, capsys, tmp_path):
         return json.loads(captured.out), calls
 
     return run
+
+
+@pytest.fixture
+def prompt_hook(monkeypatch, tmp_path):
+    """The prompt hook's definitions and its entry code, run separately in-process.
+
+    `head()` returns a module holding everything spontaneous-recall.py defines
+    before it reads its payload, so a test can call one function or replace one.
+    `run(module, payload)` then executes the rest of the file against that module
+    and returns what the hook printed (None if it printed nothing).
+
+    Nothing live is behind it. Any subprocess (the database, git, a conversation
+    search) raises; the hook's log, its session journal and the pattern sidecar
+    live under `log_dir` in tmp_path; and the settings and session identity of
+    whoever is running the suite are taken out of the environment.
+    """
+    hook = BACKEND_ROOT.parent / "plugin" / "hooks" / "spontaneous-recall.py"
+    tree = ast.parse(hook.read_text(encoding="utf-8"))
+    split = next(i for i, node in enumerate(tree.body) if "json.load(sys.stdin)" in ast.unparse(node))
+    head_code, entry_code = (compile(ast.Module(body=body, type_ignores=[]), str(hook), "exec")
+                             for body in (tree.body[:split], tree.body[split:]))
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("this test starts no subprocess: no database, no git, no search")
+
+    from scripts import recall_core as core
+
+    for name in tuple(os.environ):
+        if name.startswith(("SILL_", "CLAUDE_")):
+            monkeypatch.delenv(name)
+    log_dir = tmp_path / "sill-log"
+    log_dir.mkdir()
+    monkeypatch.setenv("SILL_LOG_DIR", str(log_dir))
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(core, "full_contents", lambda ids, **kw: {})
+    monkeypatch.setattr(core, "record_exposure", lambda ids, **kw: None)
+
+    def head():
+        module = types.ModuleType("spontaneous_recall_under_test")
+        module.__file__ = str(hook)
+        exec(head_code, module.__dict__)
+        return module
+
+    def run(module, payload):
+        printed = io.StringIO()
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+            patch.setattr(sys, "stdout", printed)
+            try:
+                exec(entry_code, module.__dict__)
+            except SystemExit as stop:
+                assert stop.code in (0, None)
+        return json.loads(printed.getvalue()) if printed.getvalue().strip() else None
+
+    return types.SimpleNamespace(head=head, run=run, log_dir=log_dir, path=hook)
